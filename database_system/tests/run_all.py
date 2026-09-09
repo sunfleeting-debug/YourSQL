@@ -17,6 +17,7 @@ SUITES = [
     "database_system.tests.test_storage",
     "database_system.tests.test_db",
     "database_system.tests.test_fuzz",
+    "database_system.tests.test_web",
 ]
 
 
