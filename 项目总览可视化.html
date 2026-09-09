@@ -1,0 +1,130 @@
+<html style="margin:0;padding:0;">
+<div style="background-color:transparent;box-sizing:border-box;font-family:'PingFang SC','Microsoft YaHei',Arial,sans-serif;color:#1A1B1C;max-width:860px;margin:0 auto;">
+
+  <!-- 标题区 -->
+  <div style="padding:8px 0 4px;">
+    <div style="font-size:16px;font-weight:600;">《大型平台软件设计实习》项目总览</div>
+    <div style="font-size:12px;color:#6B7280;margin-top:2px;">MiniSQL 小型数据库系统：从 SQL 语言到数据页的完整系统链路 · 依据指导书与课程 PPT 整理</div>
+  </div>
+
+  <!-- 第一部分：全链路数据流 -->
+  <div style="margin:14px 0 4px;font-size:13px;font-weight:600;color:#1A1B1C;">① 一条主线：SQL → 数据页</div>
+  <div style="display:flex;flex-wrap:wrap;align-items:stretch;gap:6px;margin:8px 0;">
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">SQL 文本</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">CREATE/INSERT<br/>SELECT/DELETE</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#9BBBF4;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">Token 流</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">[种别码,词素值,<br/>行号,列号]</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#9BBBF4;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">AST</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">四类语句节点<br/>+ 表达式节点</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#9BBBF4;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">语义检查</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">存在性 / 类型<br/>列数列序 + Catalog</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#9BBBF4;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">执行计划</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">SeqScan / Filter<br/>Project / Insert</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#9BBBF4;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">规则优化</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">常量折叠 / 布尔化简<br/>投影裁剪 等 2+ 条</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#F4B393;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#FDF0E8;border:1px solid #F4B393;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">执行引擎</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">CreateTable / Insert<br/>SeqScan / Filter / Project</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#94D8C3;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF8F2;border:1px solid #94D8C3;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">页缓存</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">Buffer Pool<br/>LRU / FIFO + 命中统计</div>
+    </div>
+    <div style="align-self:center;font-size:14px;color:#94D8C3;font-weight:700;">→</div>
+    <div style="flex:1 1 86px;min-width:86px;background:#EAF8F2;border:1px solid #94D8C3;border-radius:10px;padding:8px 6px;text-align:center;box-sizing:border-box;">
+      <div style="font-size:12px;font-weight:600;">数据页 / 磁盘</div>
+      <div style="font-size:10px;color:#6B7280;margin-top:2px;">4KB 固定页<br/>持久化 · 重启不丢</div>
+    </div>
+  </div>
+
+  <!-- 三模块说明 -->
+  <div style="margin:14px 0 4px;font-size:13px;font-weight:600;color:#1A1B1C;">② 三大模块（按序实现）</div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;">
+    <div style="flex:1 1 200px;min-width:200px;background:#EAF1FD;border:1px solid #9BBBF4;border-radius:12px;padding:10px 12px;box-sizing:border-box;">
+      <div style="font-size:13px;font-weight:600;color:#2B4C8C;">① SQL 编译器 · 编译原理</div>
+      <div style="font-size:11px;color:#444;margin-top:4px;line-height:1.6;">词法 → 语法(AST) → 语义(Catalog) → 执行计划，产出 grammar.md 与全链路错误定位</div>
+    </div>
+    <div style="flex:1 1 200px;min-width:200px;background:#EAF8F2;border:1px solid #94D8C3;border-radius:12px;padding:10px 12px;box-sizing:border-box;">
+      <div style="font-size:13px;font-weight:600;color:#1F6B52;">② 页式存储 · 操作系统</div>
+      <div style="font-size:11px;color:#444;margin-top:4px;line-height:1.6;">页分配/释放/读写，read_page / write_page，LRU / FIFO 缓存 + 命中统计与替换日志</div>
+    </div>
+    <div style="flex:1 1 200px;min-width:200px;background:#FDF0E8;border:1px solid #F4B393;border-radius:12px;padding:10px 12px;box-sizing:border-box;">
+      <div style="font-size:13px;font-weight:600;color:#8C4A1F;">③ 数据库系统 · 数据库</div>
+      <div style="font-size:11px;color:#444;margin-top:4px;line-height:1.6;">执行引擎 5 算子 + 存储引擎 Row↔Page + 系统目录特殊表 + CLI，数据持久化</div>
+    </div>
+  </div>
+
+  <!-- 第二部分：里程碑时间线 -->
+  <div style="margin:14px 0 4px;font-size:13px;font-weight:600;color:#1A1B1C;">③ 里程碑排期（建议 · 按每日 2~3 小时估算）</div>
+  <div style="background:#FFFFFF;border:1px solid #E4E3DD;border-radius:12px;padding:12px;margin:8px 0;box-sizing:border-box;">
+    <div style="display:flex;flex-wrap:wrap;gap:4px 0;">
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#9BBBF4;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M1 · D1-3</div>
+        <div style="font-size:10px;color:#6B7280;">规则 + 词法</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#9BBBF4;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M2 · D4-6</div>
+        <div style="font-size:10px;color:#6B7280;">语法 + AST</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#9BBBF4;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M3 · D7-8</div>
+        <div style="font-size:10px;color:#6B7280;">语义 + Catalog</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#9BBBF4;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M4 · D9-10</div>
+        <div style="font-size:10px;color:#6B7280;">Plan + 优化</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#94D8C3;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M5 · D11-13</div>
+        <div style="font-size:10px;color:#6B7280;">页存储 + 缓存</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#F4B393;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M6 · D14-16</div>
+        <div style="font-size:10px;color:#6B7280;">引擎 + 集成</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#F4B393;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M7 · D17-18</div>
+        <div style="font-size:10px;color:#6B7280;">测试完善</div>
+      </div>
+      <div style="flex:1 1 12%;min-width:88px;text-align:center;box-sizing:border-box;padding:4px 2px;">
+        <div style="width:12px;height:12px;border-radius:50%;background:#F4B393;margin:0 auto 4px;"></div>
+        <div style="font-size:11px;font-weight:600;">M8 · D19-21</div>
+        <div style="font-size:10px;color:#6B7280;">报告 + 答辩</div>
+      </div>
+    </div>
+    <div style="font-size:10px;color:#6B7280;margin-top:6px;border-top:1px dashed #E4E3DD;padding-top:6px;">排期为估算（约 3 周），起止日期以课程通知为准；每个里程碑有交付物与退出条件，Core → Advanced → Extension 依次推进。</div>
+  </div>
+
+  <!-- 验收要点 -->
+  <div style="margin:12px 0 0;font-size:12px;color:#444;line-height:1.7;background:#F4F3EE;border-radius:10px;padding:10px 12px;box-sizing:border-box;">
+    <b style="color:#1A1B1C;">验收 5 标准：</b>正确（流水线贯通）· 稳健（非法输入不崩溃、错误分阶段定位）· 可扩展（模块边界清晰）· 可优化（2+ 规则且可对比）· 可验证（自建测试 + 教师隐藏测试）。<b style="color:#1A1B1C;">AI 边界：</b>可用大模型生成骨架/补测试/调试，但文法设计、AST 定义、语义规则、Plan 解释与优化等价性必须自己掌握，现场随机讲解 + 改需求 + Debug 是硬门槛。
+  </div>
+
+</div>
+</html>

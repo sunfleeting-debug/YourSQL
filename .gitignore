@@ -1,0 +1,25 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- 数据库运行时文件（本地数据，不入库） ----------
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# ---------- 中间过程 / 临时 / 本地工作区 ----------
+.workbuddy/
+draft_*/
+.idea/
+.vscode/
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# ---------- 课程资料（非本项目实现代码） ----------
+项目目标/
