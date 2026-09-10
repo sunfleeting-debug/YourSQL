@@ -13,6 +13,53 @@ from database_system.engine.database import Database
 STATIC = Path(__file__).parent / "static"
 
 
+def pipeline_debug(result):
+    """把单条语句的编译流水线中间结果整理成 Web 调试视图。"""
+    stages = ("Lexer", "Parser", "Semantic", "Planner", "Optimizer", "Execute")
+    reached = {name: False for name in stages}
+    current = result.stage
+    if current in reached:
+        for name in stages[:stages.index(current) + 1]:
+            reached[name] = True
+    if not result.error and current == "Planner":
+        reached["Optimizer"] = True
+    if not result.error and current == "Execute":
+        for name in stages:
+            reached[name] = True
+
+    def status(name):
+        if result.error and name == current:
+            return "error"
+        if reached[name]:
+            return "passed"
+        return "skipped"
+
+    error = result.error.to_dict() if result.error else None
+    message = str(result.error) if result.error else result.message
+    return {
+        "lexer": {"status": status("Lexer"), "tokens": [t.to_dict() for t in result.tokens]},
+        "parser": {"status": status("Parser"), "ast": result.ast_tree},
+        "semantic": {
+            "status": status("Semantic"),
+            "message": message if status("Semantic") == "error" else "语义检查通过（名字绑定和类型检查已完成）。",
+        },
+        "planner": {"status": status("Planner"), "plan": result.plan_before},
+        "optimizer": {
+            "status": status("Optimizer"),
+            "plan": result.plan_after,
+            "sexpr": result.plan_sexpr,
+            "rules": result.rules,
+        },
+        "execute": {
+            "status": status("Execute"),
+            "columns": result.columns,
+            "rows": result.rows[:1000],
+            "message": message,
+        },
+        "error": error,
+    }
+
+
 def snapshot(db):
     return {
         "database": Path(db.path).name,
@@ -86,6 +133,8 @@ def make_server(db, port=8765):
                            "row_count": len(r.rows) if r.columns else 0,
                            "truncated": bool(r.columns and len(r.rows) > 1000),
                            "message": str(r.error) if r.error else r.message,
+                           "error": r.error.to_dict() if r.error else None,
+                           "debug": pipeline_debug(r),
                            "plan_before": r.plan_before, "plan_after": r.plan_after,
                            "rules": r.rules} for r in results]
                 self.json_response(200, {"results": output,
