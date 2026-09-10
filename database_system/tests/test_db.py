@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from database_system.engine.database import Database
 from database_system.engine.storage_engine import TableHeap
+from database_system.utils.errors import ExecutionError
 
 
 class DatabaseTestBase(unittest.TestCase):
@@ -184,6 +185,27 @@ class ScaleTest(DatabaseTestBase):
         self.db.execute("CREATE TABLE u(id INT);")
         # 释放的页被复用，文件不应无限增长
         self.assertLessEqual(self.db.disk.page_count, before + 1)
+
+    def test_single_frame_pool_can_extend_table(self):
+        db = Database(self.path, pool_size=1, policy="LRU")
+        db.execute("CREATE TABLE tiny(id INT, name VARCHAR(200));")
+        values = ",".join(f"({i},'{'x' * 200}')" for i in range(30))
+        result = db.execute(f"INSERT INTO tiny VALUES {values};")[0]
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(len(db.execute("SELECT * FROM tiny;")[0].rows), 30)
+        self.assertEqual(db.buffer.pinned_pages(), [])
+        db.close()
+
+    def test_page_chain_cycle_is_rejected(self):
+        self.db.execute("CREATE TABLE cycle(id INT);")
+        root = self.db.catalog.get_table("cycle").root_page_id
+        page = self.db.buffer.fetch_page(root)
+        page.next_page_id = root
+        self.db.buffer.unpin_page(root, True)
+
+        with self.assertRaises(ExecutionError):
+            TableHeap(self.db.buffer, root).page_count()
+        self.assertEqual(self.db.buffer.pinned_pages(), [])
 
 
 class ErrorStageTest(DatabaseTestBase):

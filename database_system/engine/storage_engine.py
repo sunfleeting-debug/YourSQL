@@ -51,18 +51,29 @@ class TableHeap:
         self.buffer = buffer
         self.first_page_id = first_page_id
 
+    @staticmethod
+    def _visit_page(page_id: int, visited: set[int]) -> None:
+        """检测页链环路，避免损坏链表导致扫描无限循环。"""
+        if page_id in visited:
+            raise ExecutionError(f"cycle detected in table page chain at page {page_id}")
+        visited.add(page_id)
+
     # ------------------------------ 写入 ------------------------------
 
     def insert_row(self, values: list) -> RowId:
         """写入一行，必要时扩展新页。"""
         data = encode_row(values)
         page_id = self.first_page_id
+        visited = set()
         while True:
+            self._visit_page(page_id, visited)
             page = self.buffer.fetch_page(page_id)
+            pinned = True
             try:
                 if page.can_insert(len(data)):
                     slot = page.insert_record(data)
                     self.buffer.unpin_page(page_id, True)
+                    pinned = False
                     return RowId(page_id, slot)
                 nxt = page.next_page_id
                 if nxt == INVALID_PAGE_ID:
@@ -70,23 +81,25 @@ class TableHeap:
                     new_id = self.buffer.new_page_unpinned(PageType.DATA)
                     page.next_page_id = new_id
                     self.buffer.unpin_page(page_id, True)
+                    pinned = False
                     page_id = new_id
                     continue
                 self.buffer.unpin_page(page_id, False)
+                pinned = False
                 page_id = nxt
-            except Exception:
-                try:
+            finally:
+                # 任何异常都不能把当前页面永久留在 pinned 状态。
+                if pinned:
                     self.buffer.unpin_page(page_id, True)
-                except Exception:
-                    pass
-                raise
 
     # ------------------------------ 读取 ------------------------------
 
     def iter_rows(self) -> Iterator:
         """迭代访问表的所有数据页（SeqScan 的物理基础）。"""
         page_id = self.first_page_id
+        visited = set()
         while page_id != INVALID_PAGE_ID:
+            self._visit_page(page_id, visited)
             page = self.buffer.fetch_page(page_id)
             try:
                 next_id = page.next_page_id
@@ -97,10 +110,7 @@ class TableHeap:
                         continue
                     yield RowId(page_id, slot), decode_row(record)
             finally:
-                try:
-                    self.buffer.unpin_page(page_id, False)
-                except Exception:
-                    pass
+                self.buffer.unpin_page(page_id, False)
             page_id = next_id
 
     def get_row(self, rid: RowId) -> Optional[list]:
@@ -126,11 +136,15 @@ class TableHeap:
     def page_ids(self) -> list:
         ids = []
         page_id = self.first_page_id
+        visited = set()
         while page_id != INVALID_PAGE_ID:
+            self._visit_page(page_id, visited)
             ids.append(page_id)
             page = self.buffer.fetch_page(page_id)
-            next_id = page.next_page_id
-            self.buffer.unpin_page(page_id, False)
+            try:
+                next_id = page.next_page_id
+            finally:
+                self.buffer.unpin_page(page_id, False)
             page_id = next_id
         return ids
 
@@ -144,10 +158,14 @@ class TableHeap:
         """释放表占用的全部页，返回释放页数。"""
         freed = 0
         page_id = self.first_page_id
+        visited = set()
         while page_id != INVALID_PAGE_ID:
+            self._visit_page(page_id, visited)
             page = self.buffer.fetch_page(page_id)
-            next_id = page.next_page_id
-            self.buffer.unpin_page(page_id, False)
+            try:
+                next_id = page.next_page_id
+            finally:
+                self.buffer.unpin_page(page_id, False)
             self.buffer.delete_page(page_id)
             freed += 1
             page_id = next_id

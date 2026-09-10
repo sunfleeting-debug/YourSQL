@@ -89,6 +89,31 @@ class PageTest(unittest.TestCase):
         self.assertEqual(page.free_pointer, PAGE_SIZE)
         self.assertEqual(HEADER_SIZE + SLOT_SIZE * page.num_slots, HEADER_SIZE)
 
+    def test_page_zero_is_not_a_valid_next_page(self):
+        page = Page(7)
+        page.init(PageType.DATA)
+        with self.assertRaises(StorageError):
+            page.next_page_id = 0
+
+        broken = bytearray(page.encode())
+        broken[2:6] = (0).to_bytes(4, "little", signed=True)
+        with self.assertRaises(StorageError):
+            Page.decode(bytes(broken), page_id=7)
+
+    def test_page_encode_decode_validates_layout(self):
+        page = Page(7)
+        page.init(PageType.DATA, 42)
+        page.insert_record(b"hello")
+        restored = Page.decode(page.encode(), page_id=7)
+        self.assertEqual(restored.page_id, 7)
+        self.assertEqual(restored.next_page_id, 42)
+        self.assertEqual(restored.get_record(0), b"hello")
+
+        broken = bytearray(page.encode())
+        broken[8:10] = (0).to_bytes(2, "little")
+        with self.assertRaises(StorageError):
+            Page.decode(bytes(broken), page_id=7)
+
 
 class RecordTest(unittest.TestCase):
     def test_round_trip(self):
@@ -146,6 +171,16 @@ class DiskManagerTest(unittest.TestCase):
         disk = DiskManager(self.path)
         with self.assertRaises(StorageError):
             disk.read_page(999)
+        disk.close()
+
+    def test_free_page_cannot_be_read_or_freed_twice(self):
+        disk = DiskManager(self.path)
+        page_id = disk.allocate_page()
+        disk.deallocate_page(page_id)
+        with self.assertRaises(StorageError):
+            disk.read_page(page_id)
+        with self.assertRaises(StorageError):
+            disk.deallocate_page(page_id)
         disk.close()
 
 
@@ -207,6 +242,28 @@ class BufferPoolTest(unittest.TestCase):
         buf.fetch_page(self.pages[0])           # 保持 pin
         with self.assertRaises(StorageError):
             buf.fetch_page(self.pages[1])
+
+    def test_invalid_fetch_does_not_evict_existing_page(self):
+        buf = BufferPoolManager(self.disk, pool_size=1)
+        page_id = self.pages[0]
+        buf.fetch_page(page_id)
+        buf.unpin_page(page_id)
+        with self.assertRaises(StorageError):
+            buf.fetch_page(999)
+        self.assertIn(page_id, buf.frames)
+        self.assertEqual(buf.stats.evictions, 0)
+
+    def test_delete_pinned_page_preserves_buffer_state(self):
+        buf = BufferPoolManager(self.disk, pool_size=1)
+        page_id = self.pages[0]
+        buf.fetch_page(page_id)
+        with self.assertRaises(StorageError):
+            buf.delete_page(page_id)
+        self.assertIn(page_id, buf.frames)
+        self.assertEqual(buf.frames[page_id].pin_count, 1)
+        buf.unpin_page(page_id)
+        buf.delete_page(page_id)
+        self.assertNotIn(page_id, buf.frames)
 
     def test_dirty_flush(self):
         buf = BufferPoolManager(self.disk, pool_size=2)

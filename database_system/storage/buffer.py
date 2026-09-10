@@ -19,6 +19,19 @@ from database_system.utils.constants import INVALID_PAGE_ID, PAGE_SIZE, PageType
 from database_system.utils.errors import StorageError
 
 
+class BoundedLog(list):
+    """兼容 list API 的有界日志，避免长期运行时无界增长。"""
+
+    def __init__(self, maxlen: int = 500):
+        super().__init__()
+        self.maxlen = maxlen
+
+    def append(self, item) -> None:
+        super().append(item)
+        if len(self) > self.maxlen:
+            del self[: len(self) - self.maxlen]
+
+
 # ============================ 替换器 ============================
 
 
@@ -144,7 +157,7 @@ class BufferPoolManager:
         self.policy = (policy or ReplacePolicy.LRU).upper()
         self.frames: dict = {}
         self.stats = BufferStats()
-        self.log: list = []
+        self.log: BoundedLog = BoundedLog()
         self.verbose = verbose
         self.replacer = LRUReplacer() if self.policy == ReplacePolicy.LRU else FIFOReplacer()
         if self.policy not in (ReplacePolicy.LRU, ReplacePolicy.FIFO):
@@ -163,11 +176,13 @@ class BufferPoolManager:
             return page
 
         self.stats.misses += 1
-        if len(self.frames) >= self.pool_size:
-            self._evict()
+        # 先读取并校验目标页，再淘汰已有帧。这样无效 page_id 不会
+        # 破坏当前缓存内容，也不会产生虚假的淘汰记录。
         data = self.disk.read_page(page_id)
         self.stats.disk_reads += 1
-        page = Page(page_id, data)
+        page = Page.decode(data, page_id=page_id)
+        if len(self.frames) >= self.pool_size:
+            self._evict()
         page.pin_count = 1
         self.frames[page_id] = page
         self.replacer.pin(page_id)
@@ -222,7 +237,31 @@ class BufferPoolManager:
         return page_id
 
     def new_page_unpinned(self, page_type: int = PageType.DATA) -> int:
-        """分配新页并立即归还 pin 引用（pin_count = 0），仅供「先拿页号」的场景。"""
+        """分配新页并立即归还 pin 引用。
+
+        正常情况下新页会进入缓冲池。若缓冲池容量为 1，且当前唯一页面仍
+        pinned（典型场景是表页扩展），无法先把新页放入缓存；此时直接把已
+        初始化的新页写入磁盘，调用方稍后通过 fetch_page 再加载它。这样不
+        破坏 pin 语义，也让单帧缓冲池能够支持多页表。
+        """
+        if len(self.frames) < self.pool_size:
+            page_id = self.new_page(page_type)
+            self.unpin_page(page_id, True)
+            return page_id
+
+        try:
+            self._evict()
+        except StorageError:
+            if not self.frames or not all(page.pin_count > 0 for page in self.frames.values()):
+                raise
+            page_id = self.disk.allocate_page()
+            page = Page(page_id)
+            page.init(page_type, INVALID_PAGE_ID)
+            self.disk.write_page(page_id, page.encode())
+            self.stats.disk_writes += 1
+            self._emit(f"NEW  page {page_id} (direct-to-disk, pool is pinned)")
+            return page_id
+
         page_id = self.new_page(page_type)
         self.unpin_page(page_id, True)
         return page_id
@@ -232,9 +271,7 @@ class BufferPoolManager:
         if page is None:
             return False
         if page.dirty:
-            self.disk.write_page(page_id, page.data)
-            page.dirty = False
-            self.stats.disk_writes += 1
+            self._write_back(page)
             self._emit(f"FLUSH page {page_id} -> disk")
         return True
 
@@ -248,12 +285,17 @@ class BufferPoolManager:
 
     def delete_page(self, page_id: int) -> None:
         """从缓冲区移除并归还给磁盘空间管理。"""
-        if page_id in self.frames:
-            page = self.frames.pop(page_id)
-            if page.pin_count > 0:
-                raise StorageError(f"cannot delete pinned page {page_id}")
-        self.replacer.remove(page_id)
+        # 先检查所有前置条件，再修改 frames/replacer，避免失败操作破坏状态。
+        self.disk.validate_page(page_id)
+        page = self.frames.get(page_id)
+        if page is not None and page.pin_count > 0:
+            raise StorageError(f"cannot delete pinned page {page_id}")
+
+        # 先完成磁盘回收，再修改内存索引。若磁盘操作失败，缓冲池仍保持可用。
         self.disk.deallocate_page(page_id)
+        if page is not None:
+            self.frames.pop(page_id)
+        self.replacer.remove(page_id)
         self._emit(f"FREE page {page_id} -> returned to free list")
 
     # ------------------------------ 内部 ------------------------------
@@ -267,14 +309,21 @@ class BufferPoolManager:
                 break
         if victim is None:
             raise StorageError("buffer pool is full: all frames are pinned")
-        self.replacer.remove(victim)
-        page = self.frames.pop(victim)
+        page = self.frames[victim]
         reason = "dirty, write back" if page.dirty else "clean, discard"
         if page.dirty:
-            self.disk.write_page(page.page_id, page.data)
-            self.stats.disk_writes += 1
+            # 写回失败时保留 frame 和 replacer 状态，下一次仍可重试。
+            self._write_back(page)
+        self.replacer.remove(victim)
+        self.frames.pop(victim)
         self.stats.evictions += 1
         self._emit(f"EVICT page {victim} ({self.policy}, {reason})")
+
+    def _write_back(self, page: Page) -> None:
+        """统一执行页校验、写盘、dirty 清除和写盘统计。"""
+        self.disk.write_page(page.page_id, page.encode())
+        page.dirty = False
+        self.stats.disk_writes += 1
 
     def _emit(self, message: str) -> None:
         self.log.append(message)
