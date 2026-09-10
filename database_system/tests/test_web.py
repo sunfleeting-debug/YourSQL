@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from database_system.engine.database import Database
-from database_system.web.server import make_server
+from database_system.web.server import STATIC, make_server
 
 
 class WorkbenchTest(unittest.TestCase):
@@ -75,6 +75,22 @@ class WorkbenchTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             urlopen(Request(self.url + "/api/state", headers={"Host": "example.com"}), timeout=5)
         self.assertEqual(error.exception.code, 403)
+
+    def test_frontend_demo_case_picker(self):
+        html = (STATIC / "index.html").read_text(encoding="utf-8")
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="test-case"', html)
+        self.assertIn('id="results-panel"', html)
+        self.assertIn('id="toggle-results"', html)
+        self.assertIn('id="results-resize-handle"', html)
+        self.assertIn("setResultsDrawer", script)
+        self.assertIn("resizeResults", script)
+        for case_id in (
+            "crud", "types", "query", "plan", "error_lexer",
+            "error_syntax", "error_semantic", "error_type", "lifecycle",
+        ):
+            self.assertIn(f'value="{case_id}"', html)
+            self.assertIn(f"{case_id}:{{name:", script)
 
 
 if __name__ == "__main__":
