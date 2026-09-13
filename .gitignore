@@ -11,13 +11,21 @@ venv/
 *.db-shm
 data/
 
-# ---------- 中间过程 / 临时 / 本地工作区 ----------
+# ---------- AI Agent / 工具工作区 ----------
+.pi/
 .workbuddy/
 draft_*/
+
+# ---------- 前端依赖与构建产物 ----------
+node_modules/
+dist/
+
+# ---------- 中间过程 / 临时 / 本地工作区 ----------
 .idea/
 .vscode/
 *.tmp
 *.log
+*.bak
 .DS_Store
 Thumbs.db
 
