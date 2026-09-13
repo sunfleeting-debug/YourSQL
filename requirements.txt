@@ -1,3 +1,5 @@
 pytest>=8.0
 pytest-benchmark>=5.0
 benchbox==0.4.0
+# 仅 benchmarks/compare_tpch_q6.py 的多引擎对照需要；有 Windows 轮子。
+duckdb>=1.5

@@ -1,0 +1,742 @@
+{
+  "benchmark": "TPC-H",
+  "scale_factor": 0.01,
+  "queries": [
+    "Q1",
+    "Q3",
+    "Q5",
+    "Q6",
+    "Q10",
+    "Q16",
+    "Q18",
+    "Q19"
+  ],
+  "coverage_note": "YourSQL 当前可编译 8/22 条 TPC-H 查询；其余 14 条缺少的特性（派生表/CTE/CASE WHEN/子查询表达式）尚未实现，故不在本批对标内。",
+  "value_notes": {
+    "Q6": "三引擎数据与 1994 年折扣分布逐值相同；样本差异来自十进制字面量 0.06 ± 0.01 的求值口径：SQLite/YourSQL 得到二进制浮点 0.06999999999999999，丢掉 l_discount = 0.07 的行（837 行），DuckDB 得到精确 0.07。按 TPC-H 的 DECIMAL 语义 DuckDB 才是正确答案；YourSQL 与 SQLite 一致。根因是 YourSQL 的 DECIMAL 目前是浮点实现，未提供定点语义。"
+  },
+  "loaded_rows": {
+    "yoursql": {
+      "region": 5,
+      "nation": 25,
+      "supplier": 100,
+      "customer": 1500,
+      "part": 2000,
+      "partsupp": 8000,
+      "orders": 15000,
+      "lineitem": 60175
+    },
+    "sqlite": {
+      "region": 5,
+      "nation": 25,
+      "supplier": 100,
+      "customer": 1500,
+      "part": 2000,
+      "partsupp": 8000,
+      "orders": 15000,
+      "lineitem": 60175
+    },
+    "duckdb": {
+      "region": 5,
+      "nation": 25,
+      "supplier": 100,
+      "customer": 1500,
+      "part": 2000,
+      "partsupp": 8000,
+      "orders": 15000,
+      "lineitem": 60175
+    }
+  },
+  "load_seconds": {
+    "yoursql": 2.759485399990808,
+    "sqlite": 0.8668903000070713,
+    "duckdb": 0.4954721000394784
+  },
+  "measurements": [
+    {
+      "query": "Q1",
+      "yoursql": {
+        "query": "Q1",
+        "status": "OK",
+        "rows": 4,
+        "operator": "SeqScan",
+        "joins": [],
+        "first_seconds": 1.095640999963507,
+        "times_seconds": [
+          1.2317863999633119,
+          1.0538718000170775,
+          1.121382999990601
+        ],
+        "mean_seconds": 1.1356803999903302,
+        "median_seconds": 1.121382999990601,
+        "min_seconds": 1.0538718000170775,
+        "sample": [
+          [
+            "A",
+            "F",
+            "380456.0",
+            "532348211.65",
+            "505822441.4861",
+            "526165934.000839",
+            "25.575154611454693",
+            "35785.709306937344",
+            "0.05008133906964238",
+            "14876"
+          ],
+          [
+            "N",
+            "F",
+            "8971.0",
+            "12384801.37",
+            "11798257.208",
+            "12282485.056933",
+            "25.778735632183906",
+            "35588.50968390804",
+            "0.047758620689655175",
+            "348"
+          ],
+          [
+            "N",
+            "O",
+            "742802.0",
+            "1041502841.45",
+            "989737518.6346",
+            "1029418531.52335",
+            "25.45498783454988",
+            "35691.1292090744",
+            "0.04993111956409993",
+            "29181"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 4,
+        "mean_seconds": 0.04894090003411596,
+        "min_seconds": 0.047606300038751215,
+        "sample": [
+          [
+            "A",
+            "F",
+            "380456.0",
+            "532348211.65",
+            "505822441.4861",
+            "526165934.000839",
+            "25.575154611454693",
+            "35785.709306937344",
+            "0.05008133906964238",
+            "14876"
+          ],
+          [
+            "N",
+            "F",
+            "8971.0",
+            "12384801.37",
+            "11798257.208",
+            "12282485.056933",
+            "25.778735632183906",
+            "35588.50968390804",
+            "0.047758620689655175",
+            "348"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 4,
+        "mean_seconds": 0.004357333333852391,
+        "min_seconds": 0.00396030000410974,
+        "sample": [
+          [
+            "A",
+            "F",
+            "380456.00",
+            "532348211.65",
+            "505822441.4861",
+            "526165934.000839",
+            "25.575154611454693",
+            "35785.70930693735",
+            "0.05008133906964238",
+            "14876"
+          ],
+          [
+            "N",
+            "F",
+            "8971.00",
+            "12384801.37",
+            "11798257.2080",
+            "12282485.056933",
+            "25.778735632183906",
+            "35588.50968390804",
+            "0.047758620689655175",
+            "348"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    },
+    {
+      "query": "Q3",
+      "yoursql": {
+        "query": "Q3",
+        "status": "OK",
+        "rows": 10,
+        "operator": "SeqScan",
+        "joins": [
+          "HashJoin",
+          "HashJoin"
+        ],
+        "first_seconds": 0.5426959000178613,
+        "times_seconds": [
+          0.523107799992431,
+          0.5067851999774575,
+          0.5621547999908216
+        ],
+        "mean_seconds": 0.5306825999869034,
+        "median_seconds": 0.523107799992431,
+        "min_seconds": 0.5067851999774575,
+        "sample": [
+          [
+            "47714",
+            "267010.5894",
+            "1995-03-11",
+            "0"
+          ],
+          [
+            "22276",
+            "266351.5562",
+            "1995-01-29",
+            "0"
+          ],
+          [
+            "32965",
+            "263768.3414",
+            "1995-02-25",
+            "0"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 10,
+        "mean_seconds": 0.027394399997623015,
+        "min_seconds": 0.026740600005723536,
+        "sample": [
+          [
+            "47714",
+            "267010.5894",
+            "1995-03-11",
+            "0"
+          ],
+          [
+            "22276",
+            "266351.5562",
+            "1995-01-29",
+            "0"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 10,
+        "mean_seconds": 0.006139933345063279,
+        "min_seconds": 0.00560490001225844,
+        "sample": [
+          [
+            "47714",
+            "267010.5894",
+            "1995-03-11",
+            "0"
+          ],
+          [
+            "22276",
+            "266351.5562",
+            "1995-01-29",
+            "0"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    },
+    {
+      "query": "Q5",
+      "yoursql": {
+        "query": "Q5",
+        "status": "OK",
+        "rows": 5,
+        "operator": "SeqScan",
+        "joins": [
+          "HashJoin",
+          "HashJoin",
+          "HashJoin",
+          "HashJoin",
+          "HashJoin"
+        ],
+        "first_seconds": 0.6968924999819137,
+        "times_seconds": [
+          0.6492591999704018,
+          0.6544567000237294,
+          0.6294112000032328
+        ],
+        "mean_seconds": 0.6443756999991214,
+        "median_seconds": 0.6492591999704018,
+        "min_seconds": 0.6294112000032328,
+        "sample": [
+          [
+            "VIETNAM",
+            "1000926.6999"
+          ],
+          [
+            "CHINA",
+            "740210.757"
+          ],
+          [
+            "JAPAN",
+            "660651.2424999999"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 5,
+        "mean_seconds": 0.11013383332950373,
+        "min_seconds": 0.10751950001576915,
+        "sample": [
+          [
+            "VIETNAM",
+            "1000926.6999"
+          ],
+          [
+            "CHINA",
+            "740210.757"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 5,
+        "mean_seconds": 0.006076466660791387,
+        "min_seconds": 0.005613300018012524,
+        "sample": [
+          [
+            "VIETNAM",
+            "1000926.6999"
+          ],
+          [
+            "CHINA",
+            "740210.7570"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    },
+    {
+      "query": "Q6",
+      "yoursql": {
+        "query": "Q6",
+        "status": "OK",
+        "rows": 1,
+        "operator": "SeqScan",
+        "joins": [],
+        "first_seconds": 0.33083489997079596,
+        "times_seconds": [
+          0.34375910001108423,
+          0.34305800002766773,
+          0.3364128000102937
+        ],
+        "mean_seconds": 0.3410766333496819,
+        "median_seconds": 0.34305800002766773,
+        "min_seconds": 0.3364128000102937,
+        "sample": [
+          [
+            "734493.7281"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 1,
+        "mean_seconds": 0.009742933325469494,
+        "min_seconds": 0.009260399965569377,
+        "sample": [
+          [
+            "734493.7281"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 1,
+        "mean_seconds": 0.0010356333417197068,
+        "min_seconds": 0.0009488000068813562,
+        "sample": [
+          [
+            "1193053.2253"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": false
+      }
+    },
+    {
+      "query": "Q10",
+      "yoursql": {
+        "query": "Q10",
+        "status": "OK",
+        "rows": 20,
+        "operator": "SeqScan",
+        "joins": [
+          "HashJoin",
+          "HashJoin",
+          "HashJoin"
+        ],
+        "first_seconds": 0.4393019999843091,
+        "times_seconds": [
+          0.43467609997605905,
+          0.43149749998701736,
+          0.45759790000738576
+        ],
+        "mean_seconds": 0.44125716665682074,
+        "median_seconds": 0.43467609997605905,
+        "min_seconds": 0.43149749998701736,
+        "sample": [
+          [
+            "679",
+            "Customer#000000679",
+            "378211.32519999996",
+            "1394.44",
+            "IRAN",
+            "IJf1FlZL9I9m,rvofcoKy5pRUOjUQV",
+            "20-146-696-9508",
+            "ely pending frays boost carefully"
+          ],
+          [
+            "1201",
+            "Customer#000001201",
+            "374331.534",
+            "5165.39",
+            "IRAN",
+            "LfCSVKWozyWOGDW02g9UX,XgH5YU2o5ql1zBrN",
+            "20-825-400-1187",
+            "lyly pending packages. special requests sleep-- platelets use blithely after the instructions. sometimes even id"
+          ],
+          [
+            "422",
+            "Customer#000000422",
+            "366451.0126",
+            "-272.14",
+            "INDONESIA",
+            "AyNzZBvmIDo42JtjP9xzaK3pnvkh Qc0o08ssnvq",
+            "19-299-247-2444",
+            "eposits; furiously ironic packages accordi"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 20,
+        "mean_seconds": 0.014064866680807123,
+        "min_seconds": 0.01341890002368018,
+        "sample": [
+          [
+            "679",
+            "Customer#000000679",
+            "378211.32519999996",
+            "1394.44",
+            "IRAN",
+            "IJf1FlZL9I9m,rvofcoKy5pRUOjUQV",
+            "20-146-696-9508",
+            "ely pending frays boost carefully"
+          ],
+          [
+            "1201",
+            "Customer#000001201",
+            "374331.534",
+            "5165.39",
+            "IRAN",
+            "LfCSVKWozyWOGDW02g9UX,XgH5YU2o5ql1zBrN",
+            "20-825-400-1187",
+            "lyly pending packages. special requests sleep-- platelets use blithely after the instructions. sometimes even id"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 20,
+        "mean_seconds": 0.01468896665998424,
+        "min_seconds": 0.013778600026853383,
+        "sample": [
+          [
+            "679",
+            "Customer#000000679",
+            "378211.3252",
+            "1394.44",
+            "IRAN",
+            "IJf1FlZL9I9m,rvofcoKy5pRUOjUQV",
+            "20-146-696-9508",
+            "ely pending frays boost carefully"
+          ],
+          [
+            "1201",
+            "Customer#000001201",
+            "374331.5340",
+            "5165.39",
+            "IRAN",
+            "LfCSVKWozyWOGDW02g9UX,XgH5YU2o5ql1zBrN",
+            "20-825-400-1187",
+            "lyly pending packages. special requests sleep-- platelets use blithely after the instructions. sometimes even id"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    },
+    {
+      "query": "Q16",
+      "yoursql": {
+        "query": "Q16",
+        "status": "OK",
+        "rows": 296,
+        "operator": "SeqScan",
+        "joins": [
+          "HashJoin"
+        ],
+        "first_seconds": 0.06878829997731373,
+        "times_seconds": [
+          0.06719859997974709,
+          0.09139459999278188,
+          0.06766170001355931
+        ],
+        "mean_seconds": 0.07541829999536276,
+        "median_seconds": 0.06766170001355931,
+        "min_seconds": 0.06719859997974709,
+        "sample": [
+          [
+            "Brand#14",
+            "PROMO BRUSHED STEEL",
+            "9",
+            "8"
+          ],
+          [
+            "Brand#35",
+            "SMALL POLISHED COPPER",
+            "14",
+            "8"
+          ],
+          [
+            "Brand#22",
+            "LARGE BURNISHED TIN",
+            "36",
+            "6"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 296,
+        "mean_seconds": 0.003469600031773249,
+        "min_seconds": 0.0033074000384658575,
+        "sample": [
+          [
+            "Brand#14",
+            "PROMO BRUSHED STEEL",
+            "9",
+            "8"
+          ],
+          [
+            "Brand#35",
+            "SMALL POLISHED COPPER",
+            "14",
+            "8"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 296,
+        "mean_seconds": 0.012381833337713033,
+        "min_seconds": 0.010889700031839311,
+        "sample": [
+          [
+            "Brand#14",
+            "PROMO BRUSHED STEEL",
+            "9",
+            "8"
+          ],
+          [
+            "Brand#35",
+            "SMALL POLISHED COPPER",
+            "14",
+            "8"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    },
+    {
+      "query": "Q18",
+      "yoursql": {
+        "query": "Q18",
+        "status": "OK",
+        "rows": 2,
+        "operator": "SeqScan",
+        "joins": [
+          "HashJoin",
+          "HashJoin"
+        ],
+        "first_seconds": 1.4967455999576487,
+        "times_seconds": [
+          1.500626499997452,
+          1.4500740999937989,
+          1.4610336999758147
+        ],
+        "mean_seconds": 1.470578099989022,
+        "median_seconds": 1.4610336999758147,
+        "min_seconds": 1.4500740999937989,
+        "sample": [
+          [
+            "Customer#000000667",
+            "667",
+            "29158",
+            "1995-10-21",
+            "439687.23",
+            "305.0"
+          ],
+          [
+            "Customer#000000178",
+            "178",
+            "6882",
+            "1997-04-09",
+            "422359.65",
+            "303.0"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 2,
+        "mean_seconds": 0.04040693332596371,
+        "min_seconds": 0.039430900011211634,
+        "sample": [
+          [
+            "Customer#000000667",
+            "667",
+            "29158",
+            "1995-10-21",
+            "439687.23",
+            "305.0"
+          ],
+          [
+            "Customer#000000178",
+            "178",
+            "6882",
+            "1997-04-09",
+            "422359.65",
+            "303.0"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 2,
+        "mean_seconds": 0.007826799992471933,
+        "min_seconds": 0.0067414999939501286,
+        "sample": [
+          [
+            "Customer#000000667",
+            "667",
+            "29158",
+            "1995-10-21",
+            "439687.23",
+            "305.00"
+          ],
+          [
+            "Customer#000000178",
+            "178",
+            "6882",
+            "1997-04-09",
+            "422359.65",
+            "303.00"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    },
+    {
+      "query": "Q19",
+      "yoursql": {
+        "query": "Q19",
+        "status": "OK",
+        "rows": 1,
+        "operator": "SeqScan",
+        "joins": [
+          "HashJoin"
+        ],
+        "first_seconds": 1.2031534999841824,
+        "times_seconds": [
+          1.2106474000029266,
+          1.1893926999764517,
+          1.249661499983631
+        ],
+        "mean_seconds": 1.2165671999876697,
+        "median_seconds": 1.2106474000029266,
+        "min_seconds": 1.1893926999764517,
+        "sample": [
+          [
+            "22923.028"
+          ]
+        ]
+      },
+      "sqlite": {
+        "status": "OK",
+        "rows": 1,
+        "mean_seconds": 6.6528472999925725,
+        "min_seconds": 6.519121599965729,
+        "sample": [
+          [
+            "22923.028"
+          ]
+        ]
+      },
+      "duckdb": {
+        "status": "OK",
+        "rows": 1,
+        "mean_seconds": 0.00337559999510025,
+        "min_seconds": 0.0032396999886259437,
+        "sample": [
+          [
+            "22923.0280"
+          ]
+        ]
+      },
+      "sample_match": {
+        "yoursql": true,
+        "duckdb": true
+      }
+    }
+  ],
+  "environment": {
+    "python": "3.12.13 (main, Mar  3 2026, 15:01:35) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26100-SP0"
+  },
+  "scope_note": "TPC-H SF0.01 子集实验，不宣称官方 QphH@Size 成绩。"
+}

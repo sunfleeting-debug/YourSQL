@@ -1,0 +1,131 @@
+{
+  "status": "PASS",
+  "benchmark": "TPC-H",
+  "query_id": "Q6",
+  "scale_factor": 0.01,
+  "data_source": "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\lineitem.tbl",
+  "method": "各引擎装载同一份 lineitem.tbl，预热 1 次、静置后计时；仅统计查询耗时，装载单独记录",
+  "semantics_note": "TPC-H Q6 折扣谓词在两套数值语义下命中行数不同：DuckDB 默认把字面量 `0.06 ± 0.01` 精确折叠为 DECIMAL 0.05/0.07，多命中 l_discount = 0.07 的 391 行；SQLite/YourSQL 用 IEEE double 得到 0.06999999999999999 会排除这些行。同语义组已给 DuckDB 加显式 DOUBLE 转换，DECIMAL 变体仅作参考。",
+  "engines": [
+    {
+      "engine": "SQLite（文件库）",
+      "version": "3.50.4",
+      "semantics": "double",
+      "storage": "行存 · 8KB 默认页（本查询无索引）",
+      "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
+      "rows_loaded": 60175,
+      "load_seconds": 0.6656350999837741,
+      "settle_seconds": 5.0,
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        0.008840500027872622,
+        0.00931049999780953,
+        0.009094599983654916,
+        0.009122800023760647,
+        0.008244099968578666
+      ],
+      "mean_seconds": 0.008922500000335277,
+      "median_seconds": 0.009094599983654916,
+      "min_seconds": 0.008244099968578666,
+      "result": [
+        [
+          734493.7281
+        ]
+      ],
+      "rows_returned": 1
+    },
+    {
+      "engine": "SQLite（内存库）",
+      "version": "3.50.4",
+      "semantics": "double",
+      "storage": "行存 · 8KB 默认页（本查询无索引）",
+      "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
+      "rows_loaded": 60175,
+      "load_seconds": 0.467886800004635,
+      "settle_seconds": 5.0,
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        0.004795900022145361,
+        0.004657500016037375,
+        0.004590299970004708,
+        0.004658700025174767,
+        0.004683700040914118
+      ],
+      "mean_seconds": 0.004677220014855266,
+      "median_seconds": 0.004658700025174767,
+      "min_seconds": 0.004590299970004708,
+      "result": [
+        [
+          734493.7281
+        ]
+      ],
+      "rows_returned": 1
+    },
+    {
+      "engine": "DuckDB（DOUBLE 列）",
+      "version": "1.5.5",
+      "semantics": "double",
+      "storage": "列存 · 向量化 OLAP",
+      "query_note": "DuckDB 默认按 DECIMAL 精确折叠折扣常量，这里显式转 DOUBLE 以对齐 SQLite/YourSQL 的 IEEE double 语义",
+      "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE '1995-01-01' AND \"l_discount\" BETWEEN CAST(0.06 AS DOUBLE) - CAST(0.01 AS DOUBLE) AND CAST(0.06 AS DOUBLE) + CAST(0.01 AS DOUBLE) AND \"l_quantity\" < 24",
+      "rows_loaded": 60175,
+      "load_seconds": 0.1738169000018388,
+      "settle_seconds": 5.0,
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        0.0017400000360794365,
+        0.0015297000063583255,
+        0.0010444000363349915,
+        0.0013728999765589833,
+        0.0017822000081650913
+      ],
+      "mean_seconds": 0.0014938400126993656,
+      "median_seconds": 0.0015297000063583255,
+      "min_seconds": 0.0010444000363349915,
+      "result": [
+        [
+          734493.728099999
+        ]
+      ],
+      "rows_returned": 1
+    },
+    {
+      "engine": "DuckDB（DECIMAL 列）",
+      "version": "1.5.5",
+      "semantics": "decimal",
+      "storage": "列存 · 向量化 OLAP",
+      "query_note": "保留 DECIMAL 精确折叠，仅作参考",
+      "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE '1995-01-01' AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
+      "rows_loaded": 60175,
+      "load_seconds": 0.190926400013268,
+      "settle_seconds": 5.0,
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        0.001374000043142587,
+        0.0009204000234603882,
+        0.0013321000151336193,
+        0.0013043999788351357,
+        0.0012734999763779342
+      ],
+      "mean_seconds": 0.0012408800073899328,
+      "median_seconds": 0.0013043999788351357,
+      "min_seconds": 0.0009204000234603882,
+      "result": [
+        [
+          1193053.2253
+        ]
+      ],
+      "rows_returned": 1
+    }
+  ],
+  "environment": {
+    "python": "3.12.13 (main, Mar  3 2026, 15:01:35) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26100-SP0",
+    "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel"
+  },
+  "scope_note": "这是 BenchBox/TPC-H Q6 子集实验，不宣称完整 TPC-H QphH@Size 成绩；YourSQL 为行存 + 逐行 Python 求值，DuckDB 为列存向量化引擎，两者定位不同，仅作数量级参照。"
+}
