@@ -45,7 +45,8 @@ CLI / Python API / HTTP / SSH stdio
 ```powershell
 & '.venv\Scripts\python.exe' -m pytest -q
 & '.venv\Scripts\python.exe' -m benchmarks.run_benchbox_tpch --iterations 5 --force
+& '.venv\Scripts\python.exe' -m benchmarks.compare_tpch_q6 --iterations 5
 & '.venv\Scripts\python.exe' -m yoursql.cli --database data/showcase_v2.db --sql "SHOW TABLES; SHOW VIEWS;"
 ```
 
-单元测试使用临时目录。第三方 benchmark 的 TPC-H 数据与数据库写入 `benchmarks/third_party/`、`benchmarks/results/`，跑分摘要写入 `benchmarks/reports/tpch_sf001_q6.json`；前两者不会进入源码提交。
+单元测试使用临时目录。第三方 benchmark 的 TPC-H 数据与数据库写入 `benchmarks/third_party/`、`benchmarks/results/`，跑分摘要写入 `benchmarks/reports/tpch_sf001_q6.json`（BenchBox 适配器口径）与 `benchmarks/reports/tpch_sf001_q6_engines.json`（SQLite/DuckDB 对照，裸 `execute()` 口径）；前两者不会进入源码提交。

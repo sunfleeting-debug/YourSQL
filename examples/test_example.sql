@@ -26,3 +26,19 @@ FROM employees AS e
 JOIN departments AS d ON e.department_id = d.id
 WHERE e.active = TRUE AND d.id = 1
 ORDER BY e.id;
+
+-- 逗号连接：连接条件在 WHERE 里，优化器从中推断等值键（否则退化为笛卡尔积）。
+-- 结果与上面的显式 JOIN 写法一致，访问路径断言见 tests/test_join_strategies.py。
+SELECT e.id, d.name
+FROM employees AS e, departments AS d
+WHERE e.department_id = d.id
+ORDER BY e.id;
+
+-- OR 分支里的连接键：取所有分支共同要求的等式建哈希表，OR 整体仍作为残余谓词生效。
+SELECT e.id, d.name
+FROM employees AS e, departments AS d
+WHERE (e.department_id = d.id AND d.id = 1) OR (e.department_id = d.id AND d.id = 2)
+ORDER BY e.id;
+
+-- 不相关 IN 子查询：只执行一次并复用结果（相关子查询仍逐行执行）。
+SELECT id FROM employees WHERE department_id IN (SELECT id FROM departments) ORDER BY id;
