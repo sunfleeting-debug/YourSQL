@@ -19,19 +19,26 @@ export function useStorageTooltip() {
       text,
       left: Math.max(12, Math.min(window.innerWidth - 12, rect.left + rect.width / 2)),
       top: placement === 'top' ? rect.top - 8 : rect.bottom + 8,
-      placement,
+      placement
     })
   }, [])
-  const tooltipProps = useCallback((text: string) => ({
-    onPointerEnter: (event: PointerEvent<HTMLElement>) => showTooltip(text, event.currentTarget),
-    onPointerLeave: hideTooltip,
-    onFocus: (event: FocusEvent<HTMLElement>) => showTooltip(text, event.currentTarget),
-    onBlur: hideTooltip,
-  }), [hideTooltip, showTooltip])
-  return {tooltip, tooltipProps}
+  const tooltipProps = useCallback(
+    (text: string) => ({
+      onPointerEnter: (event: PointerEvent<HTMLElement>) => showTooltip(text, event.currentTarget),
+      onPointerLeave: hideTooltip,
+      onFocus: (event: FocusEvent<HTMLElement>) => showTooltip(text, event.currentTarget),
+      onBlur: hideTooltip
+    }),
+    [hideTooltip, showTooltip]
+  )
+  return { tooltip, tooltipProps }
 }
 
-export function StorageTooltip({tooltip}: {tooltip: StorageTooltipState | null}) {
+export function StorageTooltip({ tooltip }: { tooltip: StorageTooltipState | null }) {
   if (!tooltip) return null
-  return <div className={`storage-tooltip ${tooltip.placement}`} role="tooltip" style={{left: tooltip.left, top: tooltip.top}}>{tooltip.text}</div>
+  return (
+    <div className={`storage-tooltip ${tooltip.placement}`} role="tooltip" style={{ left: tooltip.left, top: tooltip.top }}>
+      {tooltip.text}
+    </div>
+  )
 }

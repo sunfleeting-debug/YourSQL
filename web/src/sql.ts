@@ -1,24 +1,47 @@
 /** 编辑器语句分隔；字符串、引用名和注释规则与后端 Lexer 对齐。 */
-export interface StatementRange {from: number; to: number}
+export interface StatementRange {
+  from: number
+  to: number
+}
 export function statements(sql: string): StatementRange[] {
   const ranges: StatementRange[] = []
-  let start = 0, quote = '', comment = '', meaningful = false
+  let start = 0,
+    quote = '',
+    comment = '',
+    meaningful = false
   for (let index = 0; index < sql.length; index++) {
-    const char = sql[index], pair = sql.slice(index, index + 2)
-    if (comment === 'line') {if ('\r\n'.includes(char)) comment = ''}
-    else if (comment === 'block') {if (pair === '*/') {comment = ''; index++}}
-    else if (quote) {
+    const char = sql[index],
+      pair = sql.slice(index, index + 2)
+    if (comment === 'line') {
+      if ('\r\n'.includes(char)) comment = ''
+    } else if (comment === 'block') {
+      if (pair === '*/') {
+        comment = ''
+        index++
+      }
+    } else if (quote) {
       if (char === '\\' && quote === "'") index++
-      else if (char === quote) {if (sql[index + 1] === quote) index++; else quote = ''}
-    } else if (pair === '--' || pair === '/*') {comment = pair === '--' ? 'line' : 'block'; index++}
-    else if ("'\"`".includes(char)) {quote = char; meaningful = true}
-    else if (char === ';') {
-      if (meaningful) ranges.push({from: start, to: index + 1})
-      start = index + 1; meaningful = false
+      else if (char === quote) {
+        if (sql[index + 1] === quote) index++
+        else quote = ''
+      }
+    } else if (pair === '--' || pair === '/*') {
+      comment = pair === '--' ? 'line' : 'block'
+      index++
+    } else if ('\'"`'.includes(char)) {
+      quote = char
+      meaningful = true
+    } else if (char === ';') {
+      if (meaningful) ranges.push({ from: start, to: index + 1 })
+      start = index + 1
+      meaningful = false
     } else if (!/\s/.test(char)) meaningful = true
   }
-  if (meaningful || comment === 'block') ranges.push({from: start, to: sql.length})
-  return ranges.map(range => ({...range, from: range.from + (sql.slice(range.from, range.to).match(/^\s*/)?.[0].length ?? 0)}))
+  if (meaningful || comment === 'block') ranges.push({ from: start, to: sql.length })
+  return ranges.map(range => ({
+    ...range,
+    from: range.from + (sql.slice(range.from, range.to).match(/^\s*/)?.[0].length ?? 0)
+  }))
 }
 
 export function currentStatement(sql: string, cursor: number): StatementRange | undefined {
@@ -29,12 +52,18 @@ export function currentStatement(sql: string, cursor: number): StatementRange | 
 /** 仅格式化词间空白；字符串、引用标识符和注释必须逐字保持。 */
 export function formatSQL(sql: string, keywords: string[]): string {
   const known = new Set(keywords.map(word => word.toUpperCase()))
-  const tokens = sql.match(/--[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/|'(?:''|\\[\s\S]|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\s+|[A-Za-z_][A-Za-z0-9_$]*|[^\s]/g) ?? []
-  let result = '', depth = 0
+  const tokens =
+    sql.match(/--[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/|'(?:''|\\[\s\S]|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\s+|[A-Za-z_][A-Za-z0-9_$]*|[^\s]/g) ?? []
+  let result = '',
+    depth = 0
   const breaks = new Set(['SELECT', 'FROM', 'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'VALUES', 'SET', 'UNION'])
   for (const token of tokens) {
-    if (/^\s+$/.test(token)) {if (result && !/\s$/.test(result)) result += ' '; continue}
-    const upper = token.toUpperCase(), word = known.has(upper) ? upper : token
+    if (/^\s+$/.test(token)) {
+      if (result && !/\s$/.test(result)) result += ' '
+      continue
+    }
+    const upper = token.toUpperCase(),
+      word = known.has(upper) ? upper : token
     if (token === '(') depth++
     if (token === ')') depth--
     if (breaks.has(upper) && depth === 0 && result.trim()) result = result.trimEnd() + '\n'
@@ -45,7 +74,9 @@ export function formatSQL(sql: string, keywords: string[]): string {
   return result.trim()
 }
 
-export function quoteName(name: string): string {return '`' + name.replaceAll('`', '``') + '`'}
+export function quoteName(name: string): string {
+  return '`' + name.replaceAll('`', '``') + '`'
+}
 
 export function positionOffset(sql: string, line = 1, column = 1): number {
   const lines = sql.split('\n')

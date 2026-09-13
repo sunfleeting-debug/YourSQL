@@ -11,13 +11,13 @@ from .errors import BinderError
 
 
 class DataType(str, Enum):
-    """SQL 子集支持的数据类型。"""
+    """SQL 子集支持的数据类型；`parse` 另外接受 INTEGER/REAL/DOUBLE/BOOL/TEXT/STRING 别名。"""
 
-    INT = "INT"
-    FLOAT = "FLOAT"
-    BOOLEAN = "BOOLEAN"
-    VARCHAR = "VARCHAR"
-    NULL = "NULL"
+    INT = "INT"  # 整数
+    FLOAT = "FLOAT"  # 浮点数
+    BOOLEAN = "BOOLEAN"  # 布尔（列可含 NULL）
+    VARCHAR = "VARCHAR"  # UTF-8 变长字符串，长度上限见 DatabaseConfig.max_varchar_length
+    NULL = "NULL"  # 未定型字面量或空值
 
     @classmethod
     def parse(cls, name: str) -> "DataType":

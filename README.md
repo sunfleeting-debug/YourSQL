@@ -105,7 +105,7 @@ python -m yoursql.web --database data/showcase_v2.db --port 8080
 # 浏览器打开 http://127.0.0.1:8080，初始账号 admin / admin
 ```
 
-不传 `--database` 时默认 `./data/workbench.db`；`npm run build` 输出到 `yoursql/workbench_static`。改前端源码时用 `npm run dev`（5173），另一个终端给后端加 `--allow-origin http://127.0.0.1:5173`。
+不传 `--database` 时默认 `./data/workbench.db`；`npm run build` 输出到 `yoursql/workbench_static`。改前端源码时用 `npm run dev`（5173），另一个终端给后端加 `--allow-origin http://127.0.0.1:5173`。前端格式化用 `npm run format`，校验用 `npm run format:check`（Prettier 配置在 `web/.prettierrc.json`）。
 
 配置优先级为命令行参数 > 系统环境变量 > 根目录 `.env` > 程序默认值；边界参数统一 `YOURSQL_*` 前缀，模板见 [`.env.example`](.env.example)（其中 `YOURSQL_TRACE_MAX_STEPS` 留空表示不限流水线步数）。
 

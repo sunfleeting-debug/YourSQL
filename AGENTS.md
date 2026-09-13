@@ -3,6 +3,8 @@
 - 建议使用 `uv` 管理后端依赖，建议使用 `npm` 管理前端依赖。
 - 保留并及时更新 `requirements.txt` 以保证兼容
 - 注意保证必要的参数声明，加强可读性，而不是`Any | None`走到死。
+- 前端（`web/`）代码提交前跑 `npm run format`，保持 `npm run format:check` 通过；Prettier 配置见 `web/.prettierrc.json`。
+- 不把长逻辑链压进一行：单行超过 150 字符（模板字符串、className 拼接除外）应考虑拆分；`className` 这类条件拼接请用 `web/src/view-classes.ts` 的纯函数。
 
 ## 注释规范
 - 使用中文本土化注释

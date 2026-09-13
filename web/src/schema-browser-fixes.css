@@ -1,17 +1,64 @@
 /* 左侧对象树与存储页缓存高亮的局部交互修复。 */
 
 /* HOW：名称与展开控件分开，名称单击只改变选择态，箭头单击才改变树层级。 */
-.table-row{align-items:stretch;padding:0}
-.table-row-toggle{flex:0 0 27px;padding:7px 5px 7px 8px;border:0;border-radius:0;background:transparent;color:inherit}
-.table-row-toggle:hover{background:#dcebea}
-.table-row-main{display:flex;align-items:center;justify-content:flex-start;flex:1;min-width:0;gap:7px;padding:7px 8px 7px 3px;border:0;border-radius:0;background:transparent;color:inherit;text-align:left;font-size:12px}
-.table-row-main:hover{background:#dcebea}
-.table-row-main>span{overflow:hidden;text-overflow:ellipsis;flex:1}
-.table-row-main>small{font-size:10px;color:#8b98a8;padding-right:4px}
-.table-row.selected .table-row-main>small{color:#5f918b}
+.table-row {
+  align-items: stretch;
+  padding: 0;
+}
+.table-row-toggle {
+  flex: 0 0 27px;
+  padding: 7px 5px 7px 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+.table-row-toggle:hover {
+  background: #dcebea;
+}
+.table-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 1;
+  min-width: 0;
+  gap: 7px;
+  padding: 7px 8px 7px 3px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 12px;
+}
+.table-row-main:hover {
+  background: #dcebea;
+}
+.table-row-main > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+.table-row-main > small {
+  font-size: 10px;
+  color: #8b98a8;
+  padding-right: 4px;
+}
+.table-row.selected .table-row-main > small {
+  color: #5f918b;
+}
 
 /* WHY：表关联样式会把未缓存页重新提亮；缓存高亮下灰度必须拥有最后优先级。 */
 .page-map.cache-focus .page-tile.table-linked.cache-muted,
-.page-map.cache-focus .page-tile.table-linked-index.cache-muted{filter:grayscale(1);opacity:.28;box-shadow:none;z-index:1}
+.page-map.cache-focus .page-tile.table-linked-index.cache-muted {
+  filter: grayscale(1);
+  opacity: 0.28;
+  box-shadow: none;
+  z-index: 1;
+}
 .page-map.cache-focus .page-tile.table-linked.cache-muted:hover,
-.page-map.cache-focus .page-tile.table-linked-index.cache-muted:hover{filter:grayscale(1);opacity:.4;box-shadow:none}
+.page-map.cache-focus .page-tile.table-linked-index.cache-muted:hover {
+  filter: grayscale(1);
+  opacity: 0.4;
+  box-shadow: none;
+}

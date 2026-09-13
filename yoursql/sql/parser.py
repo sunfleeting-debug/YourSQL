@@ -565,7 +565,17 @@ class Parser:
         if self._at(TokenKind.LIKE):
             operator = self._advance()
             return self._located(BinaryOp(expression, "NOT LIKE" if negated else "LIKE", self._additive()), operator)
-        for kind, operator in ((TokenKind.EQ, "="), (TokenKind.EQEQ, "="), (TokenKind.NE, "!="), (TokenKind.NE2, "!="), (TokenKind.LT, "<"), (TokenKind.LE, "<="), (TokenKind.GT, ">"), (TokenKind.GE, ">=")):
+        comparisons = (
+            (TokenKind.EQ, "="),
+            (TokenKind.EQEQ, "="),
+            (TokenKind.NE, "!="),
+            (TokenKind.NE2, "!="),
+            (TokenKind.LT, "<"),
+            (TokenKind.LE, "<="),
+            (TokenKind.GT, ">"),
+            (TokenKind.GE, ">="),
+        )
+        for kind, operator in comparisons:
             if self._at(kind):
                 operator_token = self._advance()
                 return self._located(BinaryOp(expression, operator, self._additive()), operator_token)

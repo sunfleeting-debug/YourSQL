@@ -11,16 +11,24 @@ from ..common.errors import LexerError
 
 
 class TokenKind(str, Enum):
+    """词种枚举；枚举值即词面，报错时可直接回显。
+
+    HOW：关键字成员顺序与下方 `_KEYWORD_NAMES` 一致，增删关键字需同步两处。
+    """
+
+    # —— 结构标记与字面量 ——
     EOF = "EOF"
     IDENTIFIER = "IDENTIFIER"
     QUOTED_IDENTIFIER = "QUOTED_IDENTIFIER"
-    INTEGER = "INTEGER"
-    FLOAT = "FLOAT"
-    STRING = "STRING"
-    STRING_LITERAL = "STRING"
-    BOOLEAN = "BOOLEAN"
-    NULL = "NULL"
+    INTEGER = "INTEGER"  # 十进制整数
+    FLOAT = "FLOAT"  # 带小数点或指数的浮点数
+    STRING = "STRING"  # '文本' 字面量
+    STRING_LITERAL = "STRING"  # 别名：与 STRING 同值，兼容旧调用点的命名
+    BOOLEAN = "BOOLEAN"  # TRUE / FALSE
+    NULL = "NULL"  # NULL 字面量
 
+    # —— 关键字（与 _KEYWORD_NAMES 同序） ——
+    # 账号、角色与授权（DCL）
     CREATE = "CREATE"
     USER = "USER"
     ROLE = "ROLE"
@@ -30,6 +38,8 @@ class TokenKind(str, Enum):
     TO = "TO"
     FOR = "FOR"
     GRANTS = "GRANTS"
+
+    # 表 / 视图对象与数据语句（DDL / DML）
     TABLE = "TABLE"
     VIEW = "VIEW"
     VIEWS = "VIEWS"
@@ -43,6 +53,8 @@ class TokenKind(str, Enum):
     DELETE = "DELETE"
     UPDATE = "UPDATE"
     SET = "SET"
+
+    # 排序、分页、去重与描述
     ORDER = "ORDER"
     BY = "BY"
     ASC = "ASC"
@@ -51,6 +63,8 @@ class TokenKind(str, Enum):
     LIMIT = "LIMIT"
     OFFSET = "OFFSET"
     DISTINCT = "DISTINCT"
+
+    # 别名与谓词
     AS = "AS"
     AND = "AND"
     OR = "OR"
@@ -59,6 +73,8 @@ class TokenKind(str, Enum):
     LIKE = "LIKE"
     IN = "IN"
     BETWEEN = "BETWEEN"
+
+    # 连接
     JOIN = "JOIN"
     INNER = "INNER"
     LEFT = "LEFT"
@@ -66,10 +82,14 @@ class TokenKind(str, Enum):
     FULL = "FULL"
     OUTER = "OUTER"
     ON = "ON"
+
+    # 分组与集合运算
     GROUP = "GROUP"
     HAVING = "HAVING"
     UNION = "UNION"
     ALL = "ALL"
+
+    # 索引、执行计划与约束
     INDEX = "INDEX"
     EXPLAIN = "EXPLAIN"
     IF = "IF"
@@ -82,14 +102,17 @@ class TokenKind(str, Enum):
     NULLS = "NULLS"
     FIRST = "FIRST"
     LAST = "LAST"
+
+    # SHOW 系列元数据查看
     SHOW = "SHOW"
     TABLES = "TABLES"
     COLUMNS = "COLUMNS"
     FIELDS = "FIELDS"
     INDEXES = "INDEXES"
 
+    # —— 比较、算术与拼接运算符 ——
     EQ = "="
-    ASSIGN = "="
+    ASSIGN = "="  # 别名：与 EQ 同值，赋值语法复用
     EQEQ = "=="
     NE = "!="
     NE2 = "<>"
@@ -104,6 +127,7 @@ class TokenKind(str, Enum):
     PERCENT = "%"
     CONCAT = "||"
 
+    # —— 标点与占位符 ——
     LPAREN = "("
     RPAREN = ")"
     COMMA = ","
@@ -115,7 +139,10 @@ class TokenKind(str, Enum):
 TokenType = TokenKind
 
 _KEYWORD_NAMES = (
-    "CREATE USER ROLE IDENTIFIED BY GRANT REVOKE TO FOR GRANTS TABLE VIEW VIEWS DROP INSERT INTO VALUES SELECT FROM WHERE DELETE UPDATE SET ORDER BY ASC DESC DESCRIBE LIMIT OFFSET DISTINCT AS AND OR NOT IS LIKE IN BETWEEN JOIN INNER LEFT RIGHT FULL OUTER ON GROUP HAVING UNION ALL INDEX INDEXES EXPLAIN IF EXISTS PRIMARY KEY UNIQUE DEFAULT CONSTRAINT NULLS FIRST LAST SHOW TABLES COLUMNS FIELDS"
+    "CREATE USER ROLE IDENTIFIED BY GRANT REVOKE TO FOR GRANTS TABLE VIEW VIEWS DROP INSERT INTO VALUES"
+    " SELECT FROM WHERE DELETE UPDATE SET ORDER BY ASC DESC DESCRIBE LIMIT OFFSET DISTINCT AS AND OR NOT IS LIKE IN"
+    " BETWEEN JOIN INNER LEFT RIGHT FULL OUTER ON GROUP HAVING UNION ALL INDEX INDEXES EXPLAIN IF EXISTS PRIMARY KEY"
+    " UNIQUE DEFAULT CONSTRAINT NULLS FIRST LAST SHOW TABLES COLUMNS FIELDS"
 ).split()
 KEYWORDS = {name: getattr(TokenKind, name) for name in _KEYWORD_NAMES}
 _NUMBER_RE = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
@@ -170,8 +197,30 @@ class Token:
 class Lexer:
     """只依赖标准库的 SQL 词法扫描器。"""
 
-    _TWO_CHAR = {"<=": TokenKind.LE, ">=": TokenKind.GE, "!=": TokenKind.NE, "<>": TokenKind.NE2, "==": TokenKind.EQEQ, "||": TokenKind.CONCAT}
-    _ONE_CHAR = {"=": TokenKind.EQ, "<": TokenKind.LT, ">": TokenKind.GT, "+": TokenKind.PLUS, "-": TokenKind.MINUS, "*": TokenKind.STAR, "/": TokenKind.SLASH, "%": TokenKind.PERCENT, "(": TokenKind.LPAREN, ")": TokenKind.RPAREN, ",": TokenKind.COMMA, ";": TokenKind.SEMICOLON, ".": TokenKind.DOT, "?": TokenKind.QUESTION}
+    _TWO_CHAR = {
+        "<=": TokenKind.LE,
+        ">=": TokenKind.GE,
+        "!=": TokenKind.NE,
+        "<>": TokenKind.NE2,
+        "==": TokenKind.EQEQ,
+        "||": TokenKind.CONCAT,
+    }
+    _ONE_CHAR = {
+        "=": TokenKind.EQ,
+        "<": TokenKind.LT,
+        ">": TokenKind.GT,
+        "+": TokenKind.PLUS,
+        "-": TokenKind.MINUS,
+        "*": TokenKind.STAR,
+        "/": TokenKind.SLASH,
+        "%": TokenKind.PERCENT,
+        "(": TokenKind.LPAREN,
+        ")": TokenKind.RPAREN,
+        ",": TokenKind.COMMA,
+        ";": TokenKind.SEMICOLON,
+        ".": TokenKind.DOT,
+        "?": TokenKind.QUESTION,
+    }
 
     def __init__(self, source: str | None = None) -> None:
         self.source = "" if source is None else source

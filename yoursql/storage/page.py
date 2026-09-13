@@ -11,13 +11,13 @@ from ..common.errors import StorageError
 
 
 class PageType(str, Enum):
-    """磁盘页的用途。"""
+    """磁盘页的用途；值会写入页头，不能随意改名。"""
 
-    FREE = "free"
-    SUPERBLOCK = "superblock"
-    CATALOG = "catalog"
-    HEAP = "heap"
-    INDEX = "index"
+    FREE = "free"  # 已释放、可重新分配的空白页
+    SUPERBLOCK = "superblock"  # 第 0 页：格式版本、页大小、空闲页与命名页
+    CATALOG = "catalog"  # 目录链：表/视图/索引/权限元数据的 JSON
+    HEAP = "heap"  # 表数据：`MSP2` 双向槽式记录页
+    INDEX = "index"  # B+Tree 节点：叶子 key/RowId、内部分隔键与叶子链
 
 
 PAGE_MAGIC = b"MDBP"

@@ -38,8 +38,11 @@ function textValue(value: unknown): string {
   if (value === null) return 'NULL'
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  try { return JSON.stringify(value, null, 2) ?? '—' }
-  catch { return String(value) }
+  try {
+    return JSON.stringify(value, null, 2) ?? '—'
+  } catch {
+    return String(value)
+  }
 }
 
 function clip(value: string, length: number): string {
@@ -164,14 +167,11 @@ function readPlan(value: unknown): PlanNode | null {
   let serial = 0
   const visit = (item: unknown): PlanNode | null => {
     if (!isRecord(item)) return null
-    const kind = typeof item.node === 'string' ? item.node
-      : typeof item.kind === 'string' ? item.kind
-        : typeof item.type === 'string' ? item.type : 'Plan'
+    const kind =
+      typeof item.node === 'string' ? item.node : typeof item.kind === 'string' ? item.kind : typeof item.type === 'string' ? item.type : 'Plan'
     const properties = isRecord(item.properties) ? item.properties : {}
-    const children = Array.isArray(item.children)
-      ? item.children.map(visit).filter((child): child is PlanNode => child !== null)
-      : []
-    return {id: `operator-${serial++}`, kind, properties, children}
+    const children = Array.isArray(item.children) ? item.children.map(visit).filter((child): child is PlanNode => child !== null) : []
+    return { id: `operator-${serial++}`, kind, properties, children }
   }
   return visit(value)
 }
@@ -199,7 +199,7 @@ function layoutPlan(root: PlanNode): PlanGraph {
       x: left + (subtree - ownWidth) / 2,
       y: PADDING + level * (NODE_HEIGHT + ROW_GAP),
       width: ownWidth,
-      subtreeWidth: subtree,
+      subtreeWidth: subtree
     }
     nodes.push(placed)
     const childrenWidth = node.children.reduce((total, child, index) => total + subtreeWidth(child) + (index ? COLUMN_GAP : 0), 0)
@@ -212,71 +212,155 @@ function layoutPlan(root: PlanNode): PlanGraph {
   }
   place(root, 0, PADDING)
   const height = Math.max(150, PADDING * 2 + (depth + 1) * NODE_HEIGHT + depth * ROW_GAP)
-  return {root, nodes, width: width + PADDING * 2, height}
+  return { root, nodes, width: width + PADDING * 2, height }
 }
 
 /** 绘制算子输入关系，并在节点内保留一行可读参数；完整 properties 仍放在详情区。 */
-export default function StageCanvas({value, title, variant = 'pipeline'}: {value: unknown; title: string; variant?: 'pipeline' | 'result'}) {
+export default function StageCanvas({ value, title, variant = 'pipeline' }: { value: unknown; title: string; variant?: 'pipeline' | 'result' }) {
   const [zoom, setZoom] = useState(1)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const markerId = `plan-arrow-${useId().replace(/:/g, '')}`
   const graph = useMemo(() => {
     const root = readPlan(value)
-    return root ? layoutPlan(root) : {root: null, nodes: [], width: 0, height: 0}
+    return root ? layoutPlan(root) : { root: null, nodes: [], width: 0, height: 0 }
   }, [value])
-  useEffect(() => { setSelectedId(null); setZoom(1) }, [graph])
+  useEffect(() => {
+    setSelectedId(null)
+    setZoom(1)
+  }, [graph])
   const selected = graph.nodes.find(node => node.id === selectedId)
   const positions = useMemo(() => new Map(graph.nodes.map(node => [node.id, node])), [graph.nodes])
 
   if (!graph.root) return <div className="plan-empty">无法识别计划</div>
 
-  return <div className={`canvas-board plan-canvas ${variant === 'result' ? 'explain-plan-canvas' : ''}`} aria-label={`${title}画板`}>
-    <div className="canvas-toolbar">
-      <div className="canvas-tools">
-        <button className="icon-button" aria-label="缩小画板" onClick={() => setZoom(current => Math.max(.55, Number((current - .1).toFixed(2))))}><Minus size={14}/></button>
-        <span className="canvas-zoom">{Math.round(zoom * 100)}%</span>
-        <button className="icon-button" aria-label="放大画板" onClick={() => setZoom(current => Math.min(1.5, Number((current + .1).toFixed(2))))}><Plus size={14}/></button>
-        <button className="icon-button" aria-label="重置画板缩放" onClick={() => setZoom(1)}><RotateCcw size={13}/></button>
+  return (
+    <div className={`canvas-board plan-canvas ${variant === 'result' ? 'explain-plan-canvas' : ''}`} aria-label={`${title}画板`}>
+      <div className="canvas-toolbar">
+        <div className="canvas-tools">
+          <button
+            className="icon-button"
+            aria-label="缩小画板"
+            onClick={() => setZoom(current => Math.max(0.55, Number((current - 0.1).toFixed(2))))}
+          >
+            <Minus size={14} />
+          </button>
+          <span className="canvas-zoom">{Math.round(zoom * 100)}%</span>
+          <button className="icon-button" aria-label="放大画板" onClick={() => setZoom(current => Math.min(1.5, Number((current + 0.1).toFixed(2))))}>
+            <Plus size={14} />
+          </button>
+          <button className="icon-button" aria-label="重置画板缩放" onClick={() => setZoom(1)}>
+            <RotateCcw size={13} />
+          </button>
+        </div>
       </div>
-    </div>
-    <div className="plan-content">
-      <div className="canvas-scroll plan-scroll">
-        <svg className="stage-svg plan-svg" width={graph.width * zoom} height={graph.height * zoom} viewBox={`0 0 ${graph.width} ${graph.height}`} role="img" aria-label={title}>
-          <defs><marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 8 4 L 0 8 z" fill="currentColor"/></marker></defs>
-          {graph.nodes.flatMap(parent => parent.children.map(child => {
-            const from = positions.get(parent.id); const to = positions.get(child.id)
-            if (!from || !to) return null
-            const x1 = from.x + from.width / 2; const y1 = from.y + NODE_HEIGHT
-            const x2 = to.x + to.width / 2; const y2 = to.y
-            return <path key={`${child.id}-${parent.id}`} className="stage-edge plan-edge" markerEnd={`url(#${markerId})`} d={`M ${x1} ${y1} C ${x1} ${y1 + 10}, ${x2} ${y2 - 10}, ${x2} ${y2}`} />
-          }))}
-          {graph.nodes.map(node => {
-            const active = node.id === selected?.id
-            const label = operatorLabel(node)
-            const summary = operatorSummary(node)
-            {/* WHY：旧版 .stage-node rect 会覆盖计划节点色条；计划图使用独立 class，避免 SVG 样式串扰。 */}
-            return <g key={node.id} className={`plan-node plan-kind-${node.kind.toLowerCase().replace(/[^a-z0-9]+/g, '-')}${active ? ' active' : ''}`} transform={`translate(${node.x},${node.y})`} role="button" tabIndex={0} aria-label={`${label} 算子`} aria-pressed={active} onClick={() => setSelectedId(node.id)} onKeyDown={event => {if (event.key === 'Enter' || event.key === ' ') {event.preventDefault(); setSelectedId(node.id)}}}>
-              <title>{label}</title>
-              <rect className="plan-node-surface" width={node.width} height={NODE_HEIGHT} rx="6"/>
-              <rect className="plan-node-accent" width="4" height={NODE_HEIGHT} rx="2"/>
-              {summary ? <><text className="plan-node-kind" x="10" y="13">{node.kind}</text><text className="plan-node-detail" x="10" y="26">{clip(summary, 23)}</text></> : <text className="plan-node-label" x="10" y="22">{node.kind}</text>}
-            </g>
-          })}
-        </svg>
-      </div>
-      {selected && <aside className="plan-inspector" aria-label="算子详情">
-        <>
-          <div className="plan-inspector-heading" title={selected.kind}><strong>{selected.kind}</strong></div>
-          <dl className="plan-properties">
-            {Object.entries(selected.properties).length
-              ? Object.entries(selected.properties).map(([key, value]) => {
-                const displayValue = textValue(value)
-                return <div key={key}><dt>{key}</dt><dd title={displayValue}>{displayValue}</dd></div>
+      <div className="plan-content">
+        <div className="canvas-scroll plan-scroll">
+          <svg
+            className="stage-svg plan-svg"
+            width={graph.width * zoom}
+            height={graph.height * zoom}
+            viewBox={`0 0 ${graph.width} ${graph.height}`}
+            role="img"
+            aria-label={title}
+          >
+            <defs>
+              <marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M 0 0 L 8 4 L 0 8 z" fill="currentColor" />
+              </marker>
+            </defs>
+            {graph.nodes.flatMap(parent =>
+              parent.children.map(child => {
+                const from = positions.get(parent.id)
+                const to = positions.get(child.id)
+                if (!from || !to) return null
+                const x1 = from.x + from.width / 2
+                const y1 = from.y + NODE_HEIGHT
+                const x2 = to.x + to.width / 2
+                const y2 = to.y
+                return (
+                  <path
+                    key={`${child.id}-${parent.id}`}
+                    className="stage-edge plan-edge"
+                    markerEnd={`url(#${markerId})`}
+                    d={`M ${x1} ${y1} C ${x1} ${y1 + 10}, ${x2} ${y2 - 10}, ${x2} ${y2}`}
+                  />
+                )
               })
-              : <div><dt>属性</dt><dd>—</dd></div>}
-          </dl>
-        </>
-      </aside>}
+            )}
+            {graph.nodes.map(node => {
+              const active = node.id === selected?.id
+              const label = operatorLabel(node)
+              const summary = operatorSummary(node)
+              {
+                /* WHY：旧版 .stage-node rect 会覆盖计划节点色条；计划图使用独立 class，避免 SVG 样式串扰。 */
+              }
+              return (
+                <g
+                  key={node.id}
+                  className={`plan-node plan-kind-${node.kind.toLowerCase().replace(/[^a-z0-9]+/g, '-')}${active ? ' active' : ''}`}
+                  transform={`translate(${node.x},${node.y})`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${label} 算子`}
+                  aria-pressed={active}
+                  onClick={() => setSelectedId(node.id)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      setSelectedId(node.id)
+                    }
+                  }}
+                >
+                  <title>{label}</title>
+                  <rect className="plan-node-surface" width={node.width} height={NODE_HEIGHT} rx="6" />
+                  <rect className="plan-node-accent" width="4" height={NODE_HEIGHT} rx="2" />
+                  {summary ? (
+                    <>
+                      <text className="plan-node-kind" x="10" y="13">
+                        {node.kind}
+                      </text>
+                      <text className="plan-node-detail" x="10" y="26">
+                        {clip(summary, 23)}
+                      </text>
+                    </>
+                  ) : (
+                    <text className="plan-node-label" x="10" y="22">
+                      {node.kind}
+                    </text>
+                  )}
+                </g>
+              )
+            })}
+          </svg>
+        </div>
+        {selected && (
+          <aside className="plan-inspector" aria-label="算子详情">
+            <>
+              <div className="plan-inspector-heading" title={selected.kind}>
+                <strong>{selected.kind}</strong>
+              </div>
+              <dl className="plan-properties">
+                {Object.entries(selected.properties).length ? (
+                  Object.entries(selected.properties).map(([key, value]) => {
+                    const displayValue = textValue(value)
+                    return (
+                      <div key={key}>
+                        <dt>{key}</dt>
+                        <dd title={displayValue}>{displayValue}</dd>
+                      </div>
+                    )
+                  })
+                ) : (
+                  <div>
+                    <dt>属性</dt>
+                    <dd>—</dd>
+                  </div>
+                )}
+              </dl>
+            </>
+          </aside>
+        )}
+      </div>
     </div>
-  </div>
+  )
 }

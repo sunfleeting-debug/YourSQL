@@ -3,20 +3,49 @@ import type { CSSProperties, WheelEvent } from 'react'
 import { ArrowLeft, ChevronLeft, ChevronRight, HardDrive, List, ListTree, LockKeyhole, Network, RefreshCw, Settings2, Table2, X } from 'lucide-react'
 import { api, ApiError, errorMessage } from '../api'
 import { pageTileAction } from '../storage-selection'
-import type { IndexNode, IndexSnapshot, PageHeader, RawPayload, ReplacementPolicy, StorageCacheSnapshot, StorageIndexSnapshot, StoragePageChanges, StoragePageDetail, StoragePolicyChange, StorageSlot, StorageSnapshot, TableMeta } from '../types'
+import { pageMapClassName, pageTileClassName } from '../view-classes'
+import type {
+  IndexNode,
+  IndexSnapshot,
+  PageHeader,
+  RawPayload,
+  ReplacementPolicy,
+  StorageCacheSnapshot,
+  StorageIndexSnapshot,
+  StoragePageChanges,
+  StoragePageDetail,
+  StoragePolicyChange,
+  StorageSlot,
+  StorageSnapshot,
+  TableMeta
+} from '../types'
 import JsonTree from './JsonTree'
 import PageGrid, { PageGridSelectionDetail } from './PageGrid'
 import type { PageGridSelection } from './PageGrid'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
 
-interface Props {fullMode?: boolean; onExit?: () => void; selectedTable?: TableMeta | null; onSelectTable?: (tableName: string) => void; active?: boolean; refreshToken?: number}
+interface Props {
+  fullMode?: boolean
+  onExit?: () => void
+  selectedTable?: TableMeta | null
+  onSelectTable?: (tableName: string) => void
+  active?: boolean
+  refreshToken?: number
+}
 const STORAGE_PAGE_BATCH = 500
 const pageTypeLabels: Record<string, string> = {
-  superblock: '数据库元数据', catalog: '目录与权限', heap: '表记录与槽位', index: 'B+Tree 索引页', free: '可复用空闲页',
+  superblock: '数据库元数据',
+  catalog: '目录与权限',
+  heap: '表记录与槽位',
+  index: 'B+Tree 索引页',
+  free: '可复用空闲页'
 }
 const pageTypeLegend = [
-  {type: 'superblock', label: '元数据'}, {type: 'catalog', label: '目录'}, {type: 'heap', label: '表记录'},
-  {type: 'index', label: '索引'}, {type: 'free', label: '空闲'},
+  { type: 'superblock', label: '元数据' },
+  { type: 'catalog', label: '目录' },
+  { type: 'heap', label: '表记录' },
+  { type: 'index', label: '索引' },
+  { type: 'free', label: '空闲' }
 ]
 
 interface SnapshotProgress {
@@ -32,7 +61,12 @@ async function loadStorageSnapshot(onProgress?: (progress: SnapshotProgress) => 
   const first = await api<StorageSnapshot>(`/api/storage?offset=0&limit=${STORAGE_PAGE_BATCH}&fields=map`)
   const pages = [...first.pages]
   const total = Math.max(first.total, pages.length)
-  const publish = () => onProgress?.({loaded: pages.length, total, snapshot: {...first, pages: [...pages], offset: 0, limit: pages.length}})
+  const publish = () =>
+    onProgress?.({
+      loaded: pages.length,
+      total,
+      snapshot: { ...first, pages: [...pages], offset: 0, limit: pages.length }
+    })
   publish()
   if (pages.length >= total) return first
   let nextOffset = pages.length
@@ -43,7 +77,7 @@ async function loadStorageSnapshot(onProgress?: (progress: SnapshotProgress) => 
     nextOffset = pages.length
     publish()
   }
-  return {...first, pages, offset: 0, limit: pages.length}
+  return { ...first, pages, offset: 0, limit: pages.length }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,49 +94,164 @@ function slotRecordLoaded(slot: StorageSlot): boolean {
 }
 
 // HOW：页块颜色只表达空间密度，保留 page type 的色相作为第二层语义。
-function pageOccupancy(page: PageHeader): {ratio: number; freeRatio: number} {
+function pageOccupancy(page: PageHeader): { ratio: number; freeRatio: number } {
   const capacity = Math.max(1, page.page_size)
   const freeSpace = Math.max(0, Math.min(capacity, page.logical_free_space ?? page.free_space))
   const freeRatio = freeSpace / capacity
-  return {ratio: 1 - freeRatio, freeRatio}
+  return { ratio: 1 - freeRatio, freeRatio }
 }
 
-function PageData({detail}: {detail: StoragePageDetail}) {
+function PageData({ detail }: { detail: StoragePageDetail }) {
   const slots = detail.slots ?? []
-  return <>
-    {slots.length > 0 && <div className="slot-table-wrap"><table className="slot-table"><thead><tr><th>槽位</th><th>状态</th><th>记录位置</th><th>槽项位置</th><th>字节</th><th>记录值</th></tr></thead><tbody>{slots.map(slot => <tr key={slot.slot_id}><td>{slot.slot_id}</td><td><span className={slot.deleted ? 'slot-deleted' : 'slot-live'}>{slot.deleted ? '可复用' : '有效'}</span></td><td><code>{typeof slot.page_offset === 'number' ? `0x${slot.page_offset.toString(16)}` : '—'}</code></td><td><code>{typeof slot.slot_directory_offset === 'number' ? `0x${slot.slot_directory_offset.toString(16)}` : '—'}</code></td><td>{slot.record_bytes}</td><td><code>{slot.row === null ? 'NULL' : JSON.stringify(slot.row) ?? '—'}</code></td></tr>)}</tbody></table></div>}
-    {slots.length === 0 && detail.type === 'heap' && <p className="stage-note">此页当前没有可见记录槽位。</p>}
-  </>
+  return (
+    <>
+      {slots.length > 0 && (
+        <div className="slot-table-wrap">
+          <table className="slot-table">
+            <thead>
+              <tr>
+                <th>槽位</th>
+                <th>状态</th>
+                <th>记录位置</th>
+                <th>槽项位置</th>
+                <th>字节</th>
+                <th>记录值</th>
+              </tr>
+            </thead>
+            <tbody>
+              {slots.map(slot => (
+                <tr key={slot.slot_id}>
+                  <td>{slot.slot_id}</td>
+                  <td>
+                    <span className={slot.deleted ? 'slot-deleted' : 'slot-live'}>{slot.deleted ? '可复用' : '有效'}</span>
+                  </td>
+                  <td>
+                    <code>{typeof slot.page_offset === 'number' ? `0x${slot.page_offset.toString(16)}` : '—'}</code>
+                  </td>
+                  <td>
+                    <code>{typeof slot.slot_directory_offset === 'number' ? `0x${slot.slot_directory_offset.toString(16)}` : '—'}</code>
+                  </td>
+                  <td>{slot.record_bytes}</td>
+                  <td>
+                    <code>{slot.row === null ? 'NULL' : (JSON.stringify(slot.row) ?? '—')}</code>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {slots.length === 0 && detail.type === 'heap' && <p className="stage-note">此页当前没有可见记录槽位。</p>}
+    </>
+  )
 }
 
 /** 页面级信息放在中央工作台，避免和选中块的局部字节混在同一抽屉。 */
-function PageAssociation({page, onSelectTable, onOpenIndex}: {page: Pick<PageHeader, 'page_id' | 'table_name' | 'index_name'>; onSelectTable?: (tableName: string) => void; onOpenIndex?: (indexName: string) => void}) {
+function PageAssociation({
+  page,
+  onSelectTable,
+  onOpenIndex
+}: {
+  page: Pick<PageHeader, 'page_id' | 'table_name' | 'index_name'>
+  onSelectTable?: (tableName: string) => void
+  onOpenIndex?: (indexName: string) => void
+}) {
   const tableName = page.table_name?.trim() || '未知'
   const indexName = page.index_name?.trim() || '未知'
   const tableLinkable = tableName !== '未知' && tableName !== 'MASKED' && !!onSelectTable
   const indexLinkable = indexName !== '未知' && indexName !== 'MASKED' && !!onOpenIndex
-  return <section className="storage-page-associations" aria-label="页面关联对象">
-    <div className="storage-page-associations-heading"><strong>关联对象</strong><span>可从这里跳转</span></div>
-    <div className="storage-page-association-grid">
-      <div className="storage-page-association"><span><Table2 size={12}/>表</span>{tableLinkable ? <button type="button" title={`定位表 ${tableName}`} onClick={() => onSelectTable(tableName)}>{tableName}</button> : <strong className={tableName === '未知' ? 'unknown' : ''}>{tableName}</strong>}</div>
-      <div className="storage-page-association"><span><ListTree size={12}/>索引</span>{indexLinkable ? <button type="button" title={`打开索引 ${indexName}`} onClick={() => onOpenIndex(indexName)}>{indexName}</button> : <strong className={indexName === '未知' ? 'unknown' : ''}>{indexName}</strong>}</div>
-    </div>
-  </section>
+  return (
+    <section className="storage-page-associations" aria-label="页面关联对象">
+      <div className="storage-page-associations-heading">
+        <strong>关联对象</strong>
+        <span>可从这里跳转</span>
+      </div>
+      <div className="storage-page-association-grid">
+        <div className="storage-page-association">
+          <span>
+            <Table2 size={12} />表
+          </span>
+          {tableLinkable ? (
+            <button type="button" title={`定位表 ${tableName}`} onClick={() => onSelectTable(tableName)}>
+              {tableName}
+            </button>
+          ) : (
+            <strong className={tableName === '未知' ? 'unknown' : ''}>{tableName}</strong>
+          )}
+        </div>
+        <div className="storage-page-association">
+          <span>
+            <ListTree size={12} />
+            索引
+          </span>
+          {indexLinkable ? (
+            <button type="button" title={`打开索引 ${indexName}`} onClick={() => onOpenIndex(indexName)}>
+              {indexName}
+            </button>
+          ) : (
+            <strong className={indexName === '未知' ? 'unknown' : ''}>{indexName}</strong>
+          )}
+        </div>
+      </div>
+    </section>
+  )
 }
 
-function PagePayloadWorkbench({detail, jsonDetail, raw, onSelectTable, onOpenIndex}: {detail: StoragePageDetail; jsonDetail: Record<string, unknown> | null; raw: RawPayload | null; onSelectTable?: (tableName: string) => void; onOpenIndex?: (indexName: string) => void}) {
-  return <section className="storage-page-workbench" aria-label="页面级信息">
-    <div className="storage-page-workbench-heading"><strong>页面信息</strong></div>
-    <PageAssociation page={detail} onSelectTable={onSelectTable} onOpenIndex={onOpenIndex}/>
-    {jsonDetail && <details className="storage-json-details" open><summary>结构化页字段</summary><JsonTree key={`page-${detail.page_id}`} value={jsonDetail}/></details>}
-    {raw && <RawPreview payload={raw} title="Payload" pageWide/>}
-    {detail.raw_page && <RawPreview payload={detail.raw_page} title="整页字节" pageWide/>}
-    {detail.note && <p className="hint">{detail.note}</p>}
-  </section>
+function PagePayloadWorkbench({
+  detail,
+  jsonDetail,
+  raw,
+  onSelectTable,
+  onOpenIndex
+}: {
+  detail: StoragePageDetail
+  jsonDetail: Record<string, unknown> | null
+  raw: RawPayload | null
+  onSelectTable?: (tableName: string) => void
+  onOpenIndex?: (indexName: string) => void
+}) {
+  return (
+    <section className="storage-page-workbench" aria-label="页面级信息">
+      <div className="storage-page-workbench-heading">
+        <strong>页面信息</strong>
+      </div>
+      <PageAssociation page={detail} onSelectTable={onSelectTable} onOpenIndex={onOpenIndex} />
+      {jsonDetail && (
+        <details className="storage-json-details" open>
+          <summary>结构化页字段</summary>
+          <JsonTree key={`page-${detail.page_id}`} value={jsonDetail} />
+        </details>
+      )}
+      {raw && <RawPreview payload={raw} title="Payload" pageWide />}
+      {detail.raw_page && <RawPreview payload={detail.raw_page} title="整页字节" pageWide />}
+      {detail.note && <p className="hint">{detail.note}</p>}
+    </section>
+  )
 }
 
-function RawPreview({payload, title = '原始 payload 预览', pageWide = false}: {payload: RawPayload; title?: string; pageWide?: boolean}) {
-  return <details className={`raw-preview ${pageWide ? 'page-wide-preview' : ''}`}><summary><span>{title}</span><small>{payload.encoding} · {payload.preview_bytes} / {payload.size_bytes} B{payload.truncated ? ' · 已截断' : ''}</small></summary><div className="raw-tabs"><pre>{payload.text ?? payload.hex}</pre><details><summary>Hex</summary><pre>{payload.hex}</pre></details><details><summary>Base64</summary><pre>{payload.base64}</pre></details><p>{payload.note}</p></div></details>
+function RawPreview({ payload, title = '原始 payload 预览', pageWide = false }: { payload: RawPayload; title?: string; pageWide?: boolean }) {
+  return (
+    <details className={`raw-preview ${pageWide ? 'page-wide-preview' : ''}`}>
+      <summary>
+        <span>{title}</span>
+        <small>
+          {payload.encoding} · {payload.preview_bytes} / {payload.size_bytes} B{payload.truncated ? ' · 已截断' : ''}
+        </small>
+      </summary>
+      <div className="raw-tabs">
+        <pre>{payload.text ?? payload.hex}</pre>
+        <details>
+          <summary>Hex</summary>
+          <pre>{payload.hex}</pre>
+        </details>
+        <details>
+          <summary>Base64</summary>
+          <pre>{payload.base64}</pre>
+        </details>
+        <p>{payload.note}</p>
+      </div>
+    </details>
+  )
 }
 
 function indexKey(value: unknown[] | null): string {
@@ -131,7 +280,7 @@ interface IndexLayoutItem {
 
 interface IndexLayout {
   items: IndexLayoutItem[]
-  edges: {from: IndexLayoutItem; to: IndexLayoutItem}[]
+  edges: { from: IndexLayoutItem; to: IndexLayoutItem }[]
   leaves: IndexLayoutItem[]
   width: number
   height: number
@@ -146,22 +295,38 @@ const INDEX_DEFAULT_EXPANSION_LIMIT = 24
 
 function defaultIndexCollapsed(value: IndexSnapshot): Set<number> {
   const rootPageId = value.root_page_id
-  return new Set((value.nodes ?? []).filter(node => node.children.length > 0 && (node.page_id !== rootPageId || node.child_count > INDEX_DEFAULT_EXPANSION_LIMIT)).map(node => node.page_id))
+  return new Set(
+    (value.nodes ?? [])
+      .filter(node => node.children.length > 0 && (node.page_id !== rootPageId || node.child_count > INDEX_DEFAULT_EXPANSION_LIMIT))
+      .map(node => node.page_id)
+  )
 }
 
 function buildIndexLayout(value: IndexSnapshot, collapsed: Set<number>): IndexLayout {
   const nodesById = new Map((value.nodes ?? []).map(node => [node.page_id, node]))
-  const roots = value.root_page_id === null
-    ? (value.nodes ?? []).filter(node => node.parent_page_id === null)
-    : [nodesById.get(value.root_page_id)].filter((node): node is IndexNode => node !== undefined)
+  const roots =
+    value.root_page_id === null
+      ? (value.nodes ?? []).filter(node => node.parent_page_id === null)
+      : [nodesById.get(value.root_page_id)].filter((node): node is IndexNode => node !== undefined)
   const items: IndexLayoutItem[] = []
-  const edges: {from: IndexLayoutItem; to: IndexLayoutItem}[] = []
+  const edges: { from: IndexLayoutItem; to: IndexLayoutItem }[] = []
   const leaves: IndexLayoutItem[] = []
   let maxDepth = 0
 
   const createItem = (node: IndexNode, depth: number): IndexLayoutItem => {
-    const children = node.children.map(child => nodesById.get(child)).filter((child): child is IndexNode => child !== undefined).map(child => createItem(child, depth + 1))
-    return {node, children, expanded: children.length > 0 && !collapsed.has(node.page_id), x: 0, y: 0, width: INDEX_NODE_WIDTH, depth}
+    const children = node.children
+      .map(child => nodesById.get(child))
+      .filter((child): child is IndexNode => child !== undefined)
+      .map(child => createItem(child, depth + 1))
+    return {
+      node,
+      children,
+      expanded: children.length > 0 && !collapsed.has(node.page_id),
+      x: 0,
+      y: 0,
+      width: INDEX_NODE_WIDTH,
+      depth
+    }
   }
   const measure = (item: IndexLayoutItem): number => {
     if (!item.expanded) return INDEX_NODE_WIDTH
@@ -180,7 +345,7 @@ function buildIndexLayout(value: IndexSnapshot, collapsed: Set<number>): IndexLa
     let childLeft = left + (item.width - childWidth) / 2
     item.children.forEach(child => {
       place(child, childLeft)
-      edges.push({from: item, to: child})
+      edges.push({ from: item, to: child })
       childLeft += child.width + INDEX_NODE_GAP
     })
   }
@@ -194,87 +359,396 @@ function buildIndexLayout(value: IndexSnapshot, collapsed: Set<number>): IndexLa
   })
   const width = Math.max(INDEX_NODE_WIDTH + INDEX_LAYOUT_PADDING * 2, left - INDEX_NODE_GAP + INDEX_LAYOUT_PADDING)
   const height = INDEX_LAYOUT_PADDING * 2 + (maxDepth + 1) * INDEX_NODE_HEIGHT + maxDepth * INDEX_LEVEL_GAP
-  return {items, edges, leaves, width, height}
+  return { items, edges, leaves, width, height }
 }
 
-function IndexDiagramNode({item, onPage, onToggle}: {item: IndexLayoutItem; onPage: (pageId: number) => void; onToggle: (pageId: number) => void}) {
-  const {node} = item
-  return <foreignObject x={item.x - INDEX_NODE_WIDTH / 2} y={item.y} width={INDEX_NODE_WIDTH} height={INDEX_NODE_HEIGHT}>
-    <div className={`index-btree-node ${node.node_type}`} role="treeitem" aria-level={item.depth + 1} aria-expanded={item.children.length > 0 ? item.expanded : undefined}>
-      <div className="index-btree-node-head">
-        <button type="button" className="index-page-link" aria-label={`查看页面 ${node.page_id}`} onClick={() => onPage(node.page_id)}>页 #{node.page_id}</button>
-        <span>{node.node_type === 'leaf' ? '叶子' : '内部'}</span>
-        {item.children.length > 0 && <button type="button" className="index-btree-toggle" aria-label={`${item.expanded ? '收起' : '展开'}页面 ${node.page_id} 的子页`} onClick={() => onToggle(node.page_id)}><ChevronRight size={12}/></button>}
+function IndexDiagramNode({
+  item,
+  onPage,
+  onToggle
+}: {
+  item: IndexLayoutItem
+  onPage: (pageId: number) => void
+  onToggle: (pageId: number) => void
+}) {
+  const { node } = item
+  return (
+    <foreignObject x={item.x - INDEX_NODE_WIDTH / 2} y={item.y} width={INDEX_NODE_WIDTH} height={INDEX_NODE_HEIGHT}>
+      <div
+        className={`index-btree-node ${node.node_type}`}
+        role="treeitem"
+        aria-level={item.depth + 1}
+        aria-expanded={item.children.length > 0 ? item.expanded : undefined}
+      >
+        <div className="index-btree-node-head">
+          <button type="button" className="index-page-link" aria-label={`查看页面 ${node.page_id}`} onClick={() => onPage(node.page_id)}>
+            页 #{node.page_id}
+          </button>
+          <span>{node.node_type === 'leaf' ? '叶子' : '内部'}</span>
+          {item.children.length > 0 && (
+            <button
+              type="button"
+              className="index-btree-toggle"
+              aria-label={`${item.expanded ? '收起' : '展开'}页面 ${node.page_id} 的子页`}
+              onClick={() => onToggle(node.page_id)}
+            >
+              <ChevronRight size={12} />
+            </button>
+          )}
+        </div>
+        <div className="index-btree-node-meta">
+          <strong>{node.key_count.toLocaleString()} 键</strong>
+          <span>{node.node_type === 'internal' ? `${node.child_count} 子页` : '叶链'}</span>
+        </div>
+        <code title={indexKeyRange(node)}>{indexKeyRange(node)}</code>
       </div>
-      <div className="index-btree-node-meta"><strong>{node.key_count.toLocaleString()} 键</strong><span>{node.node_type === 'internal' ? `${node.child_count} 子页` : '叶链'}</span></div>
-      <code title={indexKeyRange(node)}>{indexKeyRange(node)}</code>
-    </div>
-  </foreignObject>
+    </foreignObject>
+  )
 }
 
-function IndexDiagram({value, onPage}: {value: IndexSnapshot; onPage: (pageId: number) => void}) {
+function IndexDiagram({ value, onPage }: { value: IndexSnapshot; onPage: (pageId: number) => void }) {
   const [collapsed, setCollapsed] = useState<Set<number>>(() => defaultIndexCollapsed(value))
   const [zoom, setZoom] = useState(1)
-  useEffect(() => {setCollapsed(defaultIndexCollapsed(value)); setZoom(1)}, [value.root_page_id, value.page_count, value.total])
+  useEffect(() => {
+    setCollapsed(defaultIndexCollapsed(value))
+    setZoom(1)
+  }, [value.root_page_id, value.page_count, value.total])
   const nodesById = new Map((value.nodes ?? []).map(node => [node.page_id, node]))
-  const roots = value.root_page_id === null
-    ? (value.nodes ?? []).filter(node => node.parent_page_id === null)
-    : [nodesById.get(value.root_page_id)].filter((node): node is IndexNode => node !== undefined)
-  if (roots.length === 0) return <div className="index-view-empty"><strong>暂无落盘节点图</strong><span>当前索引没有可展示的物理节点关系。</span></div>
+  const roots =
+    value.root_page_id === null
+      ? (value.nodes ?? []).filter(node => node.parent_page_id === null)
+      : [nodesById.get(value.root_page_id)].filter((node): node is IndexNode => node !== undefined)
+  if (roots.length === 0)
+    return (
+      <div className="index-view-empty">
+        <strong>暂无落盘节点图</strong>
+        <span>当前索引没有可展示的物理节点关系。</span>
+      </div>
+    )
   const layout = buildIndexLayout(value, collapsed)
-  const toggleNode = (pageId: number) => setCollapsed(current => {const next = new Set(current); if (next.has(pageId)) next.delete(pageId); else next.add(pageId); return next})
+  const toggleNode = (pageId: number) =>
+    setCollapsed(current => {
+      const next = new Set(current)
+      if (next.has(pageId)) next.delete(pageId)
+      else next.add(pageId)
+      return next
+    })
   const collapseAll = () => setCollapsed(new Set((value.nodes ?? []).filter(node => node.children.length > 0).map(node => node.page_id)))
-  const changeZoom = (delta: number) => setZoom(current => Math.min(2, Math.max(.5, Number((current + delta).toFixed(1)))))
+  const changeZoom = (delta: number) => setZoom(current => Math.min(2, Math.max(0.5, Number((current + delta).toFixed(1)))))
   // HOW：仅在 Ctrl + 滚轮时缩放，普通滚轮仍用于浏览超宽的叶子页链。
   const handleCanvasWheel = (event: WheelEvent<HTMLDivElement>) => {
     if (!event.ctrlKey) return
     event.preventDefault()
-    changeZoom(event.deltaY > 0 ? -.1 : .1)
+    changeZoom(event.deltaY > 0 ? -0.1 : 0.1)
   }
   const renderWidth = Math.max(layout.width * zoom, INDEX_NODE_WIDTH)
   const renderHeight = layout.height * zoom
-  return <div className="index-diagram" aria-label="落盘 B+Tree 层级、键槽与叶链关系图">
-    <div className="index-tree-toolbar"><div className="index-tree-toolbar-title"><strong>页层级</strong><span>实线父子 · 双向虚线叶链</span></div><div className="index-tree-actions"><button type="button" className="index-tree-action" onClick={collapseAll}>全部收起</button><button type="button" className="index-tree-action" onClick={() => setCollapsed(new Set())}>全部展开</button><span className="index-tree-zoom" aria-label="画布缩放"><span>缩放</span><button type="button" className="index-tree-action" title="缩小画布" aria-label="缩小画布" onClick={() => changeZoom(-.1)}>−</button><b>{Math.round(zoom * 100)}%</b><button type="button" className="index-tree-action" title="放大画布" aria-label="放大画布" onClick={() => changeZoom(.1)}>+</button><button type="button" className="index-tree-action" title="重置为 100%" onClick={() => setZoom(1)}>适配</button></span></div></div>
-    <div className="index-btree-legend"><span><i className="internal"/>内部页</span><span><i className="leaf"/>叶子页</span><span><i className="sibling"/>叶链</span></div>
-    <div className="index-btree-canvas" onWheel={handleCanvasWheel} title="按住 Ctrl 滚轮缩放，普通滚轮浏览叶链"><svg role="tree" aria-label="B+Tree 页面层级" className="index-btree-svg" width={renderWidth} height={renderHeight} viewBox={`0 0 ${layout.width} ${layout.height}`} preserveAspectRatio="xMinYMin meet">
-      <defs><marker id="index-leaf-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto-start-reverse"><path d="M0,0 L7,3.5 L0,7 z" fill="#71aaa2"/></marker></defs>
-      <g className="index-btree-edges">{layout.edges.map(edge => <line key={`${edge.from.node.page_id}-${edge.to.node.page_id}`} x1={edge.from.x} y1={edge.from.y + INDEX_NODE_HEIGHT} x2={edge.to.x} y2={edge.to.y} />)}</g>
-      {layout.leaves.length > 1 && <g className="index-btree-leaf-links">{layout.leaves.slice(0, -1).map((leaf, index) => {const next = layout.leaves[index + 1]; const hasNext = leaf.node.next_page_id === next.node.page_id; const hasPrev = next.node.prev_page_id === leaf.node.page_id; const y = leaf.y + INDEX_NODE_HEIGHT / 2; return hasNext || hasPrev ? <g key={`${leaf.node.page_id}-${next.node.page_id}`}><line x1={leaf.x + INDEX_NODE_WIDTH / 2 + 3} y1={y} x2={next.x - INDEX_NODE_WIDTH / 2 - 3} y2={y} markerStart={hasPrev ? 'url(#index-leaf-arrow)' : undefined} markerEnd={hasNext ? 'url(#index-leaf-arrow)' : undefined}/><title>叶子页 #{leaf.node.page_id} {hasNext && hasPrev ? '↔' : hasNext ? '→' : '←'} #{next.node.page_id}</title></g> : null})}</g>}
-      <g className="index-btree-nodes">{layout.items.map(item => <IndexDiagramNode key={item.node.page_id} item={item} onPage={onPage} onToggle={toggleNode}/>)}</g>
-    </svg></div>
-    {value.pages_truncated && <p className="hint">物理页过多，仅显示前 256 页。</p>}
-  </div>
+  return (
+    <div className="index-diagram" aria-label="落盘 B+Tree 层级、键槽与叶链关系图">
+      <div className="index-tree-toolbar">
+        <div className="index-tree-toolbar-title">
+          <strong>页层级</strong>
+          <span>实线父子 · 双向虚线叶链</span>
+        </div>
+        <div className="index-tree-actions">
+          <button type="button" className="index-tree-action" onClick={collapseAll}>
+            全部收起
+          </button>
+          <button type="button" className="index-tree-action" onClick={() => setCollapsed(new Set())}>
+            全部展开
+          </button>
+          <span className="index-tree-zoom" aria-label="画布缩放">
+            <span>缩放</span>
+            <button type="button" className="index-tree-action" title="缩小画布" aria-label="缩小画布" onClick={() => changeZoom(-0.1)}>
+              −
+            </button>
+            <b>{Math.round(zoom * 100)}%</b>
+            <button type="button" className="index-tree-action" title="放大画布" aria-label="放大画布" onClick={() => changeZoom(0.1)}>
+              +
+            </button>
+            <button type="button" className="index-tree-action" title="重置为 100%" onClick={() => setZoom(1)}>
+              适配
+            </button>
+          </span>
+        </div>
+      </div>
+      <div className="index-btree-legend">
+        <span>
+          <i className="internal" />
+          内部页
+        </span>
+        <span>
+          <i className="leaf" />
+          叶子页
+        </span>
+        <span>
+          <i className="sibling" />
+          叶链
+        </span>
+      </div>
+      <div className="index-btree-canvas" onWheel={handleCanvasWheel} title="按住 Ctrl 滚轮缩放，普通滚轮浏览叶链">
+        <svg
+          role="tree"
+          aria-label="B+Tree 页面层级"
+          className="index-btree-svg"
+          width={renderWidth}
+          height={renderHeight}
+          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          preserveAspectRatio="xMinYMin meet"
+        >
+          <defs>
+            <marker id="index-leaf-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto-start-reverse">
+              <path d="M0,0 L7,3.5 L0,7 z" fill="#71aaa2" />
+            </marker>
+          </defs>
+          <g className="index-btree-edges">
+            {layout.edges.map(edge => (
+              <line
+                key={`${edge.from.node.page_id}-${edge.to.node.page_id}`}
+                x1={edge.from.x}
+                y1={edge.from.y + INDEX_NODE_HEIGHT}
+                x2={edge.to.x}
+                y2={edge.to.y}
+              />
+            ))}
+          </g>
+          {layout.leaves.length > 1 && (
+            <g className="index-btree-leaf-links">
+              {layout.leaves.slice(0, -1).map((leaf, index) => {
+                const next = layout.leaves[index + 1]
+                const hasNext = leaf.node.next_page_id === next.node.page_id
+                const hasPrev = next.node.prev_page_id === leaf.node.page_id
+                const y = leaf.y + INDEX_NODE_HEIGHT / 2
+                return hasNext || hasPrev ? (
+                  <g key={`${leaf.node.page_id}-${next.node.page_id}`}>
+                    <line
+                      x1={leaf.x + INDEX_NODE_WIDTH / 2 + 3}
+                      y1={y}
+                      x2={next.x - INDEX_NODE_WIDTH / 2 - 3}
+                      y2={y}
+                      markerStart={hasPrev ? 'url(#index-leaf-arrow)' : undefined}
+                      markerEnd={hasNext ? 'url(#index-leaf-arrow)' : undefined}
+                    />
+                    <title>
+                      叶子页 #{leaf.node.page_id} {hasNext && hasPrev ? '↔' : hasNext ? '→' : '←'} #{next.node.page_id}
+                    </title>
+                  </g>
+                ) : null
+              })}
+            </g>
+          )}
+          <g className="index-btree-nodes">
+            {layout.items.map(item => (
+              <IndexDiagramNode key={item.node.page_id} item={item} onPage={onPage} onToggle={toggleNode} />
+            ))}
+          </g>
+        </svg>
+      </div>
+      {value.pages_truncated && <p className="hint">物理页过多，仅显示前 256 页。</p>}
+    </div>
+  )
 }
 
-function IndexEntryList({value}: {value: IndexSnapshot}) {
+function IndexEntryList({ value }: { value: IndexSnapshot }) {
   const firstEntry = value.total === 0 ? 0 : value.offset + 1
   const lastEntry = Math.min(value.offset + value.entries.length, value.total)
-  return <div className="index-entry-list">
-    <div className="index-list-heading"><strong>键组</strong><small>{firstEntry}–{lastEntry} / {value.total}</small></div>
-    {value.entries.length === 0 ? <div className="index-view-empty"><strong>暂无索引条目</strong><span>当前索引还没有可读取的键组。</span></div> : <div className="index-entry-table-wrap"><table className="index-entry-table"><thead><tr><th>#</th><th>索引键</th><th>行数</th><th>RowId</th></tr></thead><tbody>{value.entries.map((entry, index) => <tr key={`${value.offset + index}-${JSON.stringify(entry.key)}`}><td className="index-entry-number">{value.offset + index + 1}</td><td><code>{indexKey(entry.key)}</code></td><td><strong>{entry.row_count.toLocaleString()}</strong></td><td><div className="index-row-id-list">{entry.row_ids.slice(0, 3).map(rowId => <code key={indexRowId(rowId)}>{indexRowId(rowId)}</code>)}{entry.rows_truncated && <small>+更多</small>}{entry.row_ids.length === 0 && <span>—</span>}</div></td></tr>)}</tbody></table></div>}
-  </div>
+  return (
+    <div className="index-entry-list">
+      <div className="index-list-heading">
+        <strong>键组</strong>
+        <small>
+          {firstEntry}–{lastEntry} / {value.total}
+        </small>
+      </div>
+      {value.entries.length === 0 ? (
+        <div className="index-view-empty">
+          <strong>暂无索引条目</strong>
+          <span>当前索引还没有可读取的键组。</span>
+        </div>
+      ) : (
+        <div className="index-entry-table-wrap">
+          <table className="index-entry-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>索引键</th>
+                <th>行数</th>
+                <th>RowId</th>
+              </tr>
+            </thead>
+            <tbody>
+              {value.entries.map((entry, index) => (
+                <tr key={`${value.offset + index}-${JSON.stringify(entry.key)}`}>
+                  <td className="index-entry-number">{value.offset + index + 1}</td>
+                  <td>
+                    <code>{indexKey(entry.key)}</code>
+                  </td>
+                  <td>
+                    <strong>{entry.row_count.toLocaleString()}</strong>
+                  </td>
+                  <td>
+                    <div className="index-row-id-list">
+                      {entry.row_ids.slice(0, 3).map(rowId => (
+                        <code key={indexRowId(rowId)}>{indexRowId(rowId)}</code>
+                      ))}
+                      {entry.rows_truncated && <small>+更多</small>}
+                      {entry.row_ids.length === 0 && <span>—</span>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
 }
 
-function IndexInspector({value, onPage, onNavigate, busy}: {value: IndexSnapshot; onPage: (pageId: number) => void; onNavigate: (offset: number) => void; busy: boolean}) {
+function IndexInspector({
+  value,
+  onPage,
+  onNavigate,
+  busy
+}: {
+  value: IndexSnapshot
+  onPage: (pageId: number) => void
+  onNavigate: (offset: number) => void
+  busy: boolean
+}) {
   const [view, setView] = useState<'diagram' | 'list'>('diagram')
   const canGoBack = value.offset > 0
   const canGoForward = value.offset + value.entries.length < value.total
-  return <div className="index-inspector">
-    <div className="index-inspector-header"><div><strong>{value.physical ? 'B+Tree' : '有序索引'}</strong><span>{value.metadata.columns.join(', ')}</span></div><div className="index-view-switch" role="tablist" aria-label="索引展示方式"><button type="button" role="tab" aria-selected={view === 'diagram'} className={view === 'diagram' ? 'active' : ''} onClick={() => setView('diagram')}><Network size={13}/>图示</button><button type="button" role="tab" aria-selected={view === 'list'} className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={13}/>列表</button></div></div>
-    <div className="index-tree-summary"><span>根 <b>#{value.root_page_id ?? '—'}</b></span><span>高 <b>{value.height}</b></span><span>页 <b>{value.page_count}{value.pages_truncated ? '+' : ''}</b></span><span>键组 <b>{value.total.toLocaleString()}</b></span></div>
-    {view === 'diagram' ? <IndexDiagram value={value} onPage={onPage}/> : <IndexEntryList value={value}/>}
-    {view === 'list' && value.total > value.entries.length && <div className="small-pagination index-pagination"><button aria-label="上一页索引条目" disabled={!canGoBack || busy} onClick={() => onNavigate(Math.max(0, value.offset - value.limit))}><ChevronLeft size={13}/></button><span>第 {Math.floor(value.offset / Math.max(1, value.limit)) + 1} / {Math.ceil(value.total / Math.max(1, value.limit))} 页</span><button aria-label="下一页索引条目" disabled={!canGoForward || busy} onClick={() => onNavigate(value.offset + value.limit)}><ChevronRight size={13}/></button></div>}
-  </div>
+  return (
+    <div className="index-inspector">
+      <div className="index-inspector-header">
+        <div>
+          <strong>{value.physical ? 'B+Tree' : '有序索引'}</strong>
+          <span>{value.metadata.columns.join(', ')}</span>
+        </div>
+        <div className="index-view-switch" role="tablist" aria-label="索引展示方式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'diagram'}
+            className={view === 'diagram' ? 'active' : ''}
+            onClick={() => setView('diagram')}
+          >
+            <Network size={13} />
+            图示
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'list'}
+            className={view === 'list' ? 'active' : ''}
+            onClick={() => setView('list')}
+          >
+            <List size={13} />
+            列表
+          </button>
+        </div>
+      </div>
+      <div className="index-tree-summary">
+        <span>
+          根 <b>#{value.root_page_id ?? '—'}</b>
+        </span>
+        <span>
+          高 <b>{value.height}</b>
+        </span>
+        <span>
+          页{' '}
+          <b>
+            {value.page_count}
+            {value.pages_truncated ? '+' : ''}
+          </b>
+        </span>
+        <span>
+          键组 <b>{value.total.toLocaleString()}</b>
+        </span>
+      </div>
+      {view === 'diagram' ? <IndexDiagram value={value} onPage={onPage} /> : <IndexEntryList value={value} />}
+      {view === 'list' && value.total > value.entries.length && (
+        <div className="small-pagination index-pagination">
+          <button aria-label="上一页索引条目" disabled={!canGoBack || busy} onClick={() => onNavigate(Math.max(0, value.offset - value.limit))}>
+            <ChevronLeft size={13} />
+          </button>
+          <span>
+            第 {Math.floor(value.offset / Math.max(1, value.limit)) + 1} / {Math.ceil(value.total / Math.max(1, value.limit))} 页
+          </span>
+          <button aria-label="下一页索引条目" disabled={!canGoForward || busy} onClick={() => onNavigate(value.offset + value.limit)}>
+            <ChevronRight size={13} />
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
-function IndexScreen({name, value, loading, onBack, onPage, onNavigate, busy, jsonDetail, raw, headingRef}: {name: string; value: IndexSnapshot | null; loading: boolean; onBack: () => void; onPage: (pageId: number) => void; onNavigate: (offset: number) => void; busy: boolean; jsonDetail: Record<string, unknown> | null; raw: RawPayload | null; headingRef: {current: HTMLHeadingElement | null}}) {
-  return <section className="storage-index-screen" aria-label={`索引 ${name}`} aria-busy={loading}>
-    <div className="storage-index-screen-header"><button type="button" className="storage-index-back" aria-label="返回索引列表" title="返回索引列表" onClick={onBack}><ArrowLeft size={14}/>索引</button><div className="storage-index-title"><h2 ref={headingRef} tabIndex={-1}>{name}</h2></div></div>
-    {loading ? <div className="inspector-empty index-screen-loading" role="status"><RefreshCw className="spin"/><strong>读取索引…</strong></div> : value ? <><IndexInspector value={value} onPage={onPage} onNavigate={onNavigate} busy={busy}/>{jsonDetail && <details className="storage-json-details"><summary>原始响应</summary><JsonTree value={jsonDetail}/></details>}{raw && <RawPreview payload={raw}/>}</> : <div className="index-view-empty"><strong>索引读取失败</strong><span>未返回可展示的索引结构。</span></div>}
-  </section>
+function IndexScreen({
+  name,
+  value,
+  loading,
+  onBack,
+  onPage,
+  onNavigate,
+  busy,
+  jsonDetail,
+  raw,
+  headingRef
+}: {
+  name: string
+  value: IndexSnapshot | null
+  loading: boolean
+  onBack: () => void
+  onPage: (pageId: number) => void
+  onNavigate: (offset: number) => void
+  busy: boolean
+  jsonDetail: Record<string, unknown> | null
+  raw: RawPayload | null
+  headingRef: { current: HTMLHeadingElement | null }
+}) {
+  return (
+    <section className="storage-index-screen" aria-label={`索引 ${name}`} aria-busy={loading}>
+      <div className="storage-index-screen-header">
+        <button type="button" className="storage-index-back" aria-label="返回索引列表" title="返回索引列表" onClick={onBack}>
+          <ArrowLeft size={14} />
+          索引
+        </button>
+        <div className="storage-index-title">
+          <h2 ref={headingRef} tabIndex={-1}>
+            {name}
+          </h2>
+        </div>
+      </div>
+      {loading ? (
+        <div className="inspector-empty index-screen-loading" role="status">
+          <RefreshCw className="spin" />
+          <strong>读取索引…</strong>
+        </div>
+      ) : value ? (
+        <>
+          <IndexInspector value={value} onPage={onPage} onNavigate={onNavigate} busy={busy} />
+          {jsonDetail && (
+            <details className="storage-json-details">
+              <summary>原始响应</summary>
+              <JsonTree value={jsonDetail} />
+            </details>
+          )}
+          {raw && <RawPreview payload={raw} />}
+        </>
+      ) : (
+        <div className="index-view-empty">
+          <strong>索引读取失败</strong>
+          <span>未返回可展示的索引结构。</span>
+        </div>
+      )}
+    </section>
+  )
 }
 
-export default function StoragePanel({fullMode = false, onExit, selectedTable = null, onSelectTable, active = true, refreshToken = 0}: Props) {
+export default function StoragePanel({ fullMode = false, onExit, selectedTable = null, onSelectTable, active = true, refreshToken = 0 }: Props) {
+  // 快照、缓存与刷新忙态
   const [snapshot, setSnapshot] = useState<StorageSnapshot | null>(null)
   const [cacheSnapshot, setCacheSnapshot] = useState<StorageCacheSnapshot | null>(null)
   const [error, setError] = useState('')
@@ -287,20 +761,26 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
   const [incrementalBusy, setIncrementalBusy] = useState(false)
   const [pageRefreshBusy, setPageRefreshBusy] = useState(false)
   const [detailBusy, setDetailBusy] = useState(false)
-  const [snapshotProgress, setSnapshotProgress] = useState({loaded: 0, total: 0})
+  const [snapshotProgress, setSnapshotProgress] = useState({ loaded: 0, total: 0 })
   const [detailLoading, setDetailLoading] = useState(false)
+
+  // 页签与地图显示选项
   const [tab, setTab] = useState('pages')
   const [cacheFocus, setCacheFocus] = useState(false)
   const [pageUsageVisual, setPageUsageVisual] = useState<PageUsageVisual>('color')
+
+  // 选中对象与详情：选中页、选中块、索引页联动
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null)
   const [detailTitle, setDetailTitle] = useState('')
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null)
-  const [selected, setSelected] = useState<{kind: 'pages' | 'indexes'; value: string} | null>(null)
+  const [selected, setSelected] = useState<{ kind: 'pages' | 'indexes'; value: string } | null>(null)
   const [detailOffset, setDetailOffset] = useState(0)
   const [detailTotal, setDetailTotal] = useState(0)
   const [cellSelection, setCellSelection] = useState<PageGridSelection | null>(null)
   const [indexPageIdsByName, setIndexPageIdsByName] = useState<Record<string, number[]>>({})
   const [indexBindingError, setIndexBindingError] = useState('')
+
+  // HOW：请求编号 ref 用来作废过期响应；焦点 ref 用于关闭详情后把焦点还给列表项。
   const pageButtonRefs = useRef(new Map<string, HTMLButtonElement>())
   const indexButtonRefs = useRef(new Map<string, HTMLButtonElement>())
   const detailHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -312,81 +792,139 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
   const activeRefreshRef = useRef(false)
   const detailRequestRef = useRef(0)
   const slotDetailRequestRef = useRef(0)
-  const {tooltip, tooltipProps} = useStorageTooltip()
+  const { tooltip, tooltipProps } = useStorageTooltip()
   const busy = snapshotBusy || cacheBusy || policyBusy || incrementalBusy || pageRefreshBusy || detailBusy
   const refreshSnapshot = useCallback(async () => {
     const requestId = ++snapshotRequestRef.current
-    setSnapshotBusy(true); setSnapshotProgress({loaded: 0, total: 0}); setError(''); setDenied(false)
+    setSnapshotBusy(true)
+    setSnapshotProgress({ loaded: 0, total: 0 })
+    setError('')
+    setDenied(false)
     try {
       const value = await loadStorageSnapshot(progress => {
         if (requestId !== snapshotRequestRef.current) return
-        setSnapshotProgress({loaded: progress.loaded, total: progress.total})
+        setSnapshotProgress({ loaded: progress.loaded, total: progress.total })
         setSnapshot(progress.snapshot)
       })
       if (requestId === snapshotRequestRef.current) {
         setSnapshot(value)
-        setCacheSnapshot({snapshot_at: value.snapshot_at, readonly: value.readonly, buffer_pool: value.buffer_pool, io: value.io, note: '来自页面地图快照。切换到缓存页签或手动刷新可读取最新运行态。'})
+        setCacheSnapshot({
+          snapshot_at: value.snapshot_at,
+          readonly: value.readonly,
+          buffer_pool: value.buffer_pool,
+          io: value.io,
+          note: '来自页面地图快照。切换到缓存页签或手动刷新可读取最新运行态。'
+        })
       }
+    } catch (error) {
+      if (requestId === snapshotRequestRef.current) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      }
+    } finally {
+      if (requestId === snapshotRequestRef.current) setSnapshotBusy(false)
     }
-    catch (error) {if (requestId === snapshotRequestRef.current) {setError(errorMessage(error)); setDenied(error instanceof ApiError && error.status === 403)}}
-    finally {if (requestId === snapshotRequestRef.current) setSnapshotBusy(false)}
   }, [])
   const refreshCache = useCallback(async () => {
     const requestId = ++cacheRequestRef.current
-    setCacheBusy(true); setError(''); setDenied(false)
+    setCacheBusy(true)
+    setError('')
+    setDenied(false)
     try {
       const value = await api<StorageCacheSnapshot>('/api/storage/cache?offset=0&limit=100')
       if (requestId === cacheRequestRef.current) setCacheSnapshot(value)
     } catch (error) {
-      if (requestId === cacheRequestRef.current) {setError(errorMessage(error)); setDenied(error instanceof ApiError && error.status === 403)}
+      if (requestId === cacheRequestRef.current) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      }
     } finally {
       if (requestId === cacheRequestRef.current) setCacheBusy(false)
     }
   }, [])
-  const changeReplacementPolicy = useCallback(async (replacementPolicy: ReplacementPolicy) => {
-    if (policyBusy || busy) return
-    setPolicyBusy(true); setError(''); setDenied(false); setPolicyNotice('')
-    try {
-      const value = await api<StoragePolicyChange>('/api/storage/cache/policy', {replacement_policy: replacementPolicy})
-      setPolicyDraft(value.replacement_policy)
-      setPolicyNotice(value.changed ? `已切换为 ${value.replacement_policy.toUpperCase()}；下一次缓存淘汰开始生效。` : `当前已使用 ${value.replacement_policy.toUpperCase()}。`)
-      setCacheSnapshot(current => current ? {...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool} : current)
-      setSnapshot(current => current ? {...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool} : current)
-    } catch (error) {
-      setError(errorMessage(error)); setDenied(error instanceof ApiError && error.status === 403)
-    } finally {
-      setPolicyBusy(false)
-    }
-  }, [busy, policyBusy])
+  const changeReplacementPolicy = useCallback(
+    async (replacementPolicy: ReplacementPolicy) => {
+      if (policyBusy || busy) return
+      setPolicyBusy(true)
+      setError('')
+      setDenied(false)
+      setPolicyNotice('')
+      try {
+        const value = await api<StoragePolicyChange>('/api/storage/cache/policy', {
+          replacement_policy: replacementPolicy
+        })
+        setPolicyDraft(value.replacement_policy)
+        setPolicyNotice(
+          value.changed
+            ? `已切换为 ${value.replacement_policy.toUpperCase()}；下一次缓存淘汰开始生效。`
+            : `当前已使用 ${value.replacement_policy.toUpperCase()}。`
+        )
+        setCacheSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+        setSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+      } catch (error) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      } finally {
+        setPolicyBusy(false)
+      }
+    },
+    [busy, policyBusy]
+  )
   const refreshIndexCatalog = useCallback(async () => {
     const requestId = ++indexRequestRef.current
-    setDetailBusy(true); setError(''); setDenied(false)
+    setDetailBusy(true)
+    setError('')
+    setDenied(false)
     try {
       const value = await api<StorageIndexSnapshot>('/api/storage/indexes?limit=100')
       if (requestId !== indexRequestRef.current) return
-      setSnapshot(current => current ? {...current, indexes: value.indexes, snapshot_at: value.snapshot_at} : current)
+      setSnapshot(current => (current ? { ...current, indexes: value.indexes, snapshot_at: value.snapshot_at } : current))
     } catch (error) {
-      if (requestId === indexRequestRef.current) {setError(errorMessage(error)); setDenied(error instanceof ApiError && error.status === 403)}
+      if (requestId === indexRequestRef.current) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      }
     } finally {
       if (requestId === indexRequestRef.current) setDetailBusy(false)
     }
   }, [])
-  useEffect(() => {void refreshSnapshot(); return () => {snapshotRequestRef.current += 1; detailRequestRef.current += 1; changeRequestRef.current += 1; cacheRequestRef.current += 1; indexRequestRef.current += 1}}, [refreshSnapshot])
-  const refreshPage = useCallback(async (pageId: string, offset = detailOffset) => {
-    const requestId = ++detailRequestRef.current
-    setPageRefreshBusy(true); setError(''); setDenied(false)
-    try {
-      const data = await api<StoragePageDetail>(`/api/storage/pages/${encodeURIComponent(pageId)}?offset=${offset}&limit=40`)
-      if (requestId !== detailRequestRef.current) return
-      setDetail(data as unknown as Record<string, unknown>); setSelected({kind: 'pages', value: pageId}); setSelectedPageId(pageId)
-      setDetailOffset(offset); setDetailTotal(Number(data.total_slots ?? 0)); setCellSelection(null)
-      setSnapshot(current => current ? {...current, pages: current.pages.map(page => page.page_id === data.page_id ? data : page)} : current)
-    } catch (error) {
-      if (requestId === detailRequestRef.current) {setError(errorMessage(error)); setDenied(error instanceof ApiError && error.status === 403)}
-    } finally {
-      if (requestId === detailRequestRef.current) setPageRefreshBusy(false)
+  useEffect(() => {
+    void refreshSnapshot()
+    return () => {
+      snapshotRequestRef.current += 1
+      detailRequestRef.current += 1
+      changeRequestRef.current += 1
+      cacheRequestRef.current += 1
+      indexRequestRef.current += 1
     }
-  }, [detailOffset])
+  }, [refreshSnapshot])
+  const refreshPage = useCallback(
+    async (pageId: string, offset = detailOffset) => {
+      const requestId = ++detailRequestRef.current
+      setPageRefreshBusy(true)
+      setError('')
+      setDenied(false)
+      try {
+        const data = await api<StoragePageDetail>(`/api/storage/pages/${encodeURIComponent(pageId)}?offset=${offset}&limit=40`)
+        if (requestId !== detailRequestRef.current) return
+        setDetail(data as unknown as Record<string, unknown>)
+        setSelected({ kind: 'pages', value: pageId })
+        setSelectedPageId(pageId)
+        setDetailOffset(offset)
+        setDetailTotal(Number(data.total_slots ?? 0))
+        setCellSelection(null)
+        setSnapshot(current => (current ? { ...current, pages: current.pages.map(page => (page.page_id === data.page_id ? data : page)) } : current))
+      } catch (error) {
+        if (requestId === detailRequestRef.current) {
+          setError(errorMessage(error))
+          setDenied(error instanceof ApiError && error.status === 403)
+        }
+      } finally {
+        if (requestId === detailRequestRef.current) setPageRefreshBusy(false)
+      }
+    },
+    [detailOffset]
+  )
   const refreshPageChanges = useCallback(async () => {
     const base = snapshot
     if (!base) return
@@ -404,10 +942,16 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
         if (!current) return current
         const pagesById = new Map(current.pages.map(page => [page.page_id, page]))
         for (const page of value.pages) pagesById.set(page.page_id, page)
-        return {...current, pages: [...pagesById.values()].sort((left, right) => left.page_id - right.page_id),
-          storage_revision: value.revision, snapshot_at: value.changed_page_ids.length ? value.snapshot_at : current.snapshot_at,
-          total: value.total ?? current.total, page_size: value.page_size ?? current.page_size,
-          free_pages: value.free_pages ?? current.free_pages, free_page_count: value.free_page_count ?? current.free_page_count}
+        return {
+          ...current,
+          pages: [...pagesById.values()].sort((left, right) => left.page_id - right.page_id),
+          storage_revision: value.revision,
+          snapshot_at: value.changed_page_ids.length ? value.snapshot_at : current.snapshot_at,
+          total: value.total ?? current.total,
+          page_size: value.page_size ?? current.page_size,
+          free_pages: value.free_pages ?? current.free_pages,
+          free_page_count: value.free_page_count ?? current.free_page_count
+        }
       })
     } catch (error) {
       if (requestId === changeRequestRef.current) setError(errorMessage(error))
@@ -417,7 +961,14 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
   }, [refreshSnapshot, snapshot])
   async function inspect(kind: 'pages' | 'indexes', value: string, start = 0) {
     const requestId = ++detailRequestRef.current
-    setDetailBusy(true); setDetailLoading(true); setDetail(null); setSelected({kind, value}); setDetailOffset(start); setDetailTotal(0); setDetailTitle(kind === 'pages' ? '' : `索引 ${value}`); setError('')
+    setDetailBusy(true)
+    setDetailLoading(true)
+    setDetail(null)
+    setSelected({ kind, value })
+    setDetailOffset(start)
+    setDetailTotal(0)
+    setDetailTitle(kind === 'pages' ? '' : `索引 ${value}`)
+    setError('')
     if (kind === 'pages') {
       setSelectedPageId(value)
       // WHY：重新打开页面时先清掉旧块选中态，避免异步加载期间抽屉短暂展示上一页的块信息。
@@ -427,31 +978,43 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
     try {
       const data = await api<Record<string, unknown>>(`/api/storage/${kind}/${encodeURIComponent(value)}?offset=${start}&limit=40`)
       if (requestId !== detailRequestRef.current) return
-      setDetail(data); setSelected({kind, value}); if (kind === 'pages') setSelectedPageId(value); setDetailOffset(start)
+      setDetail(data)
+      setSelected({ kind, value })
+      if (kind === 'pages') setSelectedPageId(value)
+      setDetailOffset(start)
       setDetailTotal(Number(data.total_slots ?? data.total ?? 0))
       setDetailTitle(kind === 'pages' ? '' : `索引 ${value}`)
-    } catch (error) {if (requestId === detailRequestRef.current) setError(errorMessage(error))}
-    finally {if (requestId === detailRequestRef.current) {setDetailBusy(false); setDetailLoading(false)}}
-  }
-  const refreshActiveView = useCallback(async (_automatic = false) => {
-    if (busy || activeRefreshRef.current) return
-    activeRefreshRef.current = true
-    try {
-      if (tab === 'pages') {
-        const jobs: Promise<void>[] = [refreshPageChanges()]
-        if (cacheFocus) jobs.push(refreshCache())
-        if (selected?.kind === 'pages') jobs.push(refreshPage(selected.value))
-        await Promise.all(jobs)
-      } else if (tab === 'buffer') {
-        await refreshCache()
-      } else if (tab === 'indexes') {
-        if (selected?.kind === 'indexes') await inspect('indexes', selected.value, detailOffset)
-        else await refreshIndexCatalog()
-      }
+    } catch (error) {
+      if (requestId === detailRequestRef.current) setError(errorMessage(error))
     } finally {
-      activeRefreshRef.current = false
+      if (requestId === detailRequestRef.current) {
+        setDetailBusy(false)
+        setDetailLoading(false)
+      }
     }
-  }, [busy, cacheFocus, detailOffset, refreshCache, refreshIndexCatalog, refreshPage, refreshPageChanges, selected, tab])
+  }
+  const refreshActiveView = useCallback(
+    async (_automatic = false) => {
+      if (busy || activeRefreshRef.current) return
+      activeRefreshRef.current = true
+      try {
+        if (tab === 'pages') {
+          const jobs: Promise<void>[] = [refreshPageChanges()]
+          if (cacheFocus) jobs.push(refreshCache())
+          if (selected?.kind === 'pages') jobs.push(refreshPage(selected.value))
+          await Promise.all(jobs)
+        } else if (tab === 'buffer') {
+          await refreshCache()
+        } else if (tab === 'indexes') {
+          if (selected?.kind === 'indexes') await inspect('indexes', selected.value, detailOffset)
+          else await refreshIndexCatalog()
+        }
+      } finally {
+        activeRefreshRef.current = false
+      }
+    },
+    [busy, cacheFocus, detailOffset, refreshCache, refreshIndexCatalog, refreshPage, refreshPageChanges, selected, tab]
+  )
   useEffect(() => {
     if (!active || refreshToken === 0) return
     void refreshActiveView(true)
@@ -464,42 +1027,56 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
     void inspect('pages', pageId)
   }
   function selectTab(value: string) {
-    setTab(value); setDetail(null); setSelected(null); setSelectedPageId(null); setDetailLoading(false); setDetailBusy(false); ++detailRequestRef.current
+    setTab(value)
+    setDetail(null)
+    setSelected(null)
+    setSelectedPageId(null)
+    setDetailLoading(false)
+    setDetailBusy(false)
+    ++detailRequestRef.current
     if (value === 'pages') void refreshPageChanges()
     if (value === 'buffer') void refreshCache()
     if (value === 'indexes') void refreshIndexCatalog()
   }
-  const pageDetail = selected?.kind === 'pages' && detail ? detail as unknown as StoragePageDetail : null
-  const indexDetail = selected?.kind === 'indexes' && detail ? detail as unknown as IndexSnapshot : null
-  const handleCellDetail = useCallback((selection: PageGridSelection | null) => {
-    const requestId = ++slotDetailRequestRef.current
-    setCellSelection(selection)
-    if (!selection || selected?.kind !== 'pages' || selection.slotIds.length === 0) return
-    const pageId = selected.value
-    const missingSlotIds = selection.slotIds
-      .filter(slotId => !selection.slotDetails.some(slot => slot.slot_id === slotId && slotRecordLoaded(slot)))
-      .slice(0, 12)
-    if (missingSlotIds.length === 0) return
-    const selectionKey = `${selection.cellIndex}:${selection.slotIds.join(',')}`
-    void Promise.all(missingSlotIds.map(async slotId => {
-      try {
-        const value = await api<StoragePageDetail>(`/api/storage/pages/${encodeURIComponent(pageId)}?offset=${slotId}&limit=1`)
-        return value.slots?.find(slot => slot.slot_id === slotId) ?? null
-      } catch {
-        return null
-      }
-    })).then(rows => {
-      if (requestId !== slotDetailRequestRef.current) return
-      const loaded = rows.filter((slot): slot is StorageSlot => slot !== null)
-      if (loaded.length === 0) return
-      setCellSelection(current => {
-        if (!current || `${current.cellIndex}:${current.slotIds.join(',')}` !== selectionKey) return current
-        const byId = new Map<number, StorageSlot>(current.slotDetails.map(slot => [slot.slot_id, slot]))
-        for (const slot of loaded) byId.set(slot.slot_id, slot)
-        return {...current, slotDetails: current.slotIds.map(slotId => byId.get(slotId)).filter((slot): slot is StorageSlot => slot !== undefined)}
+  const pageDetail = selected?.kind === 'pages' && detail ? (detail as unknown as StoragePageDetail) : null
+  const indexDetail = selected?.kind === 'indexes' && detail ? (detail as unknown as IndexSnapshot) : null
+  const handleCellDetail = useCallback(
+    (selection: PageGridSelection | null) => {
+      const requestId = ++slotDetailRequestRef.current
+      setCellSelection(selection)
+      if (!selection || selected?.kind !== 'pages' || selection.slotIds.length === 0) return
+      const pageId = selected.value
+      const missingSlotIds = selection.slotIds
+        .filter(slotId => !selection.slotDetails.some(slot => slot.slot_id === slotId && slotRecordLoaded(slot)))
+        .slice(0, 12)
+      if (missingSlotIds.length === 0) return
+      const selectionKey = `${selection.cellIndex}:${selection.slotIds.join(',')}`
+      void Promise.all(
+        missingSlotIds.map(async slotId => {
+          try {
+            const value = await api<StoragePageDetail>(`/api/storage/pages/${encodeURIComponent(pageId)}?offset=${slotId}&limit=1`)
+            return value.slots?.find(slot => slot.slot_id === slotId) ?? null
+          } catch {
+            return null
+          }
+        })
+      ).then(rows => {
+        if (requestId !== slotDetailRequestRef.current) return
+        const loaded = rows.filter((slot): slot is StorageSlot => slot !== null)
+        if (loaded.length === 0) return
+        setCellSelection(current => {
+          if (!current || `${current.cellIndex}:${current.slotIds.join(',')}` !== selectionKey) return current
+          const byId = new Map<number, StorageSlot>(current.slotDetails.map(slot => [slot.slot_id, slot]))
+          for (const slot of loaded) byId.set(slot.slot_id, slot)
+          return {
+            ...current,
+            slotDetails: current.slotIds.map(slotId => byId.get(slotId)).filter((slot): slot is StorageSlot => slot !== undefined)
+          }
+        })
       })
-    })
-  }, [selected])
+    },
+    [selected]
+  )
   function closeDetail() {
     const pageId = selected?.kind === 'pages' ? selected.value : null
     const indexName = selected?.kind === 'indexes' ? selected.value : null
@@ -509,22 +1086,31 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
       setCellSelection(null)
       return
     }
-    ++detailRequestRef.current; setDetail(null); setSelected(null); setDetailLoading(false); setDetailBusy(false)
-    if (indexName) window.requestAnimationFrame(() => indexButtonRefs.current.get(indexName)?.focus({preventScroll: true}))
+    ++detailRequestRef.current
+    setDetail(null)
+    setSelected(null)
+    setDetailLoading(false)
+    setDetailBusy(false)
+    if (indexName) window.requestAnimationFrame(() => indexButtonRefs.current.get(indexName)?.focus({ preventScroll: true }))
   }
   useEffect(() => {
     if (!detail) return
-    if (selected?.kind === 'indexes') indexHeadingRef.current?.focus({preventScroll: true})
-    else detailHeadingRef.current?.focus({preventScroll: true})
+    if (selected?.kind === 'indexes') indexHeadingRef.current?.focus({ preventScroll: true })
+    else detailHeadingRef.current?.focus({ preventScroll: true })
   }, [detail, selected])
   useEffect(() => {
     if (!detail && !detailLoading) return
-    const closeOnEscape = (event: KeyboardEvent) => {if (event.key === 'Escape') closeDetail()}
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDetail()
+    }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [detail, detailLoading, selected])
   const raw = detail ? rawValue(detail.raw_payload) : null
-  const jsonDetail = detail && pageDetail ? Object.fromEntries(Object.entries(detail).filter(([key]) => key !== 'raw_payload' && key !== 'raw_page' && key !== 'slots')) : detail
+  const jsonDetail =
+    detail && pageDetail
+      ? Object.fromEntries(Object.entries(detail).filter(([key]) => key !== 'raw_payload' && key !== 'raw_page' && key !== 'slots'))
+      : detail
   const currentCache = cacheSnapshot?.buffer_pool ?? snapshot?.buffer_pool
   const evictionOrder = currentCache?.eviction_order ?? []
   const evictionRankByPageId = new Map(evictionOrder.map((pageId, index) => [pageId, index + 1] as const))
@@ -539,35 +1125,32 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
   const visiblePageTypes = pageTypeLegend.filter(item => snapshot?.pages.some(page => page.type === item.type))
   const usageFill = pageUsageVisual === 'fill'
   const linkedDataPageIds = new Set(selectedTable?.page_ids.map(pageId => Number(pageId)) ?? [])
-  const linkedIndexRootIds = new Set((selectedTable?.indexes ?? [])
-    .map(index => index.root_page_id)
-    .filter((pageId): pageId is number => typeof pageId === 'number'))
-  const linkedIndexPageIds = new Set<number>([
-    ...linkedIndexRootIds,
-    ...Object.values(indexPageIdsByName).flat(),
-  ])
+  const linkedIndexRootIds = new Set(
+    (selectedTable?.indexes ?? []).map(index => index.root_page_id).filter((pageId): pageId is number => typeof pageId === 'number')
+  )
+  const linkedIndexPageIds = new Set<number>([...linkedIndexRootIds, ...Object.values(indexPageIdsByName).flat()])
   const linkedPageIds = new Set([...linkedDataPageIds, ...linkedIndexPageIds])
-  const selectedIndexBindingsKey = selectedTable?.indexes
-    .map(index => `${index.name}\u0002${index.root_page_id ?? ''}`)
-    .join('\u0001') ?? ''
+  const selectedIndexBindingsKey = selectedTable?.indexes.map(index => `${index.name}\u0002${index.root_page_id ?? ''}`).join('\u0001') ?? ''
   useEffect(() => {
     let cancelled = false
-    const indexNames = selectedIndexBindingsKey
-      ? selectedIndexBindingsKey.split('\u0001').map(binding => binding.split('\u0002', 1)[0])
-      : []
+    const indexNames = selectedIndexBindingsKey ? selectedIndexBindingsKey.split('\u0001').map(binding => binding.split('\u0002', 1)[0]) : []
     setIndexPageIdsByName({})
     setIndexBindingError('')
     if (indexNames.length === 0) {
-      return () => {cancelled = true}
-    }
-    void Promise.all(indexNames.map(async name => {
-      try {
-        const value = await api<IndexSnapshot>(`/api/storage/indexes/${encodeURIComponent(name)}?limit=1`)
-        return {name, pageIds: value.all_page_ids ?? value.page_ids, failed: false}
-      } catch {
-        return {name, pageIds: [] as number[], failed: true}
+      return () => {
+        cancelled = true
       }
-    })).then(results => {
+    }
+    void Promise.all(
+      indexNames.map(async name => {
+        try {
+          const value = await api<IndexSnapshot>(`/api/storage/indexes/${encodeURIComponent(name)}?limit=1`)
+          return { name, pageIds: value.all_page_ids ?? value.page_ids, failed: false }
+        } catch {
+          return { name, pageIds: [] as number[], failed: true }
+        }
+      })
+    ).then(results => {
       if (cancelled) return
       const next: Record<string, number[]> = {}
       let failed = false
@@ -578,54 +1161,473 @@ export default function StoragePanel({fullMode = false, onExit, selectedTable = 
       setIndexPageIdsByName(next)
       setIndexBindingError(failed ? '部分索引页未加载' : '')
     })
-    return () => {cancelled = true}
+    return () => {
+      cancelled = true
+    }
   }, [selectedIndexBindingsKey, snapshot?.snapshot_at])
   useEffect(() => {
     if (!selectedTable || tab !== 'pages' || !snapshot) return
     const firstLinkedPage = snapshot.pages.find(page => linkedPageIds.has(page.page_id))
     if (!firstLinkedPage) return
-    window.requestAnimationFrame(() => pageButtonRefs.current.get(String(firstLinkedPage.page_id))?.scrollIntoView({block: 'nearest', inline: 'nearest'}))
+    window.requestAnimationFrame(() =>
+      pageButtonRefs.current.get(String(firstLinkedPage.page_id))?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    )
   }, [selectedTable?.name, snapshot?.snapshot_at, tab])
   const indexScreenOpen = tab === 'indexes' && selected?.kind === 'indexes'
   const selectedIndexName = selected?.kind === 'indexes' ? selected.value : ''
-  const selectedPageHeader = selectedPageId && snapshot ? snapshot.pages.find(page => String(page.page_id) === selectedPageId) ?? null : null
+  const selectedPageHeader = selectedPageId && snapshot ? (snapshot.pages.find(page => String(page.page_id) === selectedPageId) ?? null) : null
   const detailPanelOpen = selected?.kind === 'pages' && pageDetail !== null && cellSelection !== null
   // HOW：页面地图页签常驻右侧详情栏；未选中块时只给占位提示，布局不因开关抽屉而重排。
   const railOpen = tab === 'pages'
   const detailPanelHeading = pageDetail ? (cellSelection ? `块 #${cellSelection.cellIndex}` : '块') : detailTitle
-  const detailPanel = railOpen && <aside className="storage-detail-panel" aria-labelledby="storage-panel-title" aria-busy={detailLoading}>
-    <div className="storage-detail-panel-header"><div><h3 id="storage-panel-title" ref={detailHeadingRef} tabIndex={-1}>{detailPanelOpen ? detailPanelHeading : '块详情'}</h3></div>{detailPanelOpen && <div className="storage-detail-panel-actions"><button className="icon-button" aria-label="关闭存储详情" onClick={closeDetail} disabled={detailLoading || pageRefreshBusy}><X size={18}/></button></div>}</div>
-    <div className="storage-detail-panel-body">{detailPanelOpen
-      ? <div className="storage-detail page-detail">{pageDetail && cellSelection && <PageGridSelectionDetail selection={cellSelection} detail={pageDetail}/>}
-        {selected?.kind === 'pages' && detailTotal > 40 && pageDetail?.type !== 'heap' && <div className="small-pagination"><button aria-label="上一页存储条目" disabled={!detailOffset || busy} onClick={() => inspect(selected.kind, selected.value, Math.max(0, detailOffset - 40))}><ChevronLeft size={13}/></button><span>已显示 {Math.min(detailOffset + 40, detailTotal)} / {detailTotal}</span><button aria-label="下一页存储条目" disabled={detailOffset + 40 >= detailTotal || busy} onClick={() => inspect(selected.kind, selected.value, detailOffset + 40)}><ChevronRight size={13}/></button></div>}
+  const detailPanel = railOpen && (
+    <aside className="storage-detail-panel" aria-labelledby="storage-panel-title" aria-busy={detailLoading}>
+      <div className="storage-detail-panel-header">
+        <div>
+          <h3 id="storage-panel-title" ref={detailHeadingRef} tabIndex={-1}>
+            {detailPanelOpen ? detailPanelHeading : '块详情'}
+          </h3>
+        </div>
+        {detailPanelOpen && (
+          <div className="storage-detail-panel-actions">
+            <button className="icon-button" aria-label="关闭存储详情" onClick={closeDetail} disabled={detailLoading || pageRefreshBusy}>
+              <X size={18} />
+            </button>
+          </div>
+        )}
       </div>
-      : <p className="storage-rail-empty"><ListTree size={13}/><span>在页面画布上选一块查看页内字节。</span></p>}
-    </div></aside>
+      <div className="storage-detail-panel-body">
+        {detailPanelOpen ? (
+          <div className="storage-detail page-detail">
+            {pageDetail && cellSelection && <PageGridSelectionDetail selection={cellSelection} detail={pageDetail} />}
+            {selected?.kind === 'pages' && detailTotal > 40 && pageDetail?.type !== 'heap' && (
+              <div className="small-pagination">
+                <button
+                  aria-label="上一页存储条目"
+                  disabled={!detailOffset || busy}
+                  onClick={() => inspect(selected.kind, selected.value, Math.max(0, detailOffset - 40))}
+                >
+                  <ChevronLeft size={13} />
+                </button>
+                <span>
+                  已显示 {Math.min(detailOffset + 40, detailTotal)} / {detailTotal}
+                </span>
+                <button
+                  aria-label="下一页存储条目"
+                  disabled={detailOffset + 40 >= detailTotal || busy}
+                  onClick={() => inspect(selected.kind, selected.value, detailOffset + 40)}
+                >
+                  <ChevronRight size={13} />
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="storage-rail-empty">
+            <ListTree size={13} />
+            <span>在页面画布上选一块查看页内字节。</span>
+          </p>
+        )}
+      </div>
+    </aside>
+  )
 
-  return <section className={`storage-panel ${fullMode ? 'full-storage' : ''} ${indexScreenOpen ? 'index-screen-active' : ''}`} aria-label="存储检查与缓存运行态" aria-busy={busy}>
-    <div className={`storage-mode-layout ${railOpen ? 'has-rail' : ''}`}><div className="storage-scroll"><div className="storage-heading"><span><LockKeyhole size={14}/><span className="storage-heading-title"><b>{indexScreenOpen ? '索引检查' : '存储检查'}</b><small>{indexScreenOpen ? 'B+Tree 结构 · 键组' : '页面 · 槽位 · 页内字节'}</small></span></span><div className="storage-heading-actions">{fullMode && onExit && <button className="subtle" onClick={onExit}>返回 SQL</button>}<button className="subtle" onClick={() => void refreshActiveView(false)} disabled={busy} title="只刷新当前页签或选中对象"><RefreshCw size={13} className={busy ? 'spin' : ''}/>{tab === 'pages' ? selected?.kind === 'pages' ? '刷新本页' : '刷新地图' : tab === 'buffer' ? '刷新缓存' : tab === 'indexes' ? selected?.kind === 'indexes' ? '刷新索引' : '刷新索引目录' : '刷新'}</button>{tab === 'pages' && selected?.kind === 'pages' && <button className="subtle" onClick={() => void refreshSnapshot()} disabled={busy} title="重新加载完整页面地图">地图</button>}</div></div>
-    {error && <div className="inline-error" role="alert"><strong>{denied ? '无权查看存储' : '读取失败'}</strong><p>{error}</p>{denied && <span>需要全库 SELECT 和 SECURITY 权限。</span>}</div>}
-    {!snapshot && !error && <div className="inspector-empty"><RefreshCw className="spin"/><span>{snapshotProgress.total ? `正在读取页面 ${snapshotProgress.loaded} / ${snapshotProgress.total}…` : '读取数据库快照…'}</span></div>}
-    {snapshot && !denied && <>
-      {indexScreenOpen ? <IndexScreen name={selectedIndexName} value={indexDetail} loading={detailLoading} onBack={closeDetail} onPage={pageId => {void inspect('pages', String(pageId))}} onNavigate={offset => {void inspect('indexes', selectedIndexName, offset)}} busy={busy} jsonDetail={jsonDetail} raw={raw} headingRef={indexHeadingRef}/> : <>
-      <div className="storage-summary-line"><span><b>{snapshot.total}</b> 页 · {snapshot.page_size.toLocaleString()} B / 页</span><span>空闲 {snapshot.free_page_count} 页</span></div>
-      {snapshotBusy && snapshotProgress.total > snapshotProgress.loaded && <div className="storage-load-status" role="status" aria-live="polite"><div><RefreshCw size={12} className="spin"/><span>正在载入页面 {snapshotProgress.loaded} / {snapshotProgress.total}</span></div><progress value={snapshotProgress.loaded} max={snapshotProgress.total}/></div>}
-      <div className="storage-tabs">{[['pages', '页面'], ['buffer', '缓存'], ['indexes', '索引']].map(([value, label]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => selectTab(value)}>{label}</button>)}</div>
-      {tab === 'pages' && <>
-         <div className="storage-page-guide compact"><div className="page-guide-copy"><strong>页面</strong><small>{snapshot.pages.length} / {snapshot.total} 页{indexBindingError ? ` · ${indexBindingError}` : ''}</small></div><div className="page-guide-side"><div className="page-color-legend" aria-label="页面类型颜色图例"><span className="page-legend-label">颜色图例</span>{visiblePageTypes.map(item => <span key={item.type}><i className={`page-key ${item.type}`}/><span>{item.label}</span></span>)}{selectedTable && <span className="table-link-legend"><i className="page-key table-link"/><span>关联页</span></span>}<span className="page-density-legend" title={usageFill ? '填充高度代表页面使用率' : '页块颜色越深，页面使用率越高'}><i className={`page-density-swatch ${usageFill ? 'fill' : 'depth'}`}/><span>{usageFill ? '低→高：填充比例' : '浅→深：颜色深度'}</span></span></div><button type="button" className={`page-usage-toggle ${usageFill ? 'active' : ''}`} aria-pressed={usageFill} aria-label="切换页面使用率的视觉编码" title={`切换为${usageFill ? '颜色深度' : '填充比例'}表示页面使用率`} onClick={() => setPageUsageVisual(value => value === 'color' ? 'fill' : 'color')}><span>使用率</span><span className="page-usage-toggle-track" aria-hidden="true"/><span className="page-usage-toggle-value">{usageFill ? '填充比例' : '颜色深度'}</span></button><button type="button" className={`cache-toggle ${cacheFocus ? 'active' : ''}`} aria-pressed={cacheFocus} onClick={() => {setCacheFocus(value => !value); if (!cacheFocus) void refreshCache()}}><HardDrive size={12}/><span>{cacheFocus ? '关闭缓存高亮' : '高亮缓存页'}</span><small>{cachedPageIds.size} 页</small></button></div></div>
-        <div className={`page-map ${usageFill ? 'usage-fill' : ''} ${cacheFocus ? 'cache-focus' : ''} ${selectedTable ? 'table-focus' : ''}`} aria-label={selectedTable ? `${selectedTable.name} 的关联页面：${[...linkedPageIds].join(', ') || '暂无'}` : cacheFocus ? `缓存高亮已开启，${cachedPageIds.size} 个页面在缓存中` : `页面预览，使用率按${usageFill ? '填充比例' : '颜色深度'}表示`}>{snapshot.pages.map(page => {const pageId = String(page.page_id); const cached = cachedPageIds.has(page.page_id); const active = selectedPageId === pageId; const used = page.logical_used_space ?? page.payload_size; const occupancy = pageOccupancy(page); const linked = linkedPageIds.has(page.page_id); const linkedIndexPage = linkedIndexPageIds.has(page.page_id); const indexRoot = linkedIndexRootIds.has(page.page_id); const frame = cacheFrameByPageId.get(page.page_id); const evictionRank = evictionRankByPageId.get(page.page_id); const cacheOrderText = evictionRank ? ` · 淘汰序 #${evictionRank}` : frame?.pin_count ? ' · Pin，不参与淘汰' : ''; const tooltipText = `#${page.page_id} · ${pageTypeLabels[page.type] ?? page.type} · ${used} B 已用 · ${page.free_space} B 空闲${cached ? ` · 缓存${cacheOrderText}` : ''}${selectedTable && linked ? ` · ${linkedIndexPage ? indexRoot ? '索引根页' : '索引页' : '关联表'}` : ''}`; return <button key={page.page_id} type="button" ref={element => {if (element) pageButtonRefs.current.set(pageId, element); else pageButtonRefs.current.delete(pageId)}} aria-pressed={active} aria-label={tooltipText} className={`page-tile ${page.type} ${active ? 'selected' : ''} ${selectedTable && linked ? linkedIndexPage ? 'table-linked-index' : 'table-linked' : ''} ${cacheFocus ? cached ? 'cache-hit' : 'cache-muted' : ''}`} style={{'--page-occupancy': occupancy.ratio, '--eviction-rank': evictionRank ? JSON.stringify(String(evictionRank)) : 'none'} as CSSProperties} onClick={() => selectPage(pageId)} {...tooltipProps(tooltipText)} />})}</div>
-         {!pageDetail && selectedPageHeader && selectedPageHeader.table_name && <div className="storage-page-association-preview"><PageAssociation page={selectedPageHeader} onSelectTable={onSelectTable} onOpenIndex={indexName => {void inspect('indexes', indexName)}}/></div>}
-         {pageDetail && <PageGrid detail={pageDetail} onCellDetail={handleCellDetail}/>}
-        {pageDetail?.type === 'heap' && <section className="storage-slot-workbench" aria-label="槽位记录"><div className="storage-slot-workbench-heading"><div><strong>槽位记录</strong><span>{pageDetail.total_slots ?? pageDetail.slots?.length ?? 0} 条</span></div></div><PageData detail={pageDetail}/>{selected && detailTotal > 40 && <div className="slot-pagination"><button aria-label="上一页槽位记录" disabled={!detailOffset || busy} onClick={() => inspect(selected.kind, selected.value, Math.max(0, detailOffset - 40))}><ChevronLeft size={13}/></button><span>已显示 {Math.min(detailOffset + 40, detailTotal)} / {detailTotal}</span><button aria-label="下一页槽位记录" disabled={detailOffset + 40 >= detailTotal || busy} onClick={() => inspect(selected.kind, selected.value, detailOffset + 40)}><ChevronRight size={13}/></button></div>}</section>}
-        {pageDetail && <PagePayloadWorkbench detail={pageDetail} jsonDetail={jsonDetail} raw={raw} onSelectTable={onSelectTable} onOpenIndex={indexName => {void inspect('indexes', indexName)}}/>}
-      </>}
-      {tab === 'buffer' && currentCache && <><div className="storage-tab-refresh-status" role="status">{cacheBusy ? <><RefreshCw size={11} className="spin"/>正在刷新缓存运行态…</> : <>缓存快照 · {new Date(cacheSnapshot?.snapshot_at ?? snapshot.snapshot_at).toLocaleTimeString()}</>}</div><div className="buffer-stats"><span>命中率 <b>{(currentCache.stats.hit_rate * 100).toFixed(1)}%</b></span><span>{currentCache.stats.size} / {currentCache.stats.capacity} 帧 · {currentCache.policy.toUpperCase()}</span><span>换入 {currentCache.stats.misses} · 淘汰 {currentCache.stats.evictions}</span></div><div className="storage-policy-control"><div className="storage-policy-label"><Settings2 size={13}/><label htmlFor="storage-replacement-policy">缓存置换策略</label></div><select id="storage-replacement-policy" value={policyDraft ?? currentCache.policy as ReplacementPolicy} onChange={event => setPolicyDraft(event.target.value as ReplacementPolicy)} disabled={busy} title="切换后不清空现有缓存帧；下一次淘汰开始采用新策略"><option value="lru">LRU · 最近最少使用</option><option value="fifo">FIFO · 先进先出</option></select><button type="button" className="subtle" onClick={() => void changeReplacementPolicy((policyDraft ?? currentCache.policy) as ReplacementPolicy)} disabled={busy || (policyDraft ?? currentCache.policy) === currentCache.policy}>{policyBusy ? <RefreshCw size={12} className="spin"/> : '应用'}</button><small>当前服务进程</small></div>{policyNotice && <div className="storage-policy-notice" role="status">{policyNotice}</div>}<table className="compact-table"><thead><tr><th>淘汰序</th><th>页号</th><th>类型</th><th>Pin</th><th>Dirty</th></tr></thead><tbody>{orderedCacheFrames.map(frame => {const evictionRank = evictionRankByPageId.get(frame.page_id); return <tr key={frame.page_id}><td>{evictionRank ?? (frame.pin_count ? 'Pin' : '—')}</td><td>{frame.page_id}</td><td>{frame.type}</td><td>{frame.pin_count}</td><td>{frame.dirty ? '是' : '否'}</td></tr>})}</tbody></table><JsonTree value={cacheSnapshot?.io ?? snapshot.io} name="进程页 I/O 计数"/></>}
-      {tab === 'indexes' && <>{snapshot.indexes.length === 0 ? <div className="side-empty">暂无显式索引</div> : snapshot.indexes.map(index => <button type="button" className={`index-select ${selectedTable?.indexes.some(item => item.name === index.name) ? 'table-index-linked' : ''}`} key={index.name} ref={element => {if (element) indexButtonRefs.current.set(index.name, element); else indexButtonRefs.current.delete(index.name)}} aria-label={`打开索引 ${index.name}`} onClick={() => {void inspect('indexes', index.name)}}><span>{index.name}</span><small>{index.columns.join(', ')}{selectedTable?.indexes.some(item => item.name === index.name) ? ` · ${selectedTable.name}` : ''}</small><ChevronRight size={13}/></button>)}</>}
-      <details className="storage-limitations"><summary>当前存储实现与限制</summary>{snapshot.limitations.map(note => <p key={note}>{note}</p>)}<p>空闲页：{snapshot.free_pages.join(', ') || '当前快照范围内无空闲页'}</p></details>
-      <div className="snapshot-time">更新 {new Date(snapshot.snapshot_at).toLocaleTimeString()}</div>
-      </>}
-    </>}
-    </div>{detailPanel}</div>
-    <StorageTooltip tooltip={tooltip}/>
-  </section>
+  return (
+    <section
+      className={`storage-panel ${fullMode ? 'full-storage' : ''} ${indexScreenOpen ? 'index-screen-active' : ''}`}
+      aria-label="存储检查与缓存运行态"
+      aria-busy={busy}
+    >
+      <div className={`storage-mode-layout ${railOpen ? 'has-rail' : ''}`}>
+        <div className="storage-scroll">
+          <div className="storage-heading">
+            <span>
+              <LockKeyhole size={14} />
+              <span className="storage-heading-title">
+                <b>{indexScreenOpen ? '索引检查' : '存储检查'}</b>
+                <small>{indexScreenOpen ? 'B+Tree 结构 · 键组' : '页面 · 槽位 · 页内字节'}</small>
+              </span>
+            </span>
+            <div className="storage-heading-actions">
+              {fullMode && onExit && (
+                <button className="subtle" onClick={onExit}>
+                  返回 SQL
+                </button>
+              )}
+              <button className="subtle" onClick={() => void refreshActiveView(false)} disabled={busy} title="只刷新当前页签或选中对象">
+                <RefreshCw size={13} className={busy ? 'spin' : ''} />
+                {tab === 'pages'
+                  ? selected?.kind === 'pages'
+                    ? '刷新本页'
+                    : '刷新地图'
+                  : tab === 'buffer'
+                    ? '刷新缓存'
+                    : tab === 'indexes'
+                      ? selected?.kind === 'indexes'
+                        ? '刷新索引'
+                        : '刷新索引目录'
+                      : '刷新'}
+              </button>
+              {tab === 'pages' && selected?.kind === 'pages' && (
+                <button className="subtle" onClick={() => void refreshSnapshot()} disabled={busy} title="重新加载完整页面地图">
+                  地图
+                </button>
+              )}
+            </div>
+          </div>
+          {error && (
+            <div className="inline-error" role="alert">
+              <strong>{denied ? '无权查看存储' : '读取失败'}</strong>
+              <p>{error}</p>
+              {denied && <span>需要全库 SELECT 和 SECURITY 权限。</span>}
+            </div>
+          )}
+          {!snapshot && !error && (
+            <div className="inspector-empty">
+              <RefreshCw className="spin" />
+              <span>{snapshotProgress.total ? `正在读取页面 ${snapshotProgress.loaded} / ${snapshotProgress.total}…` : '读取数据库快照…'}</span>
+            </div>
+          )}
+          {snapshot && !denied && (
+            <>
+              {indexScreenOpen ? (
+                <IndexScreen
+                  name={selectedIndexName}
+                  value={indexDetail}
+                  loading={detailLoading}
+                  onBack={closeDetail}
+                  onPage={pageId => {
+                    void inspect('pages', String(pageId))
+                  }}
+                  onNavigate={offset => {
+                    void inspect('indexes', selectedIndexName, offset)
+                  }}
+                  busy={busy}
+                  jsonDetail={jsonDetail}
+                  raw={raw}
+                  headingRef={indexHeadingRef}
+                />
+              ) : (
+                <>
+                  <div className="storage-summary-line">
+                    <span>
+                      <b>{snapshot.total}</b> 页 · {snapshot.page_size.toLocaleString()} B / 页
+                    </span>
+                    <span>空闲 {snapshot.free_page_count} 页</span>
+                  </div>
+                  {snapshotBusy && snapshotProgress.total > snapshotProgress.loaded && (
+                    <div className="storage-load-status" role="status" aria-live="polite">
+                      <div>
+                        <RefreshCw size={12} className="spin" />
+                        <span>
+                          正在载入页面 {snapshotProgress.loaded} / {snapshotProgress.total}
+                        </span>
+                      </div>
+                      <progress value={snapshotProgress.loaded} max={snapshotProgress.total} />
+                    </div>
+                  )}
+                  <div className="storage-tabs">
+                    {[
+                      ['pages', '页面'],
+                      ['buffer', '缓存'],
+                      ['indexes', '索引']
+                    ].map(([value, label]) => (
+                      <button key={value} className={tab === value ? 'active' : ''} onClick={() => selectTab(value)}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {tab === 'pages' && (
+                    <>
+                      <div className="storage-page-guide compact">
+                        <div className="page-guide-copy">
+                          <strong>页面</strong>
+                          <small>
+                            {snapshot.pages.length} / {snapshot.total} 页{indexBindingError ? ` · ${indexBindingError}` : ''}
+                          </small>
+                        </div>
+                        <div className="page-guide-side">
+                          <div className="page-color-legend" aria-label="页面类型颜色图例">
+                            <span className="page-legend-label">颜色图例</span>
+                            {visiblePageTypes.map(item => (
+                              <span key={item.type}>
+                                <i className={`page-key ${item.type}`} />
+                                <span>{item.label}</span>
+                              </span>
+                            ))}
+                            {selectedTable && (
+                              <span className="table-link-legend">
+                                <i className="page-key table-link" />
+                                <span>关联页</span>
+                              </span>
+                            )}
+                            <span className="page-density-legend" title={usageFill ? '填充高度代表页面使用率' : '页块颜色越深，页面使用率越高'}>
+                              <i className={`page-density-swatch ${usageFill ? 'fill' : 'depth'}`} />
+                              <span>{usageFill ? '低→高：填充比例' : '浅→深：颜色深度'}</span>
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            className={`page-usage-toggle ${usageFill ? 'active' : ''}`}
+                            aria-pressed={usageFill}
+                            aria-label="切换页面使用率的视觉编码"
+                            title={`切换为${usageFill ? '颜色深度' : '填充比例'}表示页面使用率`}
+                            onClick={() => setPageUsageVisual(value => (value === 'color' ? 'fill' : 'color'))}
+                          >
+                            <span>使用率</span>
+                            <span className="page-usage-toggle-track" aria-hidden="true" />
+                            <span className="page-usage-toggle-value">{usageFill ? '填充比例' : '颜色深度'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={`cache-toggle ${cacheFocus ? 'active' : ''}`}
+                            aria-pressed={cacheFocus}
+                            onClick={() => {
+                              setCacheFocus(value => !value)
+                              if (!cacheFocus) void refreshCache()
+                            }}
+                          >
+                            <HardDrive size={12} />
+                            <span>{cacheFocus ? '关闭缓存高亮' : '高亮缓存页'}</span>
+                            <small>{cachedPageIds.size} 页</small>
+                          </button>
+                        </div>
+                      </div>
+                      <div
+                        className={pageMapClassName({ usageFill, cacheFocus, tableFocus: Boolean(selectedTable) })}
+                        aria-label={
+                          selectedTable
+                            ? `${selectedTable.name} 的关联页面：${[...linkedPageIds].join(', ') || '暂无'}`
+                            : cacheFocus
+                              ? `缓存高亮已开启，${cachedPageIds.size} 个页面在缓存中`
+                              : `页面预览，使用率按${usageFill ? '填充比例' : '颜色深度'}表示`
+                        }
+                      >
+                        {snapshot.pages.map(page => {
+                          const pageId = String(page.page_id)
+                          const cached = cachedPageIds.has(page.page_id)
+                          const active = selectedPageId === pageId
+                          const used = page.logical_used_space ?? page.payload_size
+                          const occupancy = pageOccupancy(page)
+                          const linked = linkedPageIds.has(page.page_id)
+                          const linkedIndexPage = linkedIndexPageIds.has(page.page_id)
+                          const indexRoot = linkedIndexRootIds.has(page.page_id)
+                          const frame = cacheFrameByPageId.get(page.page_id)
+                          const evictionRank = evictionRankByPageId.get(page.page_id)
+                          const cacheOrderText = evictionRank ? ` · 淘汰序 #${evictionRank}` : frame?.pin_count ? ' · Pin，不参与淘汰' : ''
+                          // HOW：tooltip 拼接拆成常量，避免单行超出 150 字符。
+                          const cacheText = cached ? ` · 缓存${cacheOrderText}` : ''
+                          const linkText = selectedTable && linked ? ` · ${linkedIndexPage ? (indexRoot ? '索引根页' : '索引页') : '关联表'}` : ''
+                          const pageText = `#${page.page_id} · ${pageTypeLabels[page.type] ?? page.type}`
+                          const usageText = `${used} B 已用 · ${page.free_space} B 空闲`
+                          const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}`
+                          return (
+                            <button
+                              key={page.page_id}
+                              type="button"
+                              ref={element => {
+                                if (element) pageButtonRefs.current.set(pageId, element)
+                                else pageButtonRefs.current.delete(pageId)
+                              }}
+                              aria-pressed={active}
+                              aria-label={tooltipText}
+                              className={pageTileClassName({ type: page.type, active, linked, linkedIndex: linkedIndexPage, cacheFocus, cached })}
+                              style={
+                                {
+                                  '--page-occupancy': occupancy.ratio,
+                                  '--eviction-rank': evictionRank ? JSON.stringify(String(evictionRank)) : 'none'
+                                } as CSSProperties
+                              }
+                              onClick={() => selectPage(pageId)}
+                              {...tooltipProps(tooltipText)}
+                            />
+                          )
+                        })}
+                      </div>
+                      {!pageDetail && selectedPageHeader && selectedPageHeader.table_name && (
+                        <div className="storage-page-association-preview">
+                          <PageAssociation
+                            page={selectedPageHeader}
+                            onSelectTable={onSelectTable}
+                            onOpenIndex={indexName => {
+                              void inspect('indexes', indexName)
+                            }}
+                          />
+                        </div>
+                      )}
+                      {pageDetail && <PageGrid detail={pageDetail} onCellDetail={handleCellDetail} />}
+                      {pageDetail?.type === 'heap' && (
+                        <section className="storage-slot-workbench" aria-label="槽位记录">
+                          <div className="storage-slot-workbench-heading">
+                            <div>
+                              <strong>槽位记录</strong>
+                              <span>{pageDetail.total_slots ?? pageDetail.slots?.length ?? 0} 条</span>
+                            </div>
+                          </div>
+                          <PageData detail={pageDetail} />
+                          {selected && detailTotal > 40 && (
+                            <div className="slot-pagination">
+                              <button
+                                aria-label="上一页槽位记录"
+                                disabled={!detailOffset || busy}
+                                onClick={() => inspect(selected.kind, selected.value, Math.max(0, detailOffset - 40))}
+                              >
+                                <ChevronLeft size={13} />
+                              </button>
+                              <span>
+                                已显示 {Math.min(detailOffset + 40, detailTotal)} / {detailTotal}
+                              </span>
+                              <button
+                                aria-label="下一页槽位记录"
+                                disabled={detailOffset + 40 >= detailTotal || busy}
+                                onClick={() => inspect(selected.kind, selected.value, detailOffset + 40)}
+                              >
+                                <ChevronRight size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </section>
+                      )}
+                      {pageDetail && (
+                        <PagePayloadWorkbench
+                          detail={pageDetail}
+                          jsonDetail={jsonDetail}
+                          raw={raw}
+                          onSelectTable={onSelectTable}
+                          onOpenIndex={indexName => {
+                            void inspect('indexes', indexName)
+                          }}
+                        />
+                      )}
+                    </>
+                  )}
+                  {tab === 'buffer' && currentCache && (
+                    <>
+                      <div className="storage-tab-refresh-status" role="status">
+                        {cacheBusy ? (
+                          <>
+                            <RefreshCw size={11} className="spin" />
+                            正在刷新缓存运行态…
+                          </>
+                        ) : (
+                          <>缓存快照 · {new Date(cacheSnapshot?.snapshot_at ?? snapshot.snapshot_at).toLocaleTimeString()}</>
+                        )}
+                      </div>
+                      <div className="buffer-stats">
+                        <span>
+                          命中率 <b>{(currentCache.stats.hit_rate * 100).toFixed(1)}%</b>
+                        </span>
+                        <span>
+                          {currentCache.stats.size} / {currentCache.stats.capacity} 帧 · {currentCache.policy.toUpperCase()}
+                        </span>
+                        <span>
+                          换入 {currentCache.stats.misses} · 淘汰 {currentCache.stats.evictions}
+                        </span>
+                      </div>
+                      <div className="storage-policy-control">
+                        <div className="storage-policy-label">
+                          <Settings2 size={13} />
+                          <label htmlFor="storage-replacement-policy">缓存置换策略</label>
+                        </div>
+                        <select
+                          id="storage-replacement-policy"
+                          value={policyDraft ?? (currentCache.policy as ReplacementPolicy)}
+                          onChange={event => setPolicyDraft(event.target.value as ReplacementPolicy)}
+                          disabled={busy}
+                          title="切换后不清空现有缓存帧；下一次淘汰开始采用新策略"
+                        >
+                          <option value="lru">LRU · 最近最少使用</option>
+                          <option value="fifo">FIFO · 先进先出</option>
+                        </select>
+                        <button
+                          type="button"
+                          className="subtle"
+                          onClick={() => void changeReplacementPolicy((policyDraft ?? currentCache.policy) as ReplacementPolicy)}
+                          disabled={busy || (policyDraft ?? currentCache.policy) === currentCache.policy}
+                        >
+                          {policyBusy ? <RefreshCw size={12} className="spin" /> : '应用'}
+                        </button>
+                        <small>当前服务进程</small>
+                      </div>
+                      {policyNotice && (
+                        <div className="storage-policy-notice" role="status">
+                          {policyNotice}
+                        </div>
+                      )}
+                      <table className="compact-table">
+                        <thead>
+                          <tr>
+                            <th>淘汰序</th>
+                            <th>页号</th>
+                            <th>类型</th>
+                            <th>Pin</th>
+                            <th>Dirty</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orderedCacheFrames.map(frame => {
+                            const evictionRank = evictionRankByPageId.get(frame.page_id)
+                            return (
+                              <tr key={frame.page_id}>
+                                <td>{evictionRank ?? (frame.pin_count ? 'Pin' : '—')}</td>
+                                <td>{frame.page_id}</td>
+                                <td>{frame.type}</td>
+                                <td>{frame.pin_count}</td>
+                                <td>{frame.dirty ? '是' : '否'}</td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                      <JsonTree value={cacheSnapshot?.io ?? snapshot.io} name="进程页 I/O 计数" />
+                    </>
+                  )}
+                  {tab === 'indexes' && (
+                    <>
+                      {snapshot.indexes.length === 0 ? (
+                        <div className="side-empty">暂无显式索引</div>
+                      ) : (
+                        snapshot.indexes.map(index => (
+                          <button
+                            type="button"
+                            className={`index-select ${selectedTable?.indexes.some(item => item.name === index.name) ? 'table-index-linked' : ''}`}
+                            key={index.name}
+                            ref={element => {
+                              if (element) indexButtonRefs.current.set(index.name, element)
+                              else indexButtonRefs.current.delete(index.name)
+                            }}
+                            aria-label={`打开索引 ${index.name}`}
+                            onClick={() => {
+                              void inspect('indexes', index.name)
+                            }}
+                          >
+                            <span>{index.name}</span>
+                            <small>
+                              {index.columns.join(', ')}
+                              {selectedTable?.indexes.some(item => item.name === index.name) ? ` · ${selectedTable.name}` : ''}
+                            </small>
+                            <ChevronRight size={13} />
+                          </button>
+                        ))
+                      )}
+                    </>
+                  )}
+                  <details className="storage-limitations">
+                    <summary>当前存储实现与限制</summary>
+                    {snapshot.limitations.map(note => (
+                      <p key={note}>{note}</p>
+                    ))}
+                    <p>空闲页：{snapshot.free_pages.join(', ') || '当前快照范围内无空闲页'}</p>
+                  </details>
+                  <div className="snapshot-time">更新 {new Date(snapshot.snapshot_at).toLocaleTimeString()}</div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+        {detailPanel}
+      </div>
+      <StorageTooltip tooltip={tooltip} />
+    </section>
+  )
 }
