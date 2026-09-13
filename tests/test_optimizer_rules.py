@@ -58,7 +58,8 @@ def test_constant_folding_boolean_rules_and_constant_index_expression(tmp_path: 
 
         constant_index = db.execute("SELECT id FROM items WHERE id = 1 + 2;")
         assert constant_index.rows == [(3,)]
-        assert constant_index.stats["operator"] == "IndexScan"
+        # HOW：查询只引用索引键列，走覆盖索引直读（IndexOnlyScan）而非回表。
+        assert constant_index.stats["operator"] == "IndexOnlyScan"
 
 
 def test_inner_join_predicates_are_pushed_to_each_scan(tmp_path: Path) -> None:

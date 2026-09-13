@@ -57,7 +57,8 @@ def test_optimizer_plan_is_consumed_and_invalidated_by_index_changes(tmp_path: P
 
         db.execute("CREATE INDEX idx_t_id ON t (id);")
         assert len(db.optimizer.cache) == 0
-        assert db.execute(sql).stats["operator"] == "IndexScan"
+        # HOW：只引用索引键列的查询由索引直接回答（IndexOnlyScan），不再回表。
+        assert db.execute(sql).stats["operator"] == "IndexOnlyScan"
 
         optimized = db.compile(sql).optimized_plan
         assert optimized is not None

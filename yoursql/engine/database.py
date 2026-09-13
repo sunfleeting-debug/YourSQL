@@ -8,8 +8,10 @@ import os
 import re
 import struct
 import tempfile
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, timedelta
+from functools import cmp_to_key
+from operator import itemgetter
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterable
@@ -87,6 +89,135 @@ from ..common.trace import current_trace
 _MISSING = object()
 _AMBIGUOUS = object()
 _AGGREGATE_NAMES = {"count", "sum", "avg", "min", "max"}
+# HOW：批量导入按块处理，既让页写入成批（减少整页重编码），又不把全部行都堆在内存里。
+_INSERT_BATCH_ROWS = 4096
+
+# HOW：连接策略的代价常数，全部由本机 TPC-H SF0.01 实测标定。
+_JOIN_HASH_BUILD_COST = 0.22e-6  # 60,175 行建哈希表 13 ms
+_JOIN_HASH_PROBE_COST = 0.05e-6  # 2,000 次探测 0.1 ms
+_JOIN_INDEX_LOOKUP_COST = 1.4e-3  # 索引等值查找（2 万条目复合索引）
+_JOIN_NESTED_LOOP_PAIR_COST = 10.4e-6  # 嵌套循环每对候选的合并 + 谓词成本（234 s / 2,250 万对）
+# HOW：哈希建侧的内存上限（行上下文实测 464 B/行）；超了就改用索引连接或嵌套循环。
+_JOIN_HASH_MEMORY_BUDGET = 256 * 1024 * 1024
+_JOIN_CONTEXT_BYTES = 464
+
+
+@dataclass(frozen=True)
+class _RowContextTemplate:
+    """逐行上下文的静态骨架：键、取值下标与元数据都是查询级常量。
+
+    WHY：`_table_context` 原来每行都重算列名小写、限定键字符串和 `__row_order__`；
+    在 16 列宽表上这些字符串操作会占单次全表查询三成以上的时间。
+    """
+
+    keys: tuple[str, ...]
+    indices: tuple[int, ...]
+    lookup: dict[str, int]
+    alias: str
+    table_name: str
+    schema: Schema
+    schemas: dict[str, Schema]
+    row_order: bool
+
+
+class _RowView:
+    """只读的行视图：支持 dict 风格的 `get`，供 WHERE 在构建完整上下文之前先过滤。
+
+    HOW：键到下标在模板里已算好，访问只需一次 dict 查找 + 一次 tuple 下标。
+    """
+
+    __slots__ = ("_lookup", "_row")
+
+    def __init__(self, lookup: dict[str, int], row: tuple[object, ...]) -> None:
+        self._lookup = lookup
+        self._row = row
+
+    def get(self, key: str, default: object = None) -> object:
+        index = self._lookup.get(key)
+        return default if index is None else self._row[index]
+
+
+def _logical_and(left: object, right: object) -> object:
+    """三值逻辑 AND，与 `_eval_expr` 保持一致（非严格布尔值归为 UNKNOWN）。"""
+
+    if left is False or right is False:
+        return False
+    if left is True and right is True:
+        return True
+    return None
+
+
+def _logical_or(left: object, right: object) -> object:
+    """三值逻辑 OR，与 `_eval_expr` 保持一致。"""
+
+    if left is True or right is True:
+        return True
+    if left is False and right is False:
+        return False
+    return None
+
+
+def _literal_pattern(expression: Expr) -> str | None:
+    """字面量 LIKE 模式；非字面量返回 None，由调用方按行构造。"""
+
+    if isinstance(expression, Literal) and isinstance(expression.value, str):
+        return expression.value
+    return None
+
+
+def _compile_like(pattern: object) -> Callable[[str], bool]:
+    """把 LIKE 模式编译成正则；与 `_eval_expr` 里的逐行构造等价。"""
+
+    regex = re.compile("^" + re.escape(str(pattern)).replace("%", ".*").replace("_", ".") + "$", re.DOTALL)
+    return lambda text: regex.match(text) is not None
+
+
+def _collect_column_ref_nodes(value: object, sink: list[ColumnRef]) -> bool:
+    """递归收集表达式里的 ColumnRef 节点；返回是否遇到子查询（子查询不可下推）。"""
+
+    if isinstance(value, ColumnRef):
+        sink.append(value)
+        return False
+    if isinstance(value, Subquery):
+        return True
+    if is_dataclass(value):
+        found = False
+        for field in fields(value):
+            found |= _collect_column_ref_nodes(getattr(value, field.name), sink)
+        return found
+    if isinstance(value, (list, tuple)):
+        found = False
+        for item in value:
+            found |= _collect_column_ref_nodes(item, sink)
+        return found
+    return False
+
+
+def _collect_column_refs(value: object, sink: set[str]) -> bool:
+    """递归收集表达式引用的列名（含限定名，均小写），返回是否遇到 `*`。
+
+    HOW：按 dataclass 字段泛化遍历，新增 AST 节点类型无需同步修改。
+    """
+
+    if isinstance(value, ColumnRef):
+        name = value.name.lower()
+        sink.add(name)
+        if value.table:
+            sink.add(f"{value.table.lower()}.{name}")
+        return False
+    if isinstance(value, Star):
+        return True
+    if is_dataclass(value):
+        found = False
+        for field in fields(value):
+            found |= _collect_column_refs(getattr(value, field.name), sink)
+        return found
+    if isinstance(value, (list, tuple)):
+        found = False
+        for item in value:
+            found |= _collect_column_refs(item, sink)
+        return found
+    return False
 _CATALOG_CHAIN_MAGIC = b"MCAT2"
 _CATALOG_CHAIN_HEADER = struct.Struct("<5sQ")
 
@@ -237,6 +368,15 @@ class Database:
         self.catalog = self._load_catalog()
         self.index_manager = IndexManager()
         self._heaps: dict[int, TableHeap] = {}
+        # HOW：上下文模板按（别名, 表名, 需要列, 是否需要行序）缓存，命中时用 schema 身份校验兼容性。
+        self._context_templates: dict[tuple[str, str, frozenset[str] | None, bool], _RowContextTemplate] = {}
+        # HOW：索引候选集缓存。键含索引名与约束签名（交集层用参与索引签名集合），
+        # 任何写操作或索引 DDL 都会整体清空（见 _invalidate_candidate_cache）。
+        self._candidate_cache: dict[tuple[object, ...], tuple[RowId, ...] | None] = {}
+        # HOW：记录本次 SELECT 实际使用的扫描方式，供 ExecutionResult.stats 标记 IndexOnlyScan。
+        self._last_scan_kind: str | None = None
+        # HOW：记录本次 SELECT 每个连接采用的策略（HashJoin / IndexNestedLoop / NestedLoop）。
+        self._join_kinds: list[str] = []
         self._lock = RLock()
         self.system_catalog = SystemCatalog(self)
         system_tables_changed = self.system_catalog.ensure_tables()
@@ -252,7 +392,7 @@ class Database:
             self.rbac = internal_rbac
         self.audit = AuditLog(audit_path)
         self.session = Session(self.rbac.authenticate(user, password), self.rbac)
-        self.optimizer = Optimizer(StatisticsStore())
+        self.optimizer = Optimizer(StatisticsStore(), buffer_pool_pages=self.config.buffer_pool_size)
         self.compiler = Compiler()
         self._rebuild_indexes()
         self._refresh_statistics()
@@ -422,17 +562,65 @@ class Database:
         def operation() -> ExecutionResult:
             table = self.catalog.get_table(table_name)
             heap = self._heap(table)
+            indexes = [metadata for metadata in self.catalog.indexes() if metadata.table_id == table.table_id]
+            # HOW：只有“唯一约束都有单列唯一索引兑底”时才批量写页（索引插入仍逐行执行并负责兑底校验）。
+            # WHY：无索引的主键/唯一列靠全表扫描校验，批量写页会让他们看不到同批的行，因此保留逐行路径。
+            indexed_unique = {
+                metadata.columns[0].lower()
+                for metadata in indexes
+                if metadata.unique and len(metadata.columns) == 1
+            }
+            # HOW：无索引的主键/唯一列用“装载期集合”代替逐行全表扫描。
+            # WHY：原实现每行都 `heap.scan()` 校验，显式库这类“有主键、未单独建索引”的表是 O(n²)。
+            unique_positions = [
+                index
+                for index, column in enumerate(table.schema)
+                if (column.primary_key or column.unique) and column.name.lower() not in indexed_unique
+            ]
+            unique_seen: dict[int, set[object]] = {}
+            if unique_positions:
+                existing_rows = [row for _row_id, row in heap.scan()]
+                for position in unique_positions:
+                    unique_seen[position] = {
+                        row[position] for row in existing_rows if row[position] is not None
+                    }
+            # HOW：目标是空表的整套索引可以延迟到装载结束再 bulk_load，
+            # 避开“每行一次叶子重写”（显式库 13.7 万行 × 11 索引时这是主要成本）。
+            fresh_indexes = [
+                metadata for metadata in indexes if not self.index_manager.get(metadata.name).has_entries()
+            ]
+            deferred = bool(indexes) and len(fresh_indexes) == len(indexes)
+            pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]] = {
+                metadata.name: [] for metadata in fresh_indexes
+            }
+            written_row_ids: list[RowId] = []
             inserted = 0
+            buffer: list[tuple[object, ...]] = []
             for values in rows:
                 row = table.schema.validate_row(tuple(values))
-                if validate_constraints:
+                if validate_constraints and not unique_seen:
+                    # HOW：无索引唯一列已由装载期集合代替，这里只跑有索引支撑的唯一性校验。
                     self._check_constraints(table, row, None)
-                row_id = heap.insert(row)
-                self._update_indexes(table, row, row_id, insert=True)
-                table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
-                table.first_page_id = table.page_ids[0] if table.page_ids else None
-                table.row_count += 1
-                inserted += 1
+                for position in unique_positions:
+                    value = row[position]
+                    if value is None:
+                        continue
+                    if value in unique_seen[position]:
+                        raise _with_location(
+                            ExecutionError(f"列 {table.schema.columns[position].name} 的唯一约束冲突"), None
+                        )
+                    unique_seen[position].add(value)
+                buffer.append(row)
+                if len(buffer) >= _INSERT_BATCH_ROWS:
+                    inserted += self._flush_batch(table, heap, buffer, pending_entries, written_row_ids)
+                    buffer.clear()
+            if buffer:
+                inserted += self._flush_batch(table, heap, buffer, pending_entries, written_row_ids)
+            if deferred:
+                self._bulk_build_indexes(table, heap, fresh_indexes, pending_entries, written_row_ids)
+            table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
+            table.first_page_id = table.page_ids[0] if table.page_ids else None
+            table.row_count += inserted
             return ExecutionResult(affected_rows=inserted, message=f"INSERT {inserted}")
 
         result = self._mutate(operation)
@@ -875,7 +1063,14 @@ class Database:
         self._persist_catalog()
         self.buffer_pool.flush_all()
         self._refresh_statistics()
+        # WHY：写入会改变索引候选集，缓存必须失效，否则可能用旧候选集少扫/多扫行。
+        self._invalidate_candidate_cache()
         return result
+
+    def _invalidate_candidate_cache(self) -> None:
+        """清空索引候选集缓存。"""
+
+        self._candidate_cache.clear()
 
     def _create_table(self, statement: CreateTable) -> ExecutionResult:
         if self.catalog.find_table(statement.name) is not None:
@@ -1144,6 +1339,66 @@ class Database:
             table.row_count = max(0, table.row_count - 1)
         return ExecutionResult(affected_rows=len(targets), message=f"DELETE {len(targets)}")
 
+    def _flush_batch(
+        self,
+        table: TableMetadata,
+        heap: TableHeap,
+        rows: list[tuple[object, ...]],
+        pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]] | None = None,
+        written_row_ids: list[RowId] | None = None,
+    ) -> int:
+        """批量写一页组记录，再维护索引；返回写入行数。
+
+        WHY：批量写页会让“索引维护失败”影响整批行，因此失败时必须把本批已写入的堆行
+        连同已插入的索引条目一起回滚，否则会出现堆里有行、索引里没有的不可见数据。
+        """
+
+        row_ids = heap.append_batch(rows)
+        if written_row_ids is not None:
+            written_row_ids.extend(row_ids)
+        if pending_entries:
+            # HOW：空索引改为只登记条目，装载结束后一次性 bulk_load。
+            for metadata in self.catalog.indexes():
+                if metadata.table_id != table.table_id or metadata.name not in pending_entries:
+                    continue
+                pending_entries[metadata.name].extend(
+                    (self._index_key(table, metadata, row), row_id, self._index_payload(table, metadata, row))
+                    for row, row_id in zip(rows, row_ids, strict=True)
+                    if not (metadata.unique and any(value is None for value in self._index_key(table, metadata, row)))
+                )
+            return len(row_ids)
+        indexed: list[tuple[tuple[object, ...], RowId]] = []
+        try:
+            for row, row_id in zip(rows, row_ids, strict=True):
+                self._update_indexes(table, row, row_id, insert=True)
+                indexed.append((row, row_id))
+        except Exception:
+            for row, row_id in indexed:
+                self._update_indexes(table, row, row_id, insert=False)
+            for row_id in row_ids:
+                heap.delete(row_id)
+            raise
+        return len(row_ids)
+
+    def _bulk_build_indexes(
+        self,
+        table: TableMetadata,
+        heap: TableHeap,
+        fresh_indexes: list[IndexMetadata],
+        pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]],
+        written_row_ids: list[RowId],
+    ) -> None:
+        """把装载期间登记的索引入口一次性建树；失败时回滚本次写入的堆行。"""
+
+        try:
+            for metadata in fresh_indexes:
+                self.index_manager.get(metadata.name).bulk_load(pending_entries[metadata.name])
+        except Exception:
+            # WHY：bulk_load 的唯一性校验在中途报错时索引尚未建好，回滚堆行避免留下无索引数据。
+            for row_id in written_row_ids:
+                heap.delete(row_id)
+            raise
+
     def _check_constraints(
         self,
         table: TableMetadata,
@@ -1188,13 +1443,19 @@ class Database:
             if any(value is None for value in key) and metadata.unique:
                 continue
             if insert:
-                tree.insert(key, row_id)
+                tree.insert(key, row_id, self._index_payload(table, metadata, row) or None)
             else:
                 tree.delete(key, row_id)
 
     @staticmethod
     def _index_key(table: TableMetadata, metadata: IndexMetadata, row: tuple[object, ...]) -> tuple[object, ...]:
         return tuple(row[table.schema.index(column)] for column in metadata.columns)
+
+    @staticmethod
+    def _index_payload(table: TableMetadata, metadata: IndexMetadata, row: tuple[object, ...]) -> tuple[object, ...]:
+        """覆盖索引携带的列值（CREATE INDEX ... INCLUDE）；纯键索引为空。"""
+
+        return tuple(row[table.schema.index(column)] for column in metadata.payload_columns)
 
     def _create_index(self, statement: CreateIndex) -> ExecutionResult:
         if any(index.name.lower() == statement.name.lower() for index in self.catalog.indexes()):
@@ -1205,7 +1466,15 @@ class Database:
             table = self.catalog.get_table(statement.table)
         except CatalogError as exc:
             raise _with_location(exc, statement.source_location_for("table")) from exc
-        metadata = IndexMetadata(statement.name, table.table_id, statement.columns, statement.unique)
+        metadata = IndexMetadata(statement.name, table.table_id, statement.columns, statement.unique, payload_columns=statement.include)
+        for column in statement.include:
+            try:
+                table.schema.index(column)
+            except YourSQLError as exc:
+                raise _with_node_location(CatalogError(f"覆盖列 {column!r} 不存在"), statement) from exc
+        duplicates = {column.lower() for column in statement.columns} & {column.lower() for column in statement.include}
+        if duplicates:
+            raise _with_node_location(CatalogError(f"覆盖列不能与索引键重复: {sorted(duplicates)}"), statement)
         tree = self.index_manager.create(
             statement.name,
             unique=statement.unique,
@@ -1214,7 +1483,7 @@ class Database:
         )
         try:
             tree.bulk_load(
-                (key, row_id)
+                (key, row_id, self._index_payload(table, metadata, row))
                 for row_id, row in self._heap(table).scan()
                 for key in (self._index_key(table, metadata, row),)
                 if not (metadata.unique and any(value is None for value in key))
@@ -1257,6 +1526,10 @@ class Database:
         trace = current_trace.get()
         if trace is not None:
             trace.check()
+        previous_scan_kind = self._last_scan_kind
+        previous_join_kinds = self._join_kinds
+        self._last_scan_kind = None
+        self._join_kinds = []
         if statement.union is not None:
             left = self._execute_select(replace(statement, union=None), output_columns, plan=plan)
             right = self._execute_select(statement.union)
@@ -1265,55 +1538,89 @@ class Database:
                 rows = list(dict.fromkeys(rows))
             return ExecutionResult(left.columns, rows, stats={"operator": "Union", "left_rows": len(left.rows), "right_rows": len(right.rows)})
         before = self.buffer_pool.stats()
-        contexts = list(self._iter_select_contexts(statement, plan=plan, allow_system_tables=allow_system_tables))
+        # HOW：列名先按折叠前的语句计算，避免 `SELECT 1 + 2` 这类表达式的输出名随折叠改变。
+        names = list(output_columns)
+        if not names:
+            names = self._output_names(statement)
+        statement = self._fold_statement(statement)
+        # HOW：扫描/连接保持惰性；只有聚合、排序、去重或需要全量结果时才全部消费。
+        scanned = 0
+
+        def _count(iterable: Iterable[dict[str, object]]) -> Iterable[dict[str, object]]:
+            nonlocal scanned
+            for item in iterable:
+                scanned += 1
+                yield item
+
+        contexts: Iterable[dict[str, object]] = _count(
+            self._iter_select_contexts(statement, plan=plan, allow_system_tables=allow_system_tables)
+        )
         has_aggregate = any(self._contains_aggregate(item.expression) for item in statement.items) or self._contains_aggregate(statement.having)
-        grouped: list[dict[str, object]] = []
+        grouped: Iterable[dict[str, object]]
         if statement.group_by or has_aggregate:
+            group_keys = [self._compile_expr(expression) for expression in statement.group_by]
+            having = self._compile_expr(statement.having)
             groups: dict[tuple[object, ...], list[dict[str, object]]] = {}
             for context in contexts:
                 if trace is not None:
                     trace.step()
-                key = tuple(self._eval_expr(expression, context) for expression in statement.group_by)
+                key = tuple(expression(context) for expression in group_keys)
                 groups.setdefault(key, []).append(context)
             if has_aggregate and not groups:
                 groups[()] = []
+            grouped_rows: list[dict[str, object]] = []
             for group in groups.values():
                 base = dict(group[0]) if group else {"__row_order__": [], "__row_ids__": {}}
                 base["__group__"] = group
-                if statement.having is None or sql_truth(self._eval_expr(statement.having, base)):
-                    grouped.append(base)
+                if statement.having is None or sql_truth(having(base)):
+                    grouped_rows.append(base)
+            grouped = grouped_rows
         else:
             grouped = contexts
         projected: list[tuple[tuple[object, ...], dict[str, object], dict[str, object]]] = []
-        names = list(output_columns)
-        if not names:
-            names = self._output_names(statement)
+        item_evaluators = [
+            (None if isinstance(item.expression, Star) else self._compile_expr(item.expression), item)
+            for item in statement.items
+        ]
+        # HOW：无排序/去重/聚合时，只需凑够 offset+limit 行就可以提前结束扫描。
+        streamable = not statement.order_by and not statement.distinct and not (statement.group_by or has_aggregate)
+        stop_after = (statement.offset or 0) + statement.limit if (streamable and statement.limit is not None) else None
+        seen: set[tuple[object, ...]] = set()
         for context in grouped:
             if trace is not None:
                 trace.step()
             values: list[object] = []
             aliases: dict[str, object] = {}
-            for item in statement.items:
-                if isinstance(item.expression, Star):
-                    values.extend(self._expand_star(context, item.expression.table))
+            for evaluator, item in item_evaluators:
+                if evaluator is None:
+                    values.extend(self._expand_star(context, item.expression.table))  # type: ignore[union-attr]
                 else:
-                    value = self._eval_expr(item.expression, context)
+                    value = evaluator(context)
                     values.append(value)
                     if item.alias:
                         aliases[item.alias.lower()] = value
-            projected.append((tuple(values), context, aliases))
+            row_key = tuple(values)
+            if statement.distinct:
+                if row_key in seen:
+                    continue
+                seen.add(row_key)
+            projected.append((row_key, context, aliases))
+            if stop_after is not None and len(projected) >= stop_after:
+                break
         if statement.distinct:
             unique: dict[tuple[object, ...], tuple[tuple[object, ...], dict[str, object], dict[str, object]]] = {}
             for item in projected:
                 unique.setdefault(item[0], item)
             projected = list(unique.values())
         for order_item in reversed(statement.order_by):
+            evaluator = self._compile_expr(order_item.expression)
+            by_alias = isinstance(order_item.expression, ColumnRef) and not order_item.expression.table
+            alias_key = order_item.expression.name.lower() if by_alias else ""
+
             def key(item: tuple[tuple[object, ...], dict[str, object], dict[str, object]]) -> tuple[int, object]:
-                value = _MISSING
-                if isinstance(order_item.expression, ColumnRef) and not order_item.expression.table:
-                    value = item[2].get(order_item.expression.name.lower(), _MISSING)
+                value = item[2].get(alias_key, _MISSING) if by_alias else _MISSING
                 if value is _MISSING:
-                    value = self._eval_expr(order_item.expression, item[1])
+                    value = evaluator(item[1])
                 nulls_first = order_item.nulls_first if order_item.nulls_first is not None else order_item.descending
                 if value is None:
                     return (0 if nulls_first else 1, 0)
@@ -1332,11 +1639,19 @@ class Database:
             "operator": "SeqScan",
             "page_reads": int(after["misses"] - before["misses"]),
             "cache_hits": int(after["hits"] - before["hits"]),
-            "rows_examined": len(contexts),
+            "rows_examined": scanned,
         }
         uses_index = self._plan_uses_index(plan) if plan is not None else self._uses_index(statement)
-        if uses_index:
+        scan_kind = self._last_scan_kind
+        join_kinds = self._join_kinds
+        self._last_scan_kind = previous_scan_kind
+        self._join_kinds = previous_join_kinds
+        if scan_kind is not None:
+            stats["operator"] = scan_kind
+        elif uses_index:
             stats["operator"] = "IndexScan"
+        if join_kinds:
+            stats["joins"] = list(join_kinds)
         return ExecutionResult(tuple(names), [item[0] for item in projected], stats=stats)
 
     def _iter_select_contexts(
@@ -1349,47 +1664,580 @@ class Database:
         trace = current_trace.get()
         if self._plan_contains_kind(plan, "EmptyScan"):
             return []
+        needed, row_order = self._needed_context_columns(statement)
+        if statement.from_table is not None and not statement.joins:
+            # HOW：覆盖索引直读优先；只在所有被引用列都在索引里时启用，且仍需用 WHERE 过滤残余谓词。
+            index_only = self._index_only_contexts(statement.from_table, statement.where, needed)
+            if index_only is not None:
+                self._last_scan_kind = "IndexOnlyScan"
+                if statement.where is None:
+                    return iter(index_only)
+                predicate = self._compile_expr(statement.where)
+                return (context for context in index_only if sql_truth(predicate(context)))
+        # HOW：WHERE 只引用本表列且没有 JOIN 时，可以在建上下文之前先过滤（Q6 只 800/60175 行通过）。
+        prefilter: Callable[[object], object] | None = None
+        prefilter_needed: frozenset[str] = frozenset()
+        if statement.from_table is not None and not statement.joins and statement.where is not None:
+            where_columns: set[str] = set()
+            if not _collect_column_refs(statement.where, where_columns):
+                prefilter = self._compile_expr(statement.where)
+                prefilter_needed = frozenset(where_columns)
         scan_plans = self._scan_plans(plan)
         if statement.from_table is None:
-            contexts: list[dict[str, object]] = [{"__row_order__": [], "__row_ids__": {}, "__schemas__": {}}]
-        else:
-            primary_plan = scan_plans[0] if scan_plans else None
-            contexts = list(self._scan_contexts(
-                statement.from_table,
-                self._scan_predicate(scan_plans[0] if scan_plans else None, statement.where),
-                scan_plan=primary_plan,
+            return iter([{"__row_order__": [], "__row_ids__": {}, "__schemas__": {}}])
+        generated = self._joined_contexts(
+            statement,
+            scan_plans=scan_plans,
+            allow_system_tables=allow_system_tables,
+            needed=needed,
+            row_order=row_order,
+            prefilter=prefilter,
+            prefilter_needed=prefilter_needed,
+        )
+        if statement.where is not None and prefilter is None:
+            # HOW：无预过滤（例如带 JOIN）时，WHERE 在流上惰性求值，不再先物化全部连接结果。
+            predicate = self._compile_expr(statement.where)
+            return (context for context in generated if sql_truth(predicate(context)))
+        return generated
+
+    def _joined_contexts(
+        self,
+        statement: Select,
+        *,
+        scan_plans: list[PlanNode],
+        allow_system_tables: bool,
+        needed: frozenset[str] | None,
+        row_order: bool,
+        prefilter: Callable[[object], object] | None,
+        prefilter_needed: frozenset[str],
+    ) -> Iterable[dict[str, object]]:
+        """惰性产出逐行上下文：单表扫描与连接都不再全量物化。
+
+        HOW：左表（及每个连接的左侧）保持流式；右表需要反复扫描，因此只物化右表。
+        RIGHT/FULL 需要在连接结束后知道哪些右行未被匹配，这两种连接类型仍会缓存匹配状态。
+        """
+
+        trace = current_trace.get()
+        primary_plan = scan_plans[0] if scan_plans else None
+        # HOW：把 WHERE 拆成 AND 原子，能只引用单表的原子直接下推到该表扫描（带 JOIN 时原来只在连接后过滤）。
+        atoms = self._conjunction_atoms(statement.where) if statement.where is not None else ()
+        # HOW：按表名/别名记录列名集合，用于判定未限定列名属于哪一侧、以及原子是否已就绪。
+        scope_columns: dict[str, set[str]] = {}
+        for reference in (statement.from_table, *(join.table for join in statement.joins)):
+            columns = self._relation_columns(reference.name)
+            if columns is None:
+                continue
+            scope_columns[reference.name.lower()] = columns
+            if reference.alias:
+                scope_columns[reference.alias.lower()] = columns
+        primary_filter, primary_needed = self._table_prefilter(atoms, statement.from_table)
+        contexts: Iterable[dict[str, object]] = self._scan_contexts(
+            statement.from_table,
+            self._scan_predicate(scan_plans[0] if scan_plans else None, statement.where),
+            scan_plan=primary_plan,
+            allow_system_tables=allow_system_tables,
+            needed=needed,
+            row_order=row_order,
+            prefilter=primary_filter if primary_filter is not None else prefilter,
+            prefilter_needed=primary_needed if primary_filter is not None else prefilter_needed,
+        )
+        for join_index, join in enumerate(statement.joins, start=1):
+            join_plan = scan_plans[join_index] if join_index < len(scan_plans) else None
+            join_filter, join_needed = self._table_prefilter(atoms, join.table)
+            right_qualifiers = {join.table.name.lower(), (join.table.alias or "").lower()} - {""}
+            left_qualifiers = {statement.from_table.name.lower(), (statement.from_table.alias or "").lower()} - {""}
+            for previous in statement.joins[: join_index - 1]:
+                left_qualifiers |= {previous.table.name.lower(), (previous.table.alias or "").lower()} - {""}
+            on_atoms = self._conjunction_atoms(join.on) if join.join_type != "CROSS" and join.on is not None else ()
+            # WHY：逗号连接（`FROM a, b WHERE a.x = b.y`）会被解析成 CROSS 且 ON 为空，
+            # 连接条件全在 WHERE 里；只在 INNER/CROSS 下从 WHERE 推断连接键，
+            # 外连接的 WHERE 必须在连接之后生效，不能提升为连接条件。
+            inferred = atoms if join.join_type in {"INNER", "CROSS"} else ()
+            # HOW：先把范围限定到“已就绪的表”（左侧已连接的表 + 当前右表）；
+            # 引用后续表的原子留给那一层连接或最后的 WHERE 过滤，否则会报“执行时找不到列”。
+            available = left_qualifiers | right_qualifiers
+            # HOW：只丢弃“引用尚未就绪的表”的推断原子（它们会在后续连接或最后 WHERE 里生效）；
+            # ON 原子是连接语义的一部分，必须全部保留。
+            usable_inferred = tuple(
+                atom
+                for atom in inferred
+                if (scope := self._atom_scope(atom, scope_columns)) is not None and scope <= available
+            )
+            join_atoms = (*on_atoms, *usable_inferred)
+            left_columns = self._relation_columns(statement.from_table.name) or set()
+            for previous in statement.joins[: join_index - 1]:
+                left_columns |= self._relation_columns(previous.table.name) or set()
+            right_columns = self._relation_columns(join.table.name) or set()
+            pairs, residual_atoms = self._join_key_pairs(
+                join_atoms, left_qualifiers, right_qualifiers, left_columns, right_columns
+            )
+            right_only, right_only_needed = self._table_prefilter(residual_atoms, join.table)
+            left_only, _left_needed = self._table_prefilter(residual_atoms, statement.from_table)
+            remaining = residual_atoms
+            if right_only is not None:
+                # HOW：已下推到右侧扫描的原子不再重复求值；其余（含左侧相关原子）留作连接后的残余谓词。
+                pushed = set(self._conjunction_atoms(right_only))
+                remaining = tuple(atom for atom in residual_atoms if atom not in pushed)
+            residual = self._compile_expr(self._combine_atoms(remaining)) if remaining else None
+            # HOW：右表在连接列上的索引可用于索引嵌套循环（前导列需与连接键列一致）。
+            join_columns = [pair[1] for pair in pairs]
+            index_metadata = self._join_index_metadata(join.table, join_columns) if join_columns else None
+            right_rows = int(self.catalog.get_table(join.table.name).stats.row_count)
+            # HOW：左侧行数按首表统计粗估（左侧可能已被连接放大，这里宁可偏低以便优先选哈希）。
+            left_rows = int(self.catalog.get_table(statement.from_table.name).stats.row_count)
+            strategy = self._choose_join_strategy(pairs, right_rows, left_rows, index_metadata)
+            self._join_kinds.append({"hash": "HashJoin", "index": "IndexNestedLoop", "nested_loop": "NestedLoop"}[strategy])
+            if strategy == "index" and index_metadata is not None:
+                # HOW：索引连接不需要物化右表（内存与扫描成本都省掉）。
+                contexts = self._index_join(
+                    contexts,
+                    pairs=pairs,
+                    metadata=index_metadata,
+                    join_reference=join.table,
+                    from_table=statement.from_table,
+                    table=self.catalog.get_table(join.table.name),
+                    residual=residual,
+                    left_only=left_only,
+                    join_type=join.join_type,
+                    needed=needed,
+                    row_order=row_order,
+                )
+                continue
+            right = list(self._scan_contexts(
+                join.table,
+                self._scan_predicate(join_plan, None),
+                scan_plan=join_plan,
                 allow_system_tables=allow_system_tables,
+                needed=needed,
+                row_order=row_order,
+                prefilter=right_only if right_only is not None else join_filter,
+                prefilter_needed=right_only_needed if right_only is not None else join_needed,
             ))
-            for join_index, join in enumerate(statement.joins, start=1):
-                join_plan = scan_plans[join_index] if join_index < len(scan_plans) else None
-                right = list(self._scan_contexts(
-                    join.table,
-                    self._scan_predicate(join_plan, None),
-                    scan_plan=join_plan,
-                    allow_system_tables=allow_system_tables,
-                ))
-                combined: list[dict[str, object]] = []
-                matched_right: set[int] = set()
-                for left_context in contexts:
-                    matched = False
-                    for index, right_context in enumerate(right):
-                        if trace is not None:
-                            trace.step()
-                        merged = self._merge_context(left_context, right_context)
-                        if join.join_type == "CROSS" or sql_truth(self._eval_expr(join.on, merged)):
-                            combined.append(merged)
-                            matched = True
-                            matched_right.add(index)
-                    if not matched and join.join_type == "LEFT":
-                        combined.append(self._merge_context(left_context, self._null_context(join.table)))
-                if join.join_type in {"RIGHT", "FULL"}:
-                    for index, right_context in enumerate(right):
-                        if index not in matched_right:
-                            combined.append(self._merge_context(self._null_context(statement.from_table), right_context))
-                contexts = combined
-        if statement.where is not None:
-            contexts = [context for context in contexts if sql_truth(self._eval_expr(statement.where, context))]
+            if strategy == "hash":
+                contexts = self._hash_join(
+                    contexts,
+                    right,
+                    pairs=pairs,
+                    residual=residual,
+                    left_only=left_only,
+                    join_type=join.join_type,
+                    join_table=join.table,
+                    from_table=statement.from_table,
+                    needed=needed,
+                    row_order=row_order,
+                )
+                continue
+            condition = self._compile_expr(self._combine_atoms(tuple(join_atoms))) if join.join_type == "CROSS" and join_atoms else (
+                None if join.join_type == "CROSS" else self._compile_expr(join.on)
+            )
+            contexts = self._stream_join(
+                contexts,
+                right,
+                join_type=join.join_type,
+                join_table=join.table,
+                from_table=statement.from_table,
+                condition=condition,
+                needed=needed,
+                row_order=row_order,
+                trace=trace,
+            )
         return contexts
+
+    def _combine_atoms(self, atoms: tuple[Expr, ...]) -> Expr | None:
+        """把多个原子用 AND 串成单个表达式。"""
+
+        if not atoms:
+            return None
+        combined: Expr = atoms[0]
+        for extra in atoms[1:]:
+            combined = BinaryOp(combined, "AND", extra)
+        return combined
+
+    def _join_index_metadata(self, reference: TableRef, columns: list[str]) -> IndexMetadata | None:
+        """找出前导列恰好等于连接键列的索引；找不到返回 None。"""
+
+        try:
+            table = self.catalog.get_table(reference.name)
+        except CatalogError:
+            return None
+        wanted = [column.lower() for column in columns]
+        for metadata in self.catalog.indexes():
+            if metadata.table_id != table.table_id or len(metadata.columns) < len(wanted):
+                continue
+            if [column.lower() for column in metadata.columns[: len(wanted)]] == wanted:
+                return metadata
+        return None
+
+    def _relation_columns(self, name: str) -> set[str] | None:
+        """关系的列名集合（表或视图）；取不到返回 None。"""
+
+        try:
+            relation = self.catalog.get_relation(name)
+        except CatalogError:
+            try:
+                relation = self.catalog.get_table(name, include_system=True)
+            except CatalogError:
+                return None
+        return {column.name.lower() for column in relation.schema}
+
+    def _subquery_is_correlated(self, query: Select) -> bool:
+        """子查询是否引用外层列（相关子查询）；含嵌套子查询时保守视为相关。"""
+
+        local: set[str] = set()
+        local_columns: set[str] = set()
+        for reference in (query.from_table, *(join.table for join in query.joins)):
+            if reference is None:
+                continue
+            local.add(reference.name.lower())
+            if reference.alias:
+                local.add(reference.alias.lower())
+            local_columns |= self._relation_columns(reference.name) or set()
+        refs: list[ColumnRef] = []
+        if _collect_column_ref_nodes(query, refs):
+            return True
+        for ref in refs:
+            qualifier = (ref.table or "").lower()
+            if qualifier:
+                if qualifier not in local:
+                    return True
+            elif ref.name.lower() not in local_columns:
+                return True
+        return False
+
+    def _atom_scope(self, atom: Expr, scope_columns: dict[str, set[str]]) -> set[str] | None:
+        """原子引用了哪些表；含子查询或列归属不唯一时返回 None（不参与本层连接）。"""
+
+        refs: list[ColumnRef] = []
+        if _collect_column_ref_nodes(atom, refs):
+            return None
+        scope: set[str] = set()
+        for ref in refs:
+            qualifier = (ref.table or "").lower()
+            if qualifier:
+                scope.add(qualifier)
+                continue
+            owners = {name for name, columns in scope_columns.items() if ref.name.lower() in columns}
+            if len(owners) != 1:
+                return None
+            scope |= owners
+        return scope
+
+    def _join_key_pairs(
+        self,
+        atoms: tuple[Expr, ...],
+        left_qualifiers: set[str],
+        right_qualifiers: set[str],
+        left_columns: set[str],
+        right_columns: set[str],
+    ) -> tuple[list[tuple[str, str]], tuple[Expr, ...]]:
+        """从连接条件里抽出等值键对（左列, 右列），其余原子作为残余谓词。
+
+        HOW：同时处理两种写法——`JOIN ... ON a = b` 与逗号连接 `FROM a, b WHERE a.x = b.y`
+        （后者解析成 CROSS 连接，谓词全在 WHERE 里）；未限定的列名用两侧模式列名判定归属。
+        """
+
+        pairs: list[tuple[str, str]] = []
+        residual: list[Expr] = []
+        for atom in atoms:
+            if isinstance(atom, BinaryOp) and atom.operator.upper() == "OR":
+                # WHY：像 Q19 那样把连接键写在每个 OR 分支里（`(p_partkey = l_partkey AND ...) OR ...`）时，
+                # 只有“每个分支都要求的等式”才能当连接键（它是必要条件，哈希连接不会漏行）。
+                left_pairs, _left_residual = self._join_key_pairs(
+                    self._conjunction_atoms(atom.left), left_qualifiers, right_qualifiers, left_columns, right_columns
+                )
+                right_pairs, _right_residual = self._join_key_pairs(
+                    self._conjunction_atoms(atom.right), left_qualifiers, right_qualifiers, left_columns, right_columns
+                )
+                common = [pair for pair in left_pairs if pair in right_pairs]
+                pairs.extend(pair for pair in common if pair not in pairs)
+                residual.append(atom)
+                continue
+            refs: list[ColumnRef] = []
+            if _collect_column_ref_nodes(atom, refs) or not refs:
+                residual.append(atom)
+                continue
+            if not (isinstance(atom, BinaryOp) and atom.operator == "="):
+                residual.append(atom)
+                continue
+            if not (isinstance(atom.left, ColumnRef) and isinstance(atom.right, ColumnRef)):
+                residual.append(atom)
+                continue
+            left_side = self._column_side(atom.left, left_qualifiers, right_qualifiers, left_columns, right_columns)
+            right_side = self._column_side(atom.right, left_qualifiers, right_qualifiers, left_columns, right_columns)
+            if left_side == "left" and right_side == "right":
+                pairs.append((atom.left.name.lower(), atom.right.name.lower()))
+            elif left_side == "right" and right_side == "left":
+                pairs.append((atom.right.name.lower(), atom.left.name.lower()))
+            else:
+                residual.append(atom)
+        return pairs, tuple(residual)
+
+    @staticmethod
+    def _column_side(
+        column: ColumnRef,
+        left_qualifiers: set[str],
+        right_qualifiers: set[str],
+        left_columns: set[str],
+        right_columns: set[str],
+    ) -> str | None:
+        """列引用属于连接哪一侧；两侧都可能（歧义）或找不到时返回 None。"""
+
+        qualifier = (column.table or "").lower()
+        name = column.name.lower()
+        if qualifier:
+            if qualifier in left_qualifiers and qualifier not in right_qualifiers:
+                return "left"
+            if qualifier in right_qualifiers and qualifier not in left_qualifiers:
+                return "right"
+            return None
+        in_left, in_right = name in left_columns, name in right_columns
+        if in_left and not in_right:
+            return "left"
+        if in_right and not in_left:
+            return "right"
+        return None
+
+    @staticmethod
+    def _compile_key_extractor(
+        pairs: tuple[tuple[str, str], ...],
+        reference: TableRef,
+        *,
+        side: str,
+    ) -> Callable[[dict[str, object]], tuple[object, ...]]:
+        """把连接键编译成从上下文取值的闭包；side 决定取 left 还是 right 列。"""
+
+        alias = (reference.alias or reference.name).lower()
+        table_name = reference.name.lower()
+        index = 0 if side == "left" else 1
+        keys = tuple(f"{alias}.{pair[index]}" for pair in pairs)
+        fallback = tuple(f"{table_name}.{pair[index]}" for pair in pairs)
+        bare = tuple(pair[index] for pair in pairs)
+
+        def extract(context: dict[str, object]) -> tuple[object, ...]:
+            values = []
+            for primary, secondary, plain in zip(keys, fallback, bare, strict=True):
+                value = context.get(primary, _MISSING)
+                if value is _MISSING:
+                    value = context.get(secondary, _MISSING)
+                if value is _MISSING:
+                    # HOW：逗号连接的连接列常不带限定名，此时上下文里只有裸列名。
+                    value = context.get(plain, _MISSING)
+                values.append(value)
+            return tuple(values)
+
+        return extract
+
+    def _choose_join_strategy(
+        self,
+        pairs: list[tuple[str, str]],
+        right_rows: int,
+        left_rows: int | None,
+        index_metadata: IndexMetadata | None,
+    ) -> str:
+        """按实测代价选择连接策略：hash / index / nested_loop。"""
+
+        if not pairs:
+            return "nested_loop"
+        right_count = max(1, right_rows)
+        left_count = max(1, left_rows or right_count)
+        hash_cost = right_count * _JOIN_HASH_BUILD_COST + left_count * _JOIN_HASH_PROBE_COST
+        hash_fits = right_count * _JOIN_CONTEXT_BYTES <= _JOIN_HASH_MEMORY_BUDGET
+        nested_cost = left_count * right_count * _JOIN_NESTED_LOOP_PAIR_COST
+        if hash_fits and hash_cost <= nested_cost:
+            return "hash"
+        if index_metadata is not None:
+            index_cost = left_count * _JOIN_INDEX_LOOKUP_COST
+            if index_cost < min(hash_cost if hash_fits else nested_cost, nested_cost):
+                return "index"
+        return "nested_loop"
+
+    def _hash_join(
+        self,
+        left_contexts: Iterable[dict[str, object]],
+        right: list[dict[str, object]],
+        *,
+        pairs: list[tuple[str, str]],
+        residual: Callable[[dict[str, object]], object] | None,
+        left_only: Callable[[dict[str, object]], object] | None,
+        join_type: str,
+        join_table: TableRef,
+        from_table: TableRef,
+        needed: frozenset[str] | None,
+        row_order: bool,
+    ) -> Iterable[dict[str, object]]:
+        """哈希连接：右表（建侧）建哈希表，左表流式探测；NULL 键永不匹配。"""
+
+        right_key = self._compile_key_extractor(tuple(pairs), join_table, side="right")
+        left_key = self._compile_key_extractor(tuple(pairs), from_table, side="left") if len(pairs) else None
+        buckets: dict[tuple[object, ...], list[tuple[int, dict[str, object]]]] = {}
+        for index, context in enumerate(right):
+            key = right_key(context)
+            if any(value is None or value is _MISSING for value in key):
+                continue
+            buckets.setdefault(key, []).append((index, context))
+        matched_right: set[int] = set()
+        null_right: list[dict[str, object]] | None = None
+        for left_context in left_contexts:
+            if left_only is not None and not sql_truth(left_only(left_context)):
+                continue
+            key = left_key(left_context) if left_key is not None else ()
+            matched = False
+            if not any(value is None or value is _MISSING for value in key):
+                for index, right_context in buckets.get(key, ()):  # type: ignore[arg-type]
+                    merged = self._merge_context(left_context, right_context)
+                    if residual is None or sql_truth(residual(merged)):
+                        matched = True
+                        matched_right.add(index)
+                        yield merged
+            if not matched and join_type == "LEFT":
+                if null_right is None:
+                    null_right = [self._null_context(join_table, needed=needed, row_order=row_order)]
+                yield self._merge_context(left_context, null_right[0])
+        if join_type in {"RIGHT", "FULL"}:
+            null_left: dict[str, object] | None = None
+            for index, right_context in enumerate(right):
+                if index in matched_right:
+                    continue
+                if null_left is None:
+                    null_left = self._null_context(from_table, needed=needed, row_order=row_order)
+                yield self._merge_context(null_left, right_context)
+
+    def _index_join(
+        self,
+        left_contexts: Iterable[dict[str, object]],
+        *,
+        pairs: list[tuple[str, str]],
+        metadata: IndexMetadata,
+        join_reference: TableRef,
+        from_table: TableRef,
+        table: TableMetadata,
+        residual: Callable[[dict[str, object]], object] | None,
+        left_only: Callable[[dict[str, object]], object] | None,
+        join_type: str,
+        needed: frozenset[str] | None,
+        row_order: bool,
+    ) -> Iterable[dict[str, object]]:
+        """索引嵌套循环：左表每行用连接键去右表索引上等值查找。
+
+        HOW：仅支持 INNER/LEFT（RIGHT/FULL 需要知道哪些右行未匹配，交给哈希连接或嵌套循环）。
+        """
+
+        left_key = self._compile_key_extractor(tuple(pairs), from_table, side="left")
+        columns = [name.lower() for name in metadata.columns[: len(pairs)]]
+        right_template = self._context_template(join_reference, table, needed, row_order)
+        heap = self._heap(table)
+        null_right: dict[str, object] | None = None
+        for left_context in left_contexts:
+            if left_only is not None and not sql_truth(left_only(left_context)):
+                continue
+            key = left_key(left_context)
+            matched = False
+            if not any(value is None or value is _MISSING for value in key):
+                constraints = {
+                    column: _IndexConstraint(allowed=[value])
+                    for column, value in zip(columns, key, strict=True)
+                }
+                candidates = self._scan_index_candidates(metadata, constraints) or ()
+                for row_id in candidates:
+                    row = heap.read(row_id)
+                    if row is None:
+                        continue
+                    right_context = self._table_context(
+                        join_reference, row, row_id, table, template=right_template
+                    )
+                    merged = self._merge_context(left_context, right_context)
+                    if residual is None or sql_truth(residual(merged)):
+                        matched = True
+                        yield merged
+            if not matched and join_type == "LEFT":
+                if null_right is None:
+                    null_right = self._null_context(join_reference, needed=needed, row_order=row_order)
+                yield self._merge_context(left_context, null_right)
+
+    def _stream_join(
+        self,
+        left_contexts: Iterable[dict[str, object]],
+        right: list[dict[str, object]],
+        *,
+        join_type: str,
+        join_table: TableRef,
+        from_table: TableRef,
+        condition: Callable[[dict[str, object]], object] | None,
+        needed: frozenset[str] | None,
+        row_order: bool,
+        trace: object,
+    ) -> Iterable[dict[str, object]]:
+        """流式连接：左表逐行拉取，右表已物化；RIGHT/FULL 在末尾补未匹配的右行。"""
+
+        matched_right: set[int] = set() if join_type in {"RIGHT", "FULL"} else set()
+        for left_context in left_contexts:
+            matched = False
+            for index, right_context in enumerate(right):
+                if trace is not None:
+                    trace.step()
+                merged = self._merge_context(left_context, right_context)
+                if condition is None or sql_truth(condition(merged)):
+                    if matched_right is not None:
+                        matched_right.add(index)
+                    matched = True
+                    yield merged
+            if not matched and join_type == "LEFT":
+                yield self._merge_context(
+                    left_context, self._null_context(join_table, needed=needed, row_order=row_order)
+                )
+        if join_type in {"RIGHT", "FULL"}:
+            null_left = None
+            for index, right_context in enumerate(right):
+                if index in matched_right:
+                    continue
+                if null_left is None:
+                    null_left = self._null_context(from_table, needed=needed, row_order=row_order)
+                yield self._merge_context(null_left, right_context)
+
+    def _table_prefilter(
+        self,
+        atoms: tuple[Expr, ...],
+        reference: TableRef,
+    ) -> tuple[Callable[[object], object] | None, frozenset[str]]:
+        """抽出只引用单表的 AND 原子，编译成该表扫描用的下推过滤。
+
+        WHY：带 JOIN 时原实现只在连接后过滤 WHERE，导致左表全量参与嵌套循环
+        （实测 20 客户 × 15,000 订单的聚合要 234 s）；按表下推后只剩真正需要的行。
+        """
+
+        try:
+            relation = self.catalog.get_relation(reference.name)
+        except CatalogError:
+            return None, frozenset()
+        qualifiers = {reference.name.lower(), (reference.alias or "").lower()} - {""}
+        column_names = {column.name.lower() for column in relation.schema}
+        picked: list[Expr] = []
+        needed: set[str] = set()
+        for atom in atoms:
+            refs: list[ColumnRef] = []
+            if _collect_column_ref_nodes(atom, refs):
+                # 含子查询的原子不下推：子查询可能引用其它表。
+                continue
+            if not refs:
+                continue
+            belongs = True
+            for ref in refs:
+                if ref.table:
+                    if ref.table.lower() not in qualifiers:
+                        belongs = False
+                        break
+                elif ref.name.lower() not in column_names:
+                    belongs = False
+                    break
+                needed.add(ref.name.lower())
+            if belongs:
+                picked.append(atom)
+        if not picked:
+            return None, frozenset()
+        predicate: Expr = picked[0]
+        for extra in picked[1:]:
+            predicate = BinaryOp(predicate, "AND", extra)
+        return self._compile_expr(self._fold_constants(predicate)), frozenset(needed)
 
     def _scan_contexts(
         self,
@@ -1398,7 +2246,16 @@ class Database:
         *,
         scan_plan: PlanNode | None = None,
         allow_system_tables: bool = False,
+        needed: frozenset[str] | None = None,
+        row_order: bool = True,
+        prefilter: Callable[[object], object] | None = None,
+        prefilter_needed: frozenset[str] | None = None,
     ) -> Iterable[dict[str, object]]:
+        """扫描一张表或视图，产出逐行上下文。
+
+        HOW：传入 `prefilter` 时先用只读行视图过滤（WHERE 只涉及本表的情况），
+        不通过的行根本不会构建完整上下文，全表扫描的分配成本随之下降。
+        """
         trace = current_trace.get()
         try:
             relation = self.catalog.get_relation(reference.name)
@@ -1416,15 +2273,22 @@ class Database:
             )
             if trace is not None:
                 trace.scans.append({"table": relation.name, "operator": "ViewScan", "candidate_rows": len(result.rows)})
+            template = self._context_template(reference, relation, needed, row_order)
+            view = self._context_template(reference, relation, prefilter_needed, False) if prefilter is not None else None
             for slot_id, row in enumerate(result.rows):
                 if trace is not None:
                     trace.step()
-                yield self._table_context(reference, tuple(row), RowId(PageId(-1), slot_id), relation)
+                typed = tuple(row)
+                if view is not None and prefilter is not None and not sql_truth(prefilter(_RowView(view.lookup, typed))):
+                    continue
+                yield self._table_context(reference, typed, RowId(PageId(-1), slot_id), relation, template=template)
             return
 
         table = relation
         heap = self._heap(table)
-        effective_predicate = self._scan_predicate(scan_plan, predicate)
+        # WHY：计划下推的谓词可能仍带 `DATE('1994-01-01')` 这类可折叠调用，而候选集抽取只认字面量；
+        # 不先折叠会让按字符串列范围建的索引直接失效（降级为 SeqScan）。
+        effective_predicate = self._fold_constants(self._scan_predicate(scan_plan, predicate))
         candidates = None
         if scan_plan is None or scan_plan.kind == "IndexScan":
             candidates = self._candidate_row_ids(table, reference, effective_predicate)
@@ -1434,11 +2298,16 @@ class Database:
             rows = heap.scan()
         else:
             rows = ((row_id, heap.read(row_id)) for row_id in candidates)
+        template = self._context_template(reference, table, needed, row_order)
+        view = self._context_template(reference, table, prefilter_needed, False) if prefilter is not None else None
         for row_id, row in rows:
             if trace is not None:
                 trace.step()
-            if row is not None:
-                yield self._table_context(reference, row, row_id, table)
+            if row is None:
+                continue
+            if view is not None and prefilter is not None and not sql_truth(prefilter(_RowView(view.lookup, row))):
+                continue
+            yield self._table_context(reference, row, row_id, table, template=template)
 
     @staticmethod
     def _scan_plans(plan: PlanNode | None) -> list[PlanNode]:
@@ -1516,21 +2385,72 @@ class Database:
         reference: TableRef,
         atoms: tuple[Expr, ...],
     ) -> tuple[RowId, ...] | None:
-        """按索引元数据计算一组 AND 条件的候选 RowId 交集。"""
+        """按索引元数据计算一组 AND 条件的候选 RowId 交集（带缓存）。"""
 
-        candidates: list[tuple[RowId, ...]] = []
+        per_index: list[tuple[tuple[object, ...], tuple[RowId, ...] | None]] = []
         for metadata in self.catalog.indexes():
             if metadata.table_id != table.table_id:
                 continue
-            current = self._index_candidates_for_atoms(table, reference, metadata, atoms)
-            if current is not None:
-                candidates.append(current)
-        if not candidates:
+            constraints = self._constraints_for_atoms(reference, atoms)
+            signature = self._index_constraint_signature(metadata, constraints)
+            per_index.append((signature, self._index_candidates_for_atoms(table, reference, metadata, atoms)))
+        if not any(rows is not None for _signature, rows in per_index):
             return None
+        # HOW：交集按“参与索引的约束组合”缓存；任一写操作都会清空整个缓存。
+        intersection_key = ("intersection",) + tuple(sorted(signature for signature, _rows in per_index))
+        cached = self._candidate_cache.get(intersection_key, _MISSING)
+        if cached is not _MISSING:
+            return cached  # type: ignore[return-value]
+        candidates = [rows for _signature, rows in per_index if rows is not None]
         result = set(candidates[0])
         for current in candidates[1:]:
             result.intersection_update(current)
-        return tuple(sorted(result))
+        merged = tuple(sorted(result))
+        self._candidate_cache[intersection_key] = merged
+        return merged
+
+    @staticmethod
+    def _constraints_for_atoms(
+        reference: TableRef,
+        atoms: tuple[Expr, ...],
+    ) -> dict[str, "_IndexConstraint"]:
+        """把 AND 原子归并成每列一个约束；与实例方法共用同一套转换规则。"""
+
+        constraints: dict[str, _IndexConstraint] = {}
+        for atom in atoms:
+            parsed = Database._index_atom_constraint(atom, reference)
+            if parsed is None:
+                continue
+            column, incoming = parsed
+            current = constraints.setdefault(column, _IndexConstraint())
+            if incoming.allowed is not None:
+                current.allowed = Database._merge_allowed(current.allowed, incoming.allowed)
+            if incoming.lower is not None:
+                current.lower = Database._merge_lower(current.lower, incoming.lower)
+            if incoming.upper is not None:
+                current.upper = Database._merge_upper(current.upper, incoming.upper)
+            current.not_null = current.not_null or incoming.not_null
+        return constraints
+
+    @staticmethod
+    def _index_constraint_signature(
+        metadata: IndexMetadata,
+        constraints: dict[str, "_IndexConstraint"],
+    ) -> tuple[object, ...]:
+        """约束签名：同签名的索引查询可共用候选集。"""
+
+        return (metadata.name,) + tuple(
+            sorted(
+                (
+                    column,
+                    None if constraint.allowed is None else tuple(constraint.allowed),
+                    constraint.lower,
+                    constraint.upper,
+                    constraint.not_null,
+                )
+                for column, constraint in constraints.items()
+            )
+        )
 
     @staticmethod
     def _conjunction_atoms(predicate: Expr) -> tuple[Expr, ...]:
@@ -1604,7 +2524,11 @@ class Database:
             return None
         return column.name.lower()
 
-    def _index_atom_constraint(self, atom: Expr, reference: TableRef) -> tuple[str, _IndexConstraint] | None:
+    @staticmethod
+    def _index_atom_constraint(
+        atom: Expr,
+        reference: TableRef,
+    ) -> tuple[str, _IndexConstraint] | None:
         """把一个谓词转换成单列约束；无法安全定位时返回 None。"""
 
         if isinstance(atom, BinaryOp):
@@ -1612,11 +2536,11 @@ class Database:
             left_column = atom.left if isinstance(atom.left, ColumnRef) else None
             right_column = atom.right if isinstance(atom.right, ColumnRef) else None
             if left_column is not None and right_column is None:
-                column = self._index_column(left_column, reference)
-                found, value = self._constant_expression(atom.right)
+                column = Database._index_column(left_column, reference)
+                found, value = Database._constant_expression(atom.right)
             elif right_column is not None and left_column is None:
-                column = self._index_column(right_column, reference)
-                found, value = self._constant_expression(atom.left)
+                column = Database._index_column(right_column, reference)
+                found, value = Database._constant_expression(atom.left)
                 if operator in {"<", "<=", ">", ">="}:
                     operator = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}[operator]
             else:
@@ -1638,29 +2562,29 @@ class Database:
             return None
 
         if isinstance(atom, IsNull) and isinstance(atom.expression, ColumnRef):
-            column = self._index_column(atom.expression, reference)
+            column = Database._index_column(atom.expression, reference)
             if column is None:
                 return None
             return column, _IndexConstraint(allowed=None if atom.negated else [None], not_null=atom.negated)
 
         if isinstance(atom, InPredicate) and not atom.negated and isinstance(atom.expression, ColumnRef):
-            column = self._index_column(atom.expression, reference)
+            column = Database._index_column(atom.expression, reference)
             if column is None:
                 return None
             values: list[object] = []
             for expression in atom.values:
-                found, value = self._constant_expression(expression)
+                found, value = Database._constant_expression(expression)
                 if not found:
                     return None
                 values.append(value)
             return column, _IndexConstraint(allowed=values)
 
         if isinstance(atom, BetweenPredicate) and not atom.negated and isinstance(atom.expression, ColumnRef):
-            column = self._index_column(atom.expression, reference)
+            column = Database._index_column(atom.expression, reference)
             if column is None:
                 return None
-            lower_found, lower = self._constant_expression(atom.lower)
-            upper_found, upper = self._constant_expression(atom.upper)
+            lower_found, lower = Database._constant_expression(atom.lower)
+            upper_found, upper = Database._constant_expression(atom.upper)
             if not lower_found or not upper_found:
                 return None
             return column, _IndexConstraint(lower=(lower, True), upper=(upper, True))
@@ -1673,20 +2597,23 @@ class Database:
         metadata: IndexMetadata,
         atoms: tuple[Expr, ...],
     ) -> tuple[RowId, ...] | None:
-        constraints: dict[str, _IndexConstraint] = {}
-        for atom in atoms:
-            parsed = self._index_atom_constraint(atom, reference)
-            if parsed is None:
-                continue
-            column, incoming = parsed
-            current = constraints.setdefault(column, _IndexConstraint())
-            if incoming.allowed is not None:
-                current.allowed = self._merge_allowed(current.allowed, incoming.allowed)
-            if incoming.lower is not None:
-                current.lower = self._merge_lower(current.lower, incoming.lower)
-            if incoming.upper is not None:
-                current.upper = self._merge_upper(current.upper, incoming.upper)
-            current.not_null = current.not_null or incoming.not_null
+        """单索引候选集（带约束签名缓存）。"""
+
+        constraints = self._constraints_for_atoms(reference, atoms)
+        signature = self._index_constraint_signature(metadata, constraints)
+        cached = self._candidate_cache.get(signature, _MISSING)
+        if cached is not _MISSING:
+            return cached  # type: ignore[return-value]
+        result = self._scan_index_candidates(metadata, constraints)
+        self._candidate_cache[signature] = result
+        return result
+
+    def _scan_index_candidates(
+        self,
+        metadata: IndexMetadata,
+        constraints: dict[str, _IndexConstraint],
+    ) -> tuple[RowId, ...] | None:
+        """沿索引列从左往右取候选 RowId；无可用前导约束时返回 None。"""
 
         tree = self.index_manager.get(metadata.name)
         columns = tuple(column.lower() for column in metadata.columns)
@@ -1751,25 +2678,193 @@ class Database:
             return None
         return scan(0, ())
 
-    def _table_context(self, reference: TableRef, row: tuple[object, ...], row_id: RowId, table: TableMetadata | ViewMetadata) -> dict[str, object]:
+    def _index_only_contexts(
+        self,
+        reference: TableRef,
+        where: Expr | None,
+        needed: frozenset[str] | None,
+    ) -> list[dict[str, object]] | None:
+        """用覆盖索引直接产出逐行上下文，完全不读堆页。
+
+        HOW：启用条件——单表查询；被引用列全部落在某个索引的（键列 + INCLUDE 列）内；
+        首列有可用约束；且页级代价模型认为回表/扫描值得（候选集命中缓存，遍历成本已摊薄）。
+        """
+
+        if not needed:
+            return None
+        try:
+            relation = self.catalog.get_relation(reference.name)
+        except CatalogError:
+            return None
+        if not isinstance(relation, TableMetadata):
+            return None
+        atoms = self._conjunction_atoms(where) if where is not None else ()
+        template = self._context_template(reference, relation, needed, False)
+        for metadata in self.catalog.indexes():
+            if metadata.table_id != relation.table_id:
+                continue
+            covered = {column.lower() for column in metadata.columns} | {
+                column.lower() for column in metadata.payload_columns
+            }
+            if not needed <= covered:
+                continue
+            constraints = self._constraints_for_atoms(reference, atoms)
+            bounds = self._leading_probe_bounds(constraints.get(metadata.columns[0].lower()))
+            if bounds is None:
+                continue
+            candidates = self._index_candidates_for_atoms(relation, reference, metadata, atoms)
+            if candidates is None or not candidates:
+                continue
+            if not self.optimizer.should_use_index_only(relation.name, len(candidates)):
+                continue
+            tree = self.index_manager.get(metadata.name)
+            low, high, include_low, include_high = bounds
+            # WHY：必须用“前缀位置范围”而不是全键范围。联合索引下 `(1,'paid')` 与上界 `(1,)`
+            # 做元组比较会被判为越界，导致等值查询返回空集（实测演示库 `customer_id = 1` 返回 0 行）。
+            entries = tree.range_scan_prefix_entries(
+                (), low, high, include_low=include_low, include_high=include_high
+            )
+            key_positions = [relation.schema.index(column) for column in metadata.columns]
+            payload_positions = [relation.schema.index(column) for column in metadata.payload_columns]
+            contexts: list[dict[str, object]] = []
+            for key, row_id, payload in entries:
+                values: list[object] = [None] * len(relation.schema)
+                for value, position in zip(key, key_positions, strict=True):
+                    values[position] = value
+                for value, position in zip(payload, payload_positions, strict=True):
+                    values[position] = value
+                contexts.append(self._table_context(reference, tuple(values), row_id, relation, template=template))
+            return contexts
+        return None
+
+    @classmethod
+    def _leading_probe_bounds(
+        cls,
+        constraint: _IndexConstraint | None,
+    ) -> tuple[object | None, object | None, bool, bool] | None:
+        """把首列约束换成可复用的范围上下界；等值/IN 归为包含端点的区间。"""
+
+        if constraint is None:
+            return None
+        if constraint.allowed is not None:
+            values = [value for value in constraint.allowed if value is not None or not constraint.not_null]
+            if not values:
+                return None
+            ordered = sorted(values, key=cmp_to_key(cls._compare_index_values))
+            return ordered[0], ordered[-1], True, True
+        low = constraint.lower[0] if constraint.lower is not None else None
+        high = constraint.upper[0] if constraint.upper is not None else None
+        if low is None and high is None:
+            return None
+        include_low = constraint.lower[1] if constraint.lower is not None else True
+        include_high = constraint.upper[1] if constraint.upper is not None else True
+        return low, high, include_low, include_high
+
+    def _needed_context_columns(self, statement: Select) -> tuple[frozenset[str] | None, bool]:
+        """收集语句引用到的列名，作为逐行上下文的裁剪依据。
+
+        HOW：`needed=None` 表示退回全列（遇到 `*` 时）；第二个返回值表示是否必须构建 `__row_order__`。
+        """
+
+        if any(isinstance(item.expression, Star) for item in statement.items):
+            return None, True
+        sink: set[str] = set()
+        found_star = False
+        for item in statement.items:
+            found_star |= _collect_column_refs(item.expression, sink)
+        for expression in statement.group_by:
+            found_star |= _collect_column_refs(expression, sink)
+        for clause in statement.joins:
+            found_star |= _collect_column_refs(clause.on, sink)
+        for expression in (statement.where, statement.having):
+            found_star |= _collect_column_refs(expression, sink)
+        for order_item in statement.order_by:
+            found_star |= _collect_column_refs(order_item.expression, sink)
+        if found_star:
+            # `COUNT(*)` 之类只需行数的聚合不引用具名列，但保守退回全列以免漏掉消费点。
+            return None, False
+        return frozenset(sink), False
+
+    def _context_template(
+        self,
+        reference: TableRef,
+        table: TableMetadata | ViewMetadata,
+        needed: frozenset[str] | None,
+        row_order: bool,
+    ) -> _RowContextTemplate:
+        """获取（或建立）行上下文模板；限定名与裸列名去重后保持 schema 顺序。"""
+
         alias = (reference.alias or reference.name).lower()
         table_name = reference.name.lower()
-        values: dict[str, object] = {"__row_ids__": {alias: row_id, table_name: row_id}, "__schemas__": {alias: table.schema, table_name: table.schema}, "__row_order__": []}
-        for column, value in zip(table.schema, row, strict=True):
+        key = (alias, table_name, needed, row_order)
+        cached = self._context_templates.get(key)
+        if cached is not None and cached.schema is table.schema:
+            return cached
+        keys: list[str] = []
+        indices: list[int] = []
+        for index, column in enumerate(table.schema):
             column_name = column.name.lower()
-            values[f"{alias}.{column_name}"] = value
-            values[f"{table_name}.{column_name}"] = value
-            values["__row_order__"].append((alias, column.name, value))  # type: ignore[union-attr]
-            if column_name not in values:
-                values[column_name] = value
-            else:
-                values[column_name] = _AMBIGUOUS
-        return values
+            if needed is not None and column_name not in needed:
+                continue
+            for candidate in (f"{alias}.{column_name}", f"{table_name}.{column_name}", column_name):
+                if candidate not in keys:
+                    keys.append(candidate)
+                    indices.append(index)
+        template = _RowContextTemplate(
+            tuple(keys),
+            tuple(indices),
+            dict(zip(keys, indices, strict=True)),
+            alias,
+            table_name,
+            table.schema,
+            {alias: table.schema, table_name: table.schema},
+            row_order,
+        )
+        if len(self._context_templates) > 128:
+            self._context_templates.clear()
+        self._context_templates[key] = template
+        return template
 
-    def _null_context(self, reference: TableRef) -> dict[str, object]:
+    def _table_context(
+        self,
+        reference: TableRef,
+        row: tuple[object, ...],
+        row_id: RowId,
+        table: TableMetadata | ViewMetadata,
+        *,
+        needed: frozenset[str] | None = None,
+        row_order: bool = True,
+        template: _RowContextTemplate | None = None,
+    ) -> dict[str, object]:
+        """构造一行上下文；needed 不为 None 时只把被引用的列放进上下文。"""
+
+        if template is None:
+            template = self._context_template(reference, table, needed, row_order)
+        context: dict[str, object] = {}
+        if template.indices:
+            picked = itemgetter(*template.indices)(row)
+            context = dict(zip(template.keys, picked if isinstance(picked, tuple) else (picked,), strict=True))
+        context["__row_ids__"] = {template.alias: row_id, template.table_name: row_id}
+        # HOW：`__schemas__` 与表结构同生命周期，直接共享同一份只读映射（合并时会重建新字典）。
+        context["__schemas__"] = template.schemas
+        if template.row_order:
+            context["__row_order__"] = [
+                (template.alias, column.name, value) for column, value in zip(template.schema, row, strict=True)
+            ]
+        return context
+
+    def _null_context(
+        self,
+        reference: TableRef,
+        *,
+        needed: frozenset[str] | None = None,
+        row_order: bool = True,
+    ) -> dict[str, object]:
         relation = self.catalog.get_relation(reference.name)
         row = tuple(None for _column in relation.schema)
-        return self._table_context(reference, row, RowId(PageId(-1), -1), relation)
+        return self._table_context(
+            reference, row, RowId(PageId(-1), -1), relation, needed=needed, row_order=row_order
+        )
 
     def _merge_context(self, left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
         merged = {key: value for key, value in left.items() if key not in {"__row_ids__", "__schemas__", "__row_order__"}}
@@ -1790,6 +2885,229 @@ class Database:
             if table_name is None or str(table_name).lower() in {str(alias).lower()}:
                 result.append(value)
         return result
+
+    def _fold_statement(self, statement: Select) -> Select:
+        """执行前把常量表达式预求值；返回新对象，不改动原始 AST。
+
+        WHY：`DATE('1994-01-01')`、`0.06 - 0.01` 这类常量原来每行重算一次。
+        """
+
+        return replace(
+            statement,
+            items=tuple(replace(item, expression=self._fold_constants(item.expression)) for item in statement.items),
+            joins=tuple(replace(clause, on=self._fold_constants(clause.on)) for clause in statement.joins),
+            where=self._fold_constants(statement.where),
+            group_by=tuple(self._fold_constants(expression) for expression in statement.group_by),
+            having=self._fold_constants(statement.having),
+            order_by=tuple(replace(item, expression=self._fold_constants(item.expression)) for item in statement.order_by),
+        )
+
+    def _fold_constants(self, expression: Expr | None) -> Expr | None:
+        if expression is None:
+            return None
+        folded, _constant, _value = self._fold_node(expression)
+        return folded
+
+    def _fold_node(self, expression: Expr) -> tuple[Expr, bool, object]:
+        """自下而上折叠常量子树，返回（节点, 是否常量, 常量值）。
+
+        HOW：只在求值成功时替换为 Literal；失败（如常量除零）保留原节点，
+        使错误时机与折叠前一致——例如 `WHERE FALSE AND 1/0 = 1` 仍由短路决定是否报错。
+        """
+
+        if isinstance(expression, Literal):
+            return expression, True, expression.value
+        if isinstance(expression, (ColumnRef, Parameter, Star)):
+            return expression, False, None
+        if isinstance(expression, Subquery):
+            return expression, False, None
+        if isinstance(expression, FunctionCall) and expression.name.lower() in _AGGREGATE_NAMES:
+            return expression, False, None
+        updates: dict[str, Any] = {}
+        constant = True
+        for field in fields(expression):
+            current = getattr(expression, field.name)
+            if isinstance(current, Expr):
+                child, child_constant, _child_value = self._fold_node(current)
+                constant &= child_constant
+                if child is not current:
+                    updates[field.name] = child
+            elif isinstance(current, tuple) and any(isinstance(item, Expr) for item in current):
+                items = list(current)
+                changed = False
+                for position, item in enumerate(items):
+                    if isinstance(item, Expr):
+                        child, child_constant, _child_value = self._fold_node(item)
+                        constant &= child_constant
+                        if child is not item:
+                            items[position] = child
+                            changed = True
+                # WHY：只在真的变化时重建节点，否则会丢掉节点上的 source_location，错误行列会不准。
+                if changed:
+                    updates[field.name] = tuple(items)
+            elif is_dataclass(current) and not isinstance(current, Expr):
+                # 嵌套的非表达式节点（如子查询里的 Select）不参与折叠。
+                constant = False
+        rebuilt = replace(expression, **updates) if updates else expression
+        if not constant:
+            return rebuilt, False, None
+        try:
+            value = self._eval_expr(rebuilt, {})
+        except Exception:  # noqa: BLE001 - 折叠失败时保留原节点，不影响运行时语义
+            return rebuilt, False, None
+        return Literal(value), True, value
+
+    def _compile_expr(self, expression: Expr | None) -> Callable[[dict[str, object]], object]:
+        """把表达式编译成闭包，避免逐行 isinstance 派发。
+
+        HOW：只特化热路径节点（字面量/列引用/一元二元运算/IS NULL/BETWEEN），
+        其余节点回退到 `_eval_expr`，保证语义与错误信息完全一致；
+        LIKE 的正则在编译期就建好，不再每行重编。
+        """
+
+        if expression is None:
+            return lambda _context: None
+        if isinstance(expression, Literal):
+            value = expression.value
+            return lambda _context: value
+        if isinstance(expression, ColumnRef):
+            key = (
+                f"{expression.table.lower()}.{expression.name.lower()}"
+                if expression.table
+                else expression.name.lower()
+            )
+            qualified = expression.qualified_name
+
+            def evaluate_column(context: dict[str, object]) -> object:
+                value = context.get(key, _MISSING)
+                if value is _MISSING or value is _AMBIGUOUS:
+                    raise _with_node_location(ExecutionError(f"执行时找不到列 {qualified}"), expression)
+                return value
+
+            return evaluate_column
+        if isinstance(expression, UnaryOp):
+            operand = self._compile_expr(expression.operand)
+            operator = expression.operator
+            if operator == "NOT":
+                return lambda context: None if (value := operand(context)) is None else not bool(value)
+
+            def evaluate_unary(context: dict[str, object]) -> object:
+                value = operand(context)
+                if value is None:
+                    return None
+                try:
+                    return +value if operator == "+" else -value
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise _with_node_location(ExecutionError(f"一元运算失败: {exc}"), expression) from exc
+
+            return evaluate_unary
+        if isinstance(expression, BinaryOp):
+            left = self._compile_expr(expression.left)
+            right = self._compile_expr(expression.right)
+            operator = expression.operator.upper()
+            if operator == "AND":
+                return lambda context: _logical_and(left(context), right(context))
+            if operator == "OR":
+                return lambda context: _logical_or(left(context), right(context))
+            if operator in {"=", "==", "!=", "<>", "<", "<=", ">", ">="}:
+                # WHY：试过在这里内联比较函数与运算符预取，实测无收益（差在噪声内），保持通用实现。
+                return lambda context: compare_values(left(context), right(context), operator)
+            if operator in {"LIKE", "NOT LIKE"}:
+                # HOW：正则只需按模式常量编译一次；右侧非常量时仍按行构造。
+                fixed = _literal_pattern(expression.right)
+                pattern = _compile_like(fixed) if fixed is not None else None
+
+                def evaluate_like(context: dict[str, object]) -> object:
+                    left_value = left(context)
+                    right_value = right(context)
+                    if left_value is None or right_value is None:
+                        return None
+                    matcher = pattern if pattern is not None else _compile_like(right_value)
+                    matched = matcher(str(left_value))
+                    return not matched if operator == "NOT LIKE" else matched
+
+                return evaluate_like
+
+            def evaluate_binary(context: dict[str, object]) -> object:
+                left_value = left(context)
+                right_value = right(context)
+                if left_value is None or right_value is None:
+                    return None
+                try:
+                    if operator == "+":
+                        return left_value + right_value
+                    if operator == "-":
+                        return left_value - right_value
+                    if operator == "*":
+                        return left_value * right_value
+                    if operator == "/":
+                        if right_value == 0:
+                            raise _with_node_location(ExecutionError("除数不能为零"), expression)
+                        return left_value / right_value
+                    if operator == "%":
+                        return left_value % right_value
+                    return str(left_value) + str(right_value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise _with_node_location(ExecutionError(f"算术运算失败: {exc}"), expression) from exc
+
+            return evaluate_binary
+        if isinstance(expression, IsNull):
+            inner = self._compile_expr(expression.expression)
+            negated = expression.negated
+            return lambda context: (inner(context) is not None) if negated else (inner(context) is None)
+        if isinstance(expression, BetweenPredicate):
+            value = self._compile_expr(expression.expression)
+            lower = self._compile_expr(expression.lower)
+            upper = self._compile_expr(expression.upper)
+            negated = expression.negated
+
+            def evaluate_between(context: dict[str, object]) -> object:
+                result = compare_values(value(context), lower(context), ">=") and compare_values(
+                    value(context), upper(context), "<="
+                )
+                if result is None:
+                    return None
+                return not result if negated else result
+
+            return evaluate_between
+        if isinstance(expression, InPredicate):
+            inner = self._compile_expr(expression.expression)
+            negated = expression.negated
+            static: list[object] = []
+            dynamic: list[Callable[[dict[str, object]], object]] = []
+            reused = False
+            for value in expression.values:
+                if isinstance(value, Subquery) and not self._subquery_is_correlated(value.query):
+                    # WHY：不相关子查询的结果与行无关；原实现每行都重跑一遍（Q18 是 15,000 次分组聚合）。
+                    result = self._execute_select(value.query)
+                    static.extend(row[0] for row in result.rows if row)
+                    reused = True
+                else:
+                    dynamic.append(self._compile_expr(value))
+
+            def evaluate_in(context: dict[str, object]) -> object:
+                left_value = inner(context)
+                result: bool | None = False
+                candidates = static if reused else ()
+                for candidate in candidates:
+                    compared = compare_values(left_value, candidate, "=")
+                    if compared is True:
+                        return not negated
+                    if compared is None:
+                        result = None
+                for evaluator in dynamic:
+                    compared = compare_values(left_value, evaluator(context), "=")
+                    if compared is True:
+                        return not negated
+                    if compared is None:
+                        result = None
+                if negated:
+                    return None if result is None else not result
+                return result
+
+            return evaluate_in
+        # 其余节点（函数、子查询、*、参数）保持原有解释执行路径。
+        return lambda context: self._eval_expr(expression, context)
 
     def _eval_expr(self, expression: Expr | None, context: dict[str, object]) -> object:
         if expression is None:
