@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from threading import RLock
 
@@ -33,7 +33,8 @@ class BufferPool:
         self.disk = disk
         self.capacity = capacity
         self.replacement_policy = policy
-        self._frames: dict[int, BufferFrame] = {}
+        # HOW：`_frames` 自身按淘汰优先级排序（队首最先淘汰），使淘汰 O(1) 摊还。
+        self._frames: OrderedDict[int, BufferFrame] = OrderedDict()
         self._clock = 0
         self._hits = 0
         self._misses = 0
@@ -91,13 +92,21 @@ class BufferPool:
         return [page_id for page_id, _ in candidates]
 
     def _evict_one(self) -> None:
-        candidates = [(page_id, frame) for page_id, frame in self._frames.items() if frame.pin_count == 0]
-        if not candidates:
+        """淘汰队首第一个未 pin 的页。
+
+        WHY：原实现每次淘汰都构建候选列表并取 min，复杂度 O(容量)；全表扫描时几乎每页
+        都触发一次淘汰，缓冲池越大反而越慢。现在按维护好的优先级顺序取首项，
+        选中的页与原来一致（时钟单调递增，不会出现同优先级）。
+        """
+
+        victim: tuple[int, BufferFrame] | None = None
+        for page_id, frame in self._frames.items():
+            if not frame.pin_count:
+                victim = (page_id, frame)
+                break
+        if victim is None:
             raise StorageError("缓存已满且所有页都被 pin")
-        if self.replacement_policy == "fifo":
-            page_id, frame = min(candidates, key=lambda item: item[1].loaded_order)
-        else:
-            page_id, frame = min(candidates, key=lambda item: item[1].last_used)
+        page_id, frame = victim
         if frame.dirty:
             self.disk.write(frame.page)
         del self._frames[page_id]
@@ -113,6 +122,9 @@ class BufferPool:
             if frame is not None:
                 self._hits += 1
                 self._touch(frame)
+                # LRU 命中要把该页移到队尾（最后淘汰）；FIFO 保持装载顺序不变。
+                if self.replacement_policy == "lru":
+                    self._frames.move_to_end(normalized)
                 if pin:
                     frame.pin_count += 1
                 return frame.page

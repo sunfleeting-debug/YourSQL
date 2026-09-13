@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from ..common.errors import StorageError
 from ..common.types import PageId, RowId
 from .buffer import BufferPool
-from .page import PageType, SlottedPage
+from .page import HEADER_SIZE, Page, PageType, SLOTTED_HEADER_SIZE, SLOT_ENTRY_SIZE, SlottedPage
 
 
 class TableHeap:
@@ -17,6 +17,12 @@ class TableHeap:
     def __init__(self, buffer_pool: BufferPool, page_ids: list[int] | None = None) -> None:
         self.buffer_pool = buffer_pool
         self.page_ids: list[int] = [int(page_id) for page_id in (page_ids or [])]
+
+    @property
+    def page_size(self) -> int:
+        """页大小跟随磁盘格式（打开已有库时可能是 512B–128KB 中的任意 2 的幂）。"""
+
+        return self.buffer_pool.disk.page_size
 
     @staticmethod
     def _encode(row: tuple[object, ...]) -> bytes:
@@ -60,6 +66,58 @@ class TableHeap:
         self._write_slotted(slotted)
         self.page_ids.append(page.page_id)
         return RowId(PageId(page.page_id), slot_id)
+
+    def append_batch(self, rows: Iterable[tuple[object, ...]]) -> list[RowId]:
+        """批量追加记录：同一页写满才序列化一次。
+
+        WHY：`insert` 每行都要整页解码 + 整页重编码（实测 60,175 行 51 s 的主因），
+        同一页会被反复重写数百次；批量导入时改为累积记录、写满一页才落盘。
+        返回值与行一一对应，调用方仍需按序维护索引。
+        """
+
+        row_ids: list[RowId] = []
+        capacity = self.page_size - Page.HEADER_SIZE
+        pending: list[bytes | None] = []
+        used = SLOTTED_HEADER_SIZE
+        page_id: int | None = None
+        free_slots: list[int] = []
+        if self.page_ids:
+            # HOW：先尝试接着最后一页写，与 insert 的“优先尾页”行为一致。
+            page_id = int(self.page_ids[-1])
+            existing = list(self._read_slotted(page_id).slots)
+            pending = list(existing)
+            free_slots = [index for index, record in enumerate(existing) if record is None]
+            used = SLOTTED_HEADER_SIZE + len(existing) * SLOT_ENTRY_SIZE + sum(
+                len(record) for record in existing if record is not None
+            )
+
+        def flush() -> None:
+            nonlocal pending, used, free_slots
+            if page_id is None or not pending:
+                return
+            self._write_slotted(SlottedPage(page_id, self.page_size, list(pending)))
+            pending = []
+            free_slots = []
+            used = SLOTTED_HEADER_SIZE
+
+        for row in rows:
+            encoded = self._encode(row)
+            entry = len(encoded) + SLOT_ENTRY_SIZE
+            if page_id is None or used + entry > capacity:
+                flush()
+                page = self.buffer_pool.new_page(PageType.HEAP)
+                page_id = int(page.page_id)
+                self.page_ids.append(page_id)
+            if free_slots:
+                slot_id = free_slots.pop(0)
+                pending[slot_id] = encoded
+            else:
+                slot_id = len(pending)
+                pending.append(encoded)
+            used += entry
+            row_ids.append(RowId(PageId(page_id), slot_id))
+        flush()
+        return row_ids
 
     def read(self, row_id: RowId) -> tuple[object, ...] | None:
         page_id = int(row_id.page_id)
