@@ -108,8 +108,19 @@ def test_optimizer_statistics_and_plan_cache() -> None:
     assert optimizer.choose_scan("t", has_usable_index=True) == "IndexScan"
     assert optimizer.choose_scan("t", has_usable_index=True, selectivity=0.25) == "SeqScan"
     assert optimizer.should_use_index("t", 0) is True
+    # HOW：页级代价模型下，小表（10 页，能全部驻留缓存）回表单价低，可承受更高候选占比。
     assert optimizer.should_use_index("t", 200) is True
-    assert optimizer.should_use_index("t", 201) is False
+    assert optimizer.should_use_index("t", 300) is True
+
+    # 大表且表页超出缓存时，随机回表单价高（实测 800 行 78.8 ms）：候选一多就该改走顺序扫描。
+    huge = StatisticsStore()
+    huge.update("big", TableStats(row_count=60175, page_count=533))
+    heavy = Optimizer(huge, buffer_pool_pages=256)
+    assert heavy.should_use_index("big", 800) is True  # Q6 三索引交集后的候选行
+    assert heavy.should_use_index("big", 800, index_cached=True) is True
+    assert heavy.should_use_index("big", 10969) is False  # l_discount 单索引：实测比顺序扫慢 3 倍
+    assert heavy.should_use_index("big", 27627) is False
+
     cache = PlanCache(capacity=1)
     cache.put("SELECT 1", {"plan": 1})
     assert cache.get(" select   1 ") == {"plan": 1}

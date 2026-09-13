@@ -55,6 +55,8 @@ class IndexMetadata:
     unique: bool = False
     index_type: str = "btree"
     root_page_id: PageId | None = None
+    # HOW：覆盖列（CREATE INDEX ... INCLUDE (...)）；默认为空，旧目录反序列化后保持纯键索引。
+    payload_columns: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -64,6 +66,7 @@ class IndexMetadata:
             "unique": self.unique,
             "index_type": self.index_type,
             "root_page_id": None if self.root_page_id is None else int(self.root_page_id),
+            "payload_columns": list(self.payload_columns),
         }
 
     @classmethod
@@ -76,6 +79,7 @@ class IndexMetadata:
             unique=bool(value.get("unique", False)),
             index_type=str(value.get("index_type", "btree")),
             root_page_id=None if root is None else PageId(int(root)),
+            payload_columns=tuple(str(item) for item in value.get("payload_columns", [])),
         )
 
 

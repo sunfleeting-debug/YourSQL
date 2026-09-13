@@ -43,6 +43,17 @@ _SMALL_TABLE_ROW_THRESHOLD = 128
 # WHY：索引命中大量记录时还要逐行回表；超过该比例时顺序扫描通常更稳定。
 _INDEX_SELECTIVITY_THRESHOLD = 0.20
 
+# HOW：页级代价常数由本机实测标定（TPC-H SF0.01，16 KB 页）：
+#   顺序读一页（含槽目录解析）≈ 30 µs；顺序扫描每行解码 ≈ 4.2 µs；
+#   索引回表每行（页缓存大量未命中 + 记录解码）≈ 98.6 µs；索引项遍历每行 ≈ 8.6 µs。
+# 这些常数只用于“索引 vs 顺序扫描”的相对比较，不代表毫秒数。
+SEQ_PAGE_COST = 30e-6
+DECODE_ROW_COST = 4.2e-6
+INDEX_ENTRY_COST = 8.6e-6
+RANDOM_PAGE_COST = 94e-6
+# 覆盖索引直读的每条目成本（实测：叶子链扫 9,504 条约 44 ms，含索引页 JSON 解析）。
+INDEX_ONLY_ENTRY_COST = 4.6e-6
+
 
 @dataclass
 class StatisticsStore:
@@ -107,18 +118,50 @@ class PlanCache:
 class Optimizer:
     """负责表达式重写、谓词下推、扫描方式选择和计划缓存。"""
 
-    def __init__(self, statistics: StatisticsStore | None = None, cache: PlanCache | None = None) -> None:
+    def __init__(
+        self,
+        statistics: StatisticsStore | None = None,
+        cache: PlanCache | None = None,
+        *,
+        buffer_pool_pages: int = 64,
+    ) -> None:
         self.statistics = statistics or StatisticsStore()
         self.cache = cache or PlanCache()
+        # HOW：随机回表成本取决于“表页数是否超出缓存”，真实池容量由 Database 注入。
+        self.buffer_pool_pages = max(1, int(buffer_pool_pages))
+
+    def _random_row_cost(self, page_count: int) -> float:
+        """随机回表单行成本：记录解码 + 未命中缓存部分的随机取页。"""
+
+        pages = max(1, page_count)
+        miss_ratio = 0.0 if pages <= self.buffer_pool_pages else 1.0 - self.buffer_pool_pages / pages
+        return DECODE_ROW_COST + RANDOM_PAGE_COST * miss_ratio
 
     def estimate_seq_scan(self, table_name: str) -> CostEstimate:
-        rows = self.statistics.get(table_name).row_count
-        return CostEstimate(0.1, max(1.0, rows / 100.0), rows)
+        """顺序扫描成本：读全部页 + 解码全部行。"""
 
-    def estimate_index_scan(self, table_name: str, *, selectivity: float = 0.1) -> CostEstimate:
-        rows = self.statistics.get(table_name).row_count
+        stats = self.statistics.get(table_name)
+        rows = max(0, stats.row_count)
+        pages = max(1, stats.page_count or 1)
+        total = pages * SEQ_PAGE_COST + rows * DECODE_ROW_COST
+        return CostEstimate(total, max(1.0, rows / 100.0), rows)
+
+    def estimate_index_scan(
+        self,
+        table_name: str,
+        *,
+        selectivity: float = 0.1,
+        index_cached: bool = False,
+    ) -> CostEstimate:
+        """索引扫描成本：索引项遍历 + 按候选行回表（回表单价随缓存命中情况变化）。"""
+
+        stats = self.statistics.get(table_name)
+        rows = max(0, stats.row_count)
+        pages = max(1, stats.page_count or 1)
         selected = max(1, int(rows * selectivity)) if rows else 0
-        return CostEstimate(0.2, max(0.2, selected / 200.0), selected)
+        entry_cost = 0.0 if index_cached else INDEX_ENTRY_COST
+        total = selected * (entry_cost + self._random_row_cost(pages))
+        return CostEstimate(total, max(0.2, selected / 200.0), selected)
 
     def estimate_plan(self, plan: PlanNode) -> CostEstimate:
         """汇总计划中的扫描代价，供工作台展示优化器估算。"""
@@ -162,17 +205,48 @@ class Optimizer:
         # HOW：先用固定选择性做保守决策；大表的宽索引扫描不应仅因存在索引就被选中。
         if rows > _SMALL_TABLE_ROW_THRESHOLD and selectivity > _INDEX_SELECTIVITY_THRESHOLD:
             return "SeqScan"
+        # HOW：小表或高选择性场景再用页级代价（顺序页/解码行/随机回表）做最终判断。
+        candidate_rows = max(1, int(rows * selectivity)) if rows else 1
+        if rows > _SMALL_TABLE_ROW_THRESHOLD and not self.should_use_index(table_name, candidate_rows):
+            return "SeqScan"
         return "IndexScan" if idx.total_cost < seq.total_cost else "SeqScan"
 
-    def should_use_index(self, table_name: str, candidate_rows: int) -> bool:
-        """按实际候选行数判断是否值得回表。"""
+    def should_use_index(self, table_name: str, candidate_rows: int, *, index_cached: bool = False) -> bool:
+        """按页级代价判断是否值得走索引回表。
 
-        rows = self.statistics.get(table_name).row_count
+        WHY：顺序扫描与随机回表的单行成本差一个数量级（实测 4.2 µs/行 vs 98.6 µs/行），
+        只看“候选行占比”会把 18% 候选的查询错判给索引（实测慢 3 倍）。这里直接比较
+        两条路线的预计耗时；候选集命中缓存时索引项遍历成本已摊薄。
+        """
+
+        stats = self.statistics.get(table_name)
+        rows = max(0, stats.row_count)
         if candidate_rows < 0:
             raise ValueError("候选行数不能为负数")
         if candidate_rows == 0 or rows <= _SMALL_TABLE_ROW_THRESHOLD:
             return True
-        return candidate_rows / rows <= _INDEX_SELECTIVITY_THRESHOLD
+        pages = max(1, stats.page_count or 1)
+        cost_seq = pages * SEQ_PAGE_COST + rows * DECODE_ROW_COST
+        entry_cost = 0.0 if index_cached else INDEX_ENTRY_COST
+        cost_index = candidate_rows * (entry_cost + self._random_row_cost(pages))
+        return cost_index < cost_seq
+
+    def should_use_index_only(self, table_name: str, candidate_rows: int) -> bool:
+        """判断覆盖索引直读是否比顺序扫描便宜。
+
+        WHY：覆盖索引不回表，因此不能沿用含随机回表代价的 should_use_index（实测会误判）。
+        这里只比较“索引条目解析”与“全表顺序扫描”。
+        """
+
+        stats = self.statistics.get(table_name)
+        rows = max(0, stats.row_count)
+        if candidate_rows < 0:
+            raise ValueError("候选行数不能为负数")
+        if candidate_rows == 0:
+            return True
+        pages = max(1, stats.page_count or 1)
+        cost_seq = pages * SEQ_PAGE_COST + rows * DECODE_ROW_COST
+        return candidate_rows * INDEX_ONLY_ENTRY_COST < cost_seq
 
     def optimize(
         self,

@@ -292,6 +292,8 @@ class CreateIndex(Statement):
     columns: tuple[str, ...]
     unique: bool = False
     if_not_exists: bool = False
+    # HOW：INCLUDE 列不参与排序与唯一性，只作为覆盖列随条目存储（IndexOnlyScan 用）。
+    include: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

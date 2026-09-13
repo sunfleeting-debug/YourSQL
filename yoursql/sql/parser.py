@@ -331,7 +331,14 @@ class Parser:
         self._expect(TokenKind.ON, "ON")
         table, table_token = self._name_with_token("表名")
         named_columns = self._name_list_with_tokens()
-        statement = self._located(CreateIndex(name, table, tuple(item[0] for item in named_columns), unique, if_not_exists), name_token)
+        include: tuple[str, ...] = ()
+        # HOW：INCLUDE 不是保留字，按标识符文本匹配，保证 `include` 仍可作列名。
+        if self._current().kind is TokenKind.IDENTIFIER and self._current().lexeme.lower() == "include":
+            self._advance()
+            include = tuple(item[0] for item in self._name_list_with_tokens())
+        statement = self._located(
+            CreateIndex(name, table, tuple(item[0] for item in named_columns), unique, if_not_exists, include), name_token
+        )
         statement.with_named_source_location("table", table_token.line, table_token.column)
         for index, (_column, token) in enumerate(named_columns):
             statement.with_named_source_location(f"column:{index}", token.line, token.column)

@@ -126,6 +126,36 @@ def _lower_bound(keys: list[Key], target: Key) -> int:
     return low
 
 
+def _entry_payload_size(key: Key, row_id: RowId, payload: Iterable[object] = ()) -> int:
+    """单条目在叶页 JSON 载荷里的字节数（含分隔逗号）；覆盖列值一并计入。
+
+    HOW：`bulk_load` 用它做增量容量核算，避免“每行都序列化整块候选节点”。
+    """
+
+    entry: list[object] = [list(key), [int(row_id.page_id), row_id.slot_id]]
+    payload_values = list(payload)
+    if payload_values:
+        entry.append(payload_values)
+    encoded = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    return len(encoded) + 1
+
+
+def _leaf_payload_overhead() -> int:
+    """叶页载荷里与条目无关的固定开销（取上界，宁宓勿溢）。"""
+
+    return len(INDEX_MAGIC) + len(
+        '{"version":99,"kind":"leaf","level":0,"parent":1234567,"next":1234567,"prev":1234567,'
+        '"keys":[],"row_ids":[]}'
+    )
+
+
+def _internal_payload_entry_size(key: Key, child_id: int) -> int:
+    """内部页中“一个子页 + 对应分隔键”的字节数上界。"""
+
+    key_size = len(json.dumps(list(key), ensure_ascii=False, separators=(",", ":"))) + 1
+    return key_size + len(str(int(child_id))) + 4
+
+
 @dataclass
 class _IndexNode:
     """内存中的一个索引页快照。"""
@@ -139,11 +169,56 @@ class _IndexNode:
     keys: list[Key] = field(default_factory=list)
     row_ids: list[RowId] = field(default_factory=list)
     children: list[int] = field(default_factory=list)
+    # HOW：覆盖索引（INCLUDE 列）的条目携带值；与 keys/row_ids 平行，纯键索引时为空。
+    payloads: list[list[object]] = field(default_factory=list)
+
+    def ensure_payloads(self) -> None:
+        """把 payloads 补齐到与 keys 等长，保持三个数组始终平行。"""
+
+        if len(self.payloads) != len(self.keys):
+            self.payloads = [self.payloads[index] if index < len(self.payloads) else [] for index in range(len(self.keys))]
+
+    def payload_at(self, position: int) -> list[object]:
+        return self.payloads[position] if position < len(self.payloads) else []
+
+    def insert_entry(self, position: int, key: Key, row_id: RowId, payload: list[object] | None = None) -> None:
+        """插入条目；payload 为空时占位空列表，保持与 keys/row_ids 平行。"""
+
+        self.ensure_payloads()
+        self.keys.insert(position, key)
+        self.row_ids.insert(position, row_id)
+        self.payloads.insert(position, list(payload) if payload else [])
+
+    def pop_entry(self, position: int = -1) -> tuple[Key, RowId, list[object]]:
+        """弹出条目（默认末尾），连同覆盖列值一起返回。"""
+
+        self.ensure_payloads()
+        return self.keys.pop(position), self.row_ids.pop(position), self.payloads.pop(position)
+
+    def extend_from(self, other: "_IndexNode") -> None:
+        """追加另一个叶页的条目（合并时用）。"""
+
+        self.ensure_payloads()
+        other.ensure_payloads()
+        self.keys.extend(other.keys)
+        self.row_ids.extend(other.row_ids)
+        self.payloads.extend(other.payloads)
+
+    def prepend_from(self, other: "_IndexNode") -> None:
+        """在头部插入另一个叶页的条目（合并时用）。"""
+
+        self.ensure_payloads()
+        other.ensure_payloads()
+        self.keys[:0] = other.keys
+        self.row_ids[:0] = other.row_ids
+        self.payloads[:0] = other.payloads
 
     def validate(self) -> None:
         if self.leaf:
             if len(self.keys) != len(self.row_ids):
                 raise StorageError(f"索引叶页 {self.page_id} 的 key/RowId 数量不一致")
+            if self.payloads and len(self.payloads) != len(self.keys):
+                raise StorageError(f"索引叶页 {self.page_id} 的覆盖列值与 key 数量不一致")
             if self.children:
                 raise StorageError(f"索引叶页 {self.page_id} 不应包含子页")
             for left_key, right_key, left_row, right_row in zip(
@@ -169,6 +244,10 @@ class _IndexNode:
         }
         if self.leaf:
             value["row_ids"] = [[int(row_id.page_id), row_id.slot_id] for row_id in self.row_ids]
+            # HOW：只有覆盖索引才写入 payloads，纯键索引的页布局与旧版完全一致。
+            if self.payloads and any(payload for payload in self.payloads):
+                self.ensure_payloads()
+                value["payloads"] = [list(payload) for payload in self.payloads]
         else:
             value["children"] = list(self.children)
         try:
@@ -213,6 +292,11 @@ class _IndexNode:
                 if not isinstance(raw_row_ids, list):
                     raise ValueError("row_ids 不是数组")
                 node.row_ids = [RowId(PageId(int(item[0])), int(item[1])) for item in raw_row_ids]
+                # HOW：覆盖索引才有 payloads；旧页与纯键索引没有该字段，保持空列表。
+                raw_payloads = raw.get("payloads", [])
+                if not isinstance(raw_payloads, list):
+                    raise ValueError("payloads 不是数组")
+                node.payloads = [list(item) for item in raw_payloads]
             else:
                 raw_children = raw.get("children", [])
                 if not isinstance(raw_children, list):
@@ -508,10 +592,11 @@ class BPlusTree:
             if position < len(self._keys) and _compare_keys(self._keys[position], normalized) == 0:
                 self._keys.pop(position)
 
-    def insert(self, key: object | tuple[object, ...], row_id: RowId) -> None:
-        """插入一个 key/RowId；唯一索引重复时抛出执行错误。"""
+    def insert(self, key: object | tuple[object, ...], row_id: RowId, payload: Iterable[object] | None = None) -> None:
+        """插入一个 key/RowId；payload 为覆盖索引（INCLUDE 列）携带的值。"""
 
         normalized = _key(key)
+        normalized_payload = list(payload) if payload is not None else None
         with self._lock:
             self._ensure_alive()
             if not self._persistent:
@@ -529,23 +614,33 @@ class BPlusTree:
             position = first
             while position < len(leaf.keys) and _compare_entries(leaf.keys[position], leaf.row_ids[position], normalized, row_id) < 0:
                 position += 1
-            leaf.keys.insert(position, normalized)
-            leaf.row_ids.insert(position, row_id)
+            leaf.insert_entry(position, normalized, row_id, normalized_payload)
             if self._node_fits(leaf, self.page_size):
                 self._write_node(leaf)
                 self._refresh_ancestors(leaf.parent)
                 return
             self._split_leaf_and_propagate(leaf)
 
+    def has_entries(self) -> bool:
+        """索引是否已有条目；供批量导入决定能否延迟到装载结束再建树。"""
+
+        with self._lock:
+            self._ensure_alive()
+            if self._root_page_id is None:
+                return False
+            node = self._read_node(self._root_page_id, readonly=True)
+            return bool(node.keys or node.children)
+
     def _split_position(self, node: _IndexNode, candidates: Iterable[int]) -> int:
         selected: int | None = None
         middle = len(node.keys) // 2
         ordered = sorted(candidates, key=lambda value: (abs(value - middle), value))
         for position in ordered:
+            node.ensure_payloads()
             left = _IndexNode(node.page_id, True, node.level, node.parent, node.next_page, node.prev_page,
-                               node.keys[:position], node.row_ids[:position])
+                               node.keys[:position], node.row_ids[:position], payloads=node.payloads[:position])
             right = _IndexNode(-1, True, node.level, node.parent, node.next_page, node.page_id,
-                                node.keys[position:], node.row_ids[position:])
+                                node.keys[position:], node.row_ids[position:], payloads=node.payloads[position:])
             if self._node_fits(left, self.page_size) and self._node_fits(right, self.page_size):
                 selected = position
                 break
@@ -555,11 +650,14 @@ class BPlusTree:
 
     def _split_leaf_and_propagate(self, leaf: _IndexNode) -> None:
         position = self._split_position(leaf, range(1, len(leaf.keys)))
+        leaf.ensure_payloads()
         right = self._new_node(leaf=True, level=leaf.level, parent=leaf.parent)
         right.keys = leaf.keys[position:]
         right.row_ids = leaf.row_ids[position:]
+        right.payloads = leaf.payloads[position:]
         leaf.keys = leaf.keys[:position]
         leaf.row_ids = leaf.row_ids[:position]
+        leaf.payloads = leaf.payloads[:position]
         right.next_page = leaf.next_page
         right.prev_page = leaf.page_id
         if leaf.next_page is not None:
@@ -721,20 +819,37 @@ class BPlusTree:
     ) -> tuple[tuple[Key, RowId], ...]:
         """按键范围扫描，结果保持 key/RowId 顺序。"""
 
+        return tuple(
+            (key, row_id)
+            for key, row_id, _payload in self.range_scan_entries(
+                low, high, include_low=include_low, include_high=include_high
+            )
+        )
+
+    def range_scan_entries(
+        self,
+        low: object | tuple[object, ...] | None = None,
+        high: object | tuple[object, ...] | None = None,
+        *,
+        include_low: bool = True,
+        include_high: bool = True,
+    ) -> tuple[tuple[Key, RowId, list[object]], ...]:
+        """按键范围扫描，同时返回条目携带的覆盖列值（IndexOnlyScan 使用）。"""
+
         lower = _key(low) if low is not None else None
         upper = _key(high) if high is not None else None
         with self._lock:
             self._ensure_alive()
             if not self._persistent:
-                result: list[tuple[Key, RowId]] = []
+                result: list[tuple[Key, RowId, list[object]]] = []
                 for key in self._keys:
                     if lower is not None and (_compare_keys(key, lower) < 0 or (not include_low and _compare_keys(key, lower) == 0)):
                         continue
                     if upper is not None and (_compare_keys(key, upper) > 0 or (not include_high and _compare_keys(key, upper) == 0)):
                         continue
-                    result.extend((key, row_id) for row_id in sorted(self._values[_memory_key(key)]))
+                    result.extend((key, row_id, []) for row_id in sorted(self._values[_memory_key(key)]))
                 return tuple(result)
-            result: list[tuple[Key, RowId]] = []
+            result: list[tuple[Key, RowId, list[object]]] = []
             if lower is None:
                 leaf = next(self._iter_leaf_nodes(readonly=False), None)
             else:
@@ -745,7 +860,8 @@ class BPlusTree:
                         break
                     leaf = previous
             while leaf is not None:
-                for key, row_id in zip(leaf.keys, leaf.row_ids, strict=True):
+                leaf.ensure_payloads()
+                for position, (key, row_id) in enumerate(zip(leaf.keys, leaf.row_ids, strict=True)):
                     if lower is not None:
                         comparison = _compare_keys(key, lower)
                         if comparison < 0 or (comparison == 0 and not include_low):
@@ -754,7 +870,7 @@ class BPlusTree:
                         comparison = _compare_keys(key, upper)
                         if comparison > 0 or (comparison == 0 and not include_high):
                             return tuple(result)
-                    result.append((key, row_id))
+                    result.append((key, row_id, leaf.payload_at(position)))
                 if leaf.next_page is None:
                     break
                 leaf = self._read_node(leaf.next_page)
@@ -781,10 +897,28 @@ class BPlusTree:
         不需要为后续键构造无法表达的正负无穷哨兵值。
         """
 
+        return tuple(
+            (key, row_id)
+            for key, row_id, _payload in self.range_scan_prefix_entries(
+                prefix, low, high, include_low=include_low, include_high=include_high
+            )
+        )
+
+    def range_scan_prefix_entries(
+        self,
+        prefix: object | tuple[object, ...],
+        low: object | None = None,
+        high: object | None = None,
+        *,
+        include_low: bool = True,
+        include_high: bool = True,
+    ) -> tuple[tuple[Key, RowId, list[object]], ...]:
+        """前缀范围扫描，并返回条目携带的覆盖列值（供 IndexOnlyScan 使用）。"""
+
         normalized_prefix = _key(prefix)
         with self._lock:
             self._ensure_alive()
-            result: list[tuple[Key, RowId]] = []
+            result: list[tuple[Key, RowId, list[object]]] = []
             include_exact = low is None and high is None
 
             def prefix_comparison(key: Key) -> int:
@@ -796,15 +930,13 @@ class BPlusTree:
                         return comparison
                 return 0
 
-            def accept(key: Key, row_id: RowId) -> bool:
+            def accept(key: Key, row_id: RowId, payload: list[object]) -> bool:
                 comparison = prefix_comparison(key)
-                if comparison < 0:
-                    return False
-                if comparison > 0:
+                if comparison != 0:
                     return False
                 if len(key) == len(normalized_prefix):
                     if include_exact:
-                        result.append((key, row_id))
+                        result.append((key, row_id, payload))
                         return True
                     return False
                 value = key[len(normalized_prefix)]
@@ -816,7 +948,7 @@ class BPlusTree:
                     comparison = _compare_values(value, high)
                     if comparison > 0 or (comparison == 0 and not include_high):
                         return False
-                result.append((key, row_id))
+                result.append((key, row_id, payload))
                 return True
 
             if not self._persistent:
@@ -830,7 +962,7 @@ class BPlusTree:
                                 value_comparison = _compare_values(key[len(normalized_prefix)], high)
                                 if value_comparison > 0 or (value_comparison == 0 and not include_high):
                                     break
-                            accept(key, row_id)
+                            accept(key, row_id, [])
                 return tuple(result)
 
             lower_key = (*normalized_prefix, low) if low is not None else normalized_prefix
@@ -844,17 +976,18 @@ class BPlusTree:
                         break
                     leaf = previous
             while leaf is not None:
-                for key, row_id in zip(leaf.keys, leaf.row_ids, strict=True):
+                leaf.ensure_payloads()
+                for position, (key, row_id) in enumerate(zip(leaf.keys, leaf.row_ids, strict=True)):
                     comparison = prefix_comparison(key)
                     if comparison > 0:
                         return tuple(result)
                     if comparison < 0:
                         continue
+                    payload = leaf.payload_at(position)
                     if len(key) == len(normalized_prefix):
                         if include_exact:
-                            result.append((key, row_id))
+                            result.append((key, row_id, payload))
                         continue
-                    value_comparison = 0
                     if low is not None:
                         value_comparison = _compare_values(key[len(normalized_prefix)], low)
                         if value_comparison < 0 or (value_comparison == 0 and not include_low):
@@ -863,7 +996,7 @@ class BPlusTree:
                         value_comparison = _compare_values(key[len(normalized_prefix)], high)
                         if value_comparison > 0 or (value_comparison == 0 and not include_high):
                             return tuple(result)
-                    result.append((key, row_id))
+                    result.append((key, row_id, payload))
                 if leaf.next_page is None:
                     break
                 leaf = self._read_node(leaf.next_page)
@@ -885,15 +1018,17 @@ class BPlusTree:
         changed_leaves: list[int] = []
         for leaf in self._find_equal_leaves(normalized):
             old_count = len(leaf.keys)
-            kept = []
+            leaf.ensure_payloads()
+            kept: list[tuple[Key, RowId, list[object]]] = []
             removed = False
-            for key, value in zip(leaf.keys, leaf.row_ids, strict=True):
+            for position, (key, value) in enumerate(zip(leaf.keys, leaf.row_ids, strict=True)):
                 if not removed and _compare_keys(key, normalized) == 0 and value == row_id:
                     removed = True
                     continue
-                kept.append((key, value))
-            leaf.keys = [key for key, _value in kept]
-            leaf.row_ids = [value for _key_value, value in kept]
+                kept.append((key, value, leaf.payload_at(position)))
+            leaf.keys = [key for key, _value, _payload in kept]
+            leaf.row_ids = [value for _key, value, _payload in kept]
+            leaf.payloads = [payload for _key, _value, payload in kept]
             if len(leaf.keys) != old_count:
                 changed_leaves.append(leaf.page_id)
                 # 先把空页写回，再让合并流程读取空节点；否则读取到删除前的旧条目。
@@ -934,27 +1069,28 @@ class BPlusTree:
             while self._node_underfull(node):
                 borrowed = False
                 if left is not None and len(left.keys) > 1:
-                    moved_key, moved_row = left.keys.pop(), left.row_ids.pop()
-                    node.keys.insert(0, moved_key)
-                    node.row_ids.insert(0, moved_row)
+                    left.ensure_payloads()
+                    node.ensure_payloads()
+                    moved_key, moved_row, moved_payload = left.pop_entry()
+                    node.insert_entry(0, moved_key, moved_row, moved_payload)
                     if self._node_fits(node, self.page_size) and not self._node_underfull(left):
                         self._write_node(left)
                         self._write_node(node)
                         borrowed = True
                     else:
-                        left.keys.append(node.keys.pop(0))
-                        left.row_ids.append(node.row_ids.pop(0))
+                        returned_key, returned_row, returned_payload = node.pop_entry(0)
+                        left.insert_entry(len(left.keys), returned_key, returned_row, returned_payload)
                 if not borrowed and right is not None and len(right.keys) > 1:
-                    moved_key, moved_row = right.keys.pop(0), right.row_ids.pop(0)
-                    node.keys.append(moved_key)
-                    node.row_ids.append(moved_row)
+                    right.ensure_payloads()
+                    moved_key, moved_row, moved_payload = right.pop_entry(0)
+                    node.insert_entry(len(node.keys), moved_key, moved_row, moved_payload)
                     if self._node_fits(node, self.page_size) and not self._node_underfull(right):
                         self._write_node(right)
                         self._write_node(node)
                         borrowed = True
                     else:
-                        right.keys.insert(0, node.keys.pop())
-                        right.row_ids.insert(0, node.row_ids.pop())
+                        returned_key, returned_row, returned_payload = node.pop_entry()
+                        right.insert_entry(0, returned_key, returned_row, returned_payload)
                 if not borrowed:
                     break
             if not self._node_underfull(node):
@@ -964,8 +1100,7 @@ class BPlusTree:
                 return
             if left is not None:
                 original = len(left.keys)
-                left.keys.extend(node.keys)
-                left.row_ids.extend(node.row_ids)
+                left.extend_from(node)
                 if self._node_fits(left, self.page_size):
                     left.next_page = node.next_page
                     if node.next_page is not None:
@@ -979,10 +1114,10 @@ class BPlusTree:
                     return
                 del left.keys[original:]
                 del left.row_ids[original:]
+                del left.payloads[original:]
             if right is not None:
                 original = len(node.keys)
-                node.keys.extend(right.keys)
-                node.row_ids.extend(right.row_ids)
+                node.extend_from(right)
                 if self._node_fits(node, self.page_size):
                     node.next_page = right.next_page
                     if right.next_page is not None:
@@ -996,6 +1131,7 @@ class BPlusTree:
                     return
                 del node.keys[original:]
                 del node.row_ids[original:]
+                del node.payloads[original:]
             # 变长键可能使两个合法页无法合并；保留当前页并更新边界，不能让删除失败。
             self._write_node(node)
             self._refresh_internal_keys(parent)
@@ -1119,29 +1255,40 @@ class BPlusTree:
                 self._delete_page(page_id)
         self._write_node(self._empty_root())
 
-    def bulk_load(self, entries: Iterable[tuple[object | tuple[object, ...], RowId]]) -> None:
-        """按排序后的输入一次性建立树，避免大表建索引逐行触发分裂。"""
+    def bulk_load(self, entries: Iterable[tuple[object | tuple[object, ...], RowId, Iterable[object] | None]]) -> None:
+        """按排序后的输入一次性建立树；每个条目为 (key, row_id, payload)。
 
-        normalized_entries = [(_key(key), row_id) for key, row_id in entries]
+        HOW：payload 为空表示纯键索引，此时叶页载荷与旧版完全一致。
+        """
+
+        normalized_entries = []
+        for entry in entries:
+            # HOW：同时接受 (key, row_id) 与 (key, row_id, payload)，兼容纯键索引调用方。
+            if len(entry) == 3:
+                key, row_id, payload = entry
+            else:
+                key, row_id = entry
+                payload = None
+            normalized_entries.append((_key(key), row_id, list(payload) if payload is not None else []))
         with self._lock:
             self._ensure_alive()
             if not self._persistent:
                 self._keys.clear()
                 self._values.clear()
                 normalized_entries.sort(key=lambda item: (tuple(_value_order(value) for value in item[0]), item[1].as_tuple()))
-                for key, row_id in normalized_entries:
+                for key, row_id, _payload in normalized_entries:
                     self._insert_memory(key, row_id)
                 return
             normalized_entries.sort(key=lambda item: (tuple(_value_order(value) for value in item[0]), item[1].as_tuple()))
-            deduplicated: list[tuple[Key, RowId]] = []
-            for key, row_id in normalized_entries:
+            deduplicated: list[tuple[Key, RowId, list[object]]] = []
+            for key, row_id, payload in normalized_entries:
                 if deduplicated and _compare_entries(deduplicated[-1][0], deduplicated[-1][1], key, row_id) == 0:
                     continue
-                deduplicated.append((key, row_id))
+                deduplicated.append((key, row_id, payload))
             normalized_entries = deduplicated
             if self.unique:
                 previous: Key | None = None
-                for key, _row_id in normalized_entries:
+                for key, _row_id, _payload in normalized_entries:
                     if previous is not None and _compare_keys(previous, key) == 0:
                         raise ExecutionError(f"唯一索引冲突: {key!r}")
                     previous = key
@@ -1149,18 +1296,23 @@ class BPlusTree:
             if not normalized_entries:
                 self._write_node(self._empty_root())
                 return
-            chunks: list[list[tuple[Key, RowId]]] = []
-            current: list[tuple[Key, RowId]] = []
-            for key, row_id in normalized_entries:
-                candidate = [*current, (key, row_id)]
-                candidate_node = _IndexNode(-1, True, keys=[item[0] for item in candidate], row_ids=[item[1] for item in candidate])
-                if current and not self._node_fits(candidate_node, self.page_size):
+            # HOW：按“条目编码长度”做增量容量核算。原实现每行都复制当前块并调 `_node_fits`，
+            # 而 `_node_fits` 会 json.dumps 整个候选节点 → O(行数 × 叶大小)，60k 行要十几分钟。
+            usable = self.page_size - Page.HEADER_SIZE
+            leaf_overhead = _leaf_payload_overhead()
+            chunks: list[list[tuple[Key, RowId, list[object]]]] = []
+            current: list[tuple[Key, RowId, list[object]]] = []
+            used = leaf_overhead
+            for key, row_id, payload in normalized_entries:
+                entry_bytes = _entry_payload_size(key, row_id, payload)
+                if entry_bytes + leaf_overhead > usable:
+                    raise StorageError("单条索引键和 RowId 超过页容量")
+                if current and used + entry_bytes + INDEX_LINK_RESERVE > usable:
                     chunks.append(current)
                     current = []
-                    candidate_node = _IndexNode(-1, True, keys=[key], row_ids=[row_id])
-                if not self._node_fits(candidate_node, self.page_size):
-                    raise StorageError("单条索引键和 RowId 超过页容量")
-                current.append((key, row_id))
+                    used = leaf_overhead
+                current.append((key, row_id, payload))
+                used += entry_bytes
             if current:
                 chunks.append(current)
             leaf_nodes: list[_IndexNode] = []
@@ -1168,6 +1320,7 @@ class BPlusTree:
                 leaf = self._empty_root()
                 leaf.keys = [item[0] for item in chunks[0]]
                 leaf.row_ids = [item[1] for item in chunks[0]]
+                leaf.payloads = [item[2] for item in chunks[0]]
                 self._write_node(leaf)
                 return
             # root 页将改成内部页，因此所有叶子都使用新页。
@@ -1175,6 +1328,7 @@ class BPlusTree:
                 leaf = self._new_node(leaf=True, level=0)
                 leaf.keys = [item[0] for item in chunk]
                 leaf.row_ids = [item[1] for item in chunk]
+                leaf.payloads = [item[2] for item in chunk]
                 leaf_nodes.append(leaf)
             for index, leaf in enumerate(leaf_nodes):
                 leaf.prev_page = leaf_nodes[index - 1].page_id if index else None
@@ -1182,20 +1336,32 @@ class BPlusTree:
                 self._write_node(leaf)
             level_children = [leaf.page_id for leaf in leaf_nodes]
             level = 1
+            max_keys: dict[int, Key] = {}
+
+            def child_max_key(child_id: int) -> Key:
+                """每个子页的最大键只读一次；原实现每个候选都重读之前的子页。"""
+
+                cached = max_keys.get(child_id)
+                if cached is None:
+                    cached = self._load_max_key(child_id)
+                    max_keys[child_id] = cached
+                return cached
+
             while len(level_children) > 1:
+                internal_overhead = _leaf_payload_overhead()
                 groups: list[list[int]] = []
                 current_children: list[int] = []
+                used = internal_overhead
                 for child_id in level_children:
-                    candidate_children = [*current_children, child_id]
-                    candidate_keys = [self._load_max_key(value) for value in candidate_children[:-1]]
-                    candidate = _IndexNode(-1, False, level, keys=candidate_keys, children=candidate_children)
-                    if len(current_children) >= 2 and not self._node_fits(candidate, self.page_size):
-                        groups.append(current_children)
-                        current_children = [child_id]
-                        candidate = _IndexNode(-1, False, level, keys=[], children=current_children)
-                    if not self._node_fits(candidate, self.page_size):
+                    entry_bytes = _internal_payload_entry_size(child_max_key(child_id), child_id)
+                    if entry_bytes + internal_overhead > usable:
                         raise StorageError("索引内部节点无法容纳单个子页")
+                    if len(current_children) >= 2 and used + entry_bytes + INDEX_LINK_RESERVE > usable:
+                        groups.append(current_children)
+                        current_children = []
+                        used = internal_overhead
                     current_children.append(child_id)
+                    used += entry_bytes
                 if current_children:
                     groups.append(current_children)
                 if len(groups) == 1:
