@@ -1,0 +1,179 @@
+{
+  "status": "PASS",
+  "benchmark": "TPC-H",
+  "benchmark_runner": {
+    "name": "BenchBox",
+    "version": "0.4.0"
+  },
+  "scale_factor": 0.01,
+  "query_id": "Q6",
+  "query_source": "TPCH(scale_factor=0.01).get_query(6, dialect='sqlite')",
+  "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
+  "generated_files": [
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\customer.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\lineitem.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\nation.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\orders.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\part.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\partsupp.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\region.tbl",
+    "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\supplier.tbl"
+  ],
+  "loaded_table": {
+    "name": "lineitem",
+    "rows": 60175,
+    "source": "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\lineitem.tbl",
+    "columns": [
+      {
+        "name": "l_orderkey",
+        "type": "INTEGER",
+        "nullable": false,
+        "primary_key": true,
+        "foreign_key": [
+          "orders",
+          "o_orderkey"
+        ]
+      },
+      {
+        "name": "l_partkey",
+        "type": "INTEGER",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": [
+          "part",
+          "p_partkey"
+        ]
+      },
+      {
+        "name": "l_suppkey",
+        "type": "INTEGER",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": [
+          "supplier",
+          "s_suppkey"
+        ]
+      },
+      {
+        "name": "l_linenumber",
+        "type": "INTEGER",
+        "nullable": false,
+        "primary_key": true,
+        "foreign_key": null
+      },
+      {
+        "name": "l_quantity",
+        "type": "DECIMAL(15,2)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_extendedprice",
+        "type": "DECIMAL(15,2)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_discount",
+        "type": "DECIMAL(15,2)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_tax",
+        "type": "DECIMAL(15,2)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_returnflag",
+        "type": "CHAR(1)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_linestatus",
+        "type": "CHAR(1)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_shipdate",
+        "type": "DATE",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_commitdate",
+        "type": "DATE",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_receiptdate",
+        "type": "DATE",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_shipinstruct",
+        "type": "CHAR(25)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_shipmode",
+        "type": "CHAR(10)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      },
+      {
+        "name": "l_comment",
+        "type": "VARCHAR(44)",
+        "nullable": false,
+        "primary_key": false,
+        "foreign_key": null
+      }
+    ]
+  },
+  "storage_config": {
+    "page_size": 16384,
+    "buffer_pool_size": 256
+  },
+  "execution": {
+    "warmup": 1,
+    "iterations": 5,
+    "times_seconds": [
+      2.2490493999794126,
+      2.2323431000113487,
+      2.134915100003127,
+      2.2241934000048786,
+      2.2430641999817453
+    ],
+    "mean_seconds": 2.2167130399961024,
+    "median_seconds": 2.2323431000113487,
+    "min_seconds": 2.134915100003127,
+    "rows_returned": 1,
+    "result": [
+      [
+        734493.7281
+      ]
+    ]
+  },
+  "environment": {
+    "python": "3.12.13 (main, Mar  3 2026, 15:01:35) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26100-SP0"
+  },
+  "scope_note": "这是 BenchBox/TPC-H Q6 的可复现实验，不宣称完整 TPC-H QphH@Size 官方成绩。"
+}

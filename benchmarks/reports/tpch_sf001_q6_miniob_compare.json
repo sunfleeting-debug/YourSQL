@@ -1,0 +1,128 @@
+{
+  "status": "PASS_WITH_CAVEATS",
+  "report_generated_at": "2026-09-12",
+  "benchmark": "TPC-H",
+  "benchmark_runner": {
+    "name": "BenchBox",
+    "version": "0.4.0"
+  },
+  "workload": {
+    "scale_factor": 0.01,
+    "query_id": "Q6",
+    "query_source": "TPCH(scale_factor=0.01).get_query(6, dialect='sqlite')",
+    "data_source": "benchmarks/third_party/tpch_sf001/lineitem.tbl",
+    "lineitem_rows": 60175,
+    "sqlite_query": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24"
+  },
+  "oracle": {
+    "name": "SQLite",
+    "matching_rows": 800,
+    "result": 734493.7281
+  },
+  "miniob": {
+    "repository": "https://github.com/oceanbase/miniob",
+    "commit": "3259c37",
+    "build": {
+      "environment": "WSL2 Ubuntu",
+      "build_type": "Release",
+      "with_unit_tests": false,
+      "with_benchmark": false,
+      "with_cpplings": false
+    },
+    "load": {
+      "method": "official LOAD DATA INFILE",
+      "status": "SUCCESS",
+      "rows": 60175,
+      "one_shot_load_and_query_seconds": 34.11,
+      "note": "该一次性命令使用官方默认 TRACE 配置，包含加载和查询尝试，仅用于确认导入可行，不用于性能比较。"
+    },
+    "execution": {
+      "protocol": "plain",
+      "logging": {
+        "config": "tmp/miniob/etc/observer_quiet.ini",
+        "file_level": 1,
+        "console_level": 1
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "warmup_seconds": 0.20136977499999986,
+      "times_seconds": [
+        0.20304840299999995,
+        0.21570302499999983,
+        0.21998412100000042,
+        0.22187300600000093,
+        0.22143885300000044
+      ],
+      "mean_seconds": 0.21640948160000023,
+      "median_seconds": 0.21998412100000042,
+      "min_seconds": 0.20304840299999995,
+      "result": 734493.63,
+      "result_absolute_error": 0.0981,
+      "result_relative_error_fraction": 1.3356138547084135e-07
+    },
+    "default_verbose_diagnostic": {
+      "logging": {
+        "config": "tmp/miniob/etc/observer.ini",
+        "file_level": 5,
+        "console_level": 1
+      },
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        25.567391182999984,
+        25.413658201000032,
+        26.646606765,
+        26.819947543000012,
+        25.338704049
+      ],
+      "mean_seconds": 25.95726154820005,
+      "not_comparable": true,
+      "reason": "官方默认配置下，tuple table scan 对每条记录写 TRACE 日志；该结果用于定位日志污染，不是 MiniOB 引擎性能。"
+    }
+  },
+  "yoursql": {
+    "report": "benchmarks/reports/tpch_sf001_q6.json",
+    "execution": {
+      "protocol": "BenchBox adapter over in-process Python DB-API shim",
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        1.7276766000140924,
+        2.021655100019416,
+        1.7433921999763697,
+        2.107877300004475,
+        2.097520200011786
+      ],
+      "mean_seconds": 1.9396242800052277,
+      "median_seconds": 2.021655100019416,
+      "min_seconds": 1.7276766000140924,
+      "result": 734493.7281
+    }
+  },
+  "comparison": {
+    "miniob_to_yoursql_mean_ratio": 0.11157288750758315,
+    "yoursql_to_miniob_mean_ratio": 8.962750918604971,
+    "miniob_time_saving_vs_verbose_percent": 99.16628539109124,
+    "interpretation": "在相同数据、同一 Q6 workload 下，使用安静日志配置时 MiniOB plain 协议端到端查询平均耗时约为 YourSQL 的 0.112 倍，即约快 8.96 倍；默认 TRACE 结果仅是日志污染诊断。该数字不是跨平台或完整 TPC-H QphH@Size 官方成绩。"
+  },
+  "dialect_adapter": {
+    "original_query_probe": {
+      "status": "SQL_SYNTAX",
+      "elapsed_seconds": 3.97,
+      "reason": "MiniOB 官方 parser 不接受 BenchBox SQLite 查询中的双引号标识符、DATE() 标量函数和 BETWEEN 语法。"
+    },
+    "schema_mapping": {
+      "DECIMAL": "FLOAT",
+      "DATE": "CHAR(10) with ISO-8601 lexical comparisons",
+      "scope": "仅加载 Q6 所需的 lineitem 表，不修改 MiniOB 上游源码。"
+    },
+    "translated_query": "SELECT SUM(l_extendedprice * l_discount) FROM lineitem WHERE l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' AND l_discount >= 0.05 AND l_discount < 0.07 AND l_quantity < 24;",
+    "boundary_note": "BenchBox 生成的 SQLite SQL 对 0.06 - 0.01 与 0.06 + 0.01 使用二进制浮点求值；翻译后的 >= 0.05 AND < 0.07 保持了本次 SQLite oracle 的 800 行边界语义。"
+  },
+  "reproduction": {
+    "clone": "git clone https://github.com/oceanbase/miniob tmp/miniob",
+    "measurement": "wsl.exe -d Ubuntu -- bash tmp/miniob/run_plain_q6.sh tmp/miniob/etc/observer_quiet.ini",
+    "temporary_files": "tmp/miniob/ 下的脚本、构建目录和数据库均被根目录 .gitignore 排除。"
+  },
+  "scope_note": "这是第三方 BenchBox/TPC-H Q6 在 YourSQL 与官方 MiniOB 之间的可复现实验；MiniOB 结果经过 SQLite oracle 复核，性能比较使用关闭逐行 TRACE 的配置并包含 MiniOB plain 协议开销，不宣称完整 TPC-H QphH@Size 官方成绩。"
+}
