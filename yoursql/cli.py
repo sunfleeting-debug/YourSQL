@@ -108,6 +108,32 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("text", "mermaid", "dot", "json"),
         help="只编译并输出优化后的查询计划（不执行），支持文本 / Mermaid / DOT / JSON",
     )
+    parser.add_argument(
+        "--no-wal",
+        action="store_true",
+        help="关闭预写日志（仅用于对照演示崩溃恢复能力）",
+    )
+    parser.add_argument(
+        "--lock-mode",
+        choices=("table", "none"),
+        help="封锁粒度：table 为表级共享/排他锁，none 表示不做并发控制",
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=float,
+        metavar="SECONDS",
+        help="等待锁的最长秒数，超时抛出并发错误",
+    )
+    parser.add_argument(
+        "--isolation",
+        choices=("serializable", "read_committed"),
+        help="事务默认隔离级别",
+    )
+    parser.add_argument(
+        "--txn-status",
+        action="store_true",
+        help="打印事务 / 封锁 / 预写日志的运行时状态后退出",
+    )
     return parser
 
 
@@ -142,6 +168,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if detected_page_size is not None:
             # WHY：保留已有数据库的页格式；环境变量的页大小只影响新数据库。
             database_config = replace(database_config, page_size=detected_page_size)
+        overrides: dict[str, object] = {}
+        if args.no_wal:
+            overrides["wal_enabled"] = False
+        if args.lock_mode is not None:
+            overrides["lock_mode"] = args.lock_mode
+        if args.lock_timeout is not None:
+            overrides["lock_timeout_seconds"] = args.lock_timeout
+        if args.isolation is not None:
+            overrides["default_isolation"] = args.isolation
+        if overrides:
+            database_config = replace(database_config, **overrides)
         with Database(
             args.database,
             config=database_config,
@@ -149,6 +186,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             password=args.password,
             disabled_rules=args.disable_rule,
         ) as database:
+            if args.txn_status:
+                print(
+                    json.dumps(
+                        database.transaction_state(), ensure_ascii=False, indent=2
+                    )
+                )
+                return 0
+            report = database.recovery_report
+            if report.recovered:
+                # HOW：走 stderr，避免污染 --json 的标准输出。
+                print(
+                    f"[recovery] 回滚了 {len(report.rolled_back)} 个未提交事务"
+                    f"（事务 {list(report.rolled_back)}），"
+                    f"恢复 {report.pages_restored} 页，回收 {report.pages_reclaimed} 页",
+                    file=sys.stderr,
+                )
             if args.plan is not None:
                 # WHY：EXPLAIN 是可执行的 SQL，但"看计划"经常比"跑一次"更早发生；
                 # 这里给出一条只编译、不执行的入口，方便演示和排查。
@@ -174,8 +227,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 return 0
             while True:
+                txn = database.current_transaction()
+                # HOW：提示符带上事务号，多语句事务在交互模式下才看得见边界。
+                prompt = f"yoursql(txn {txn.txn_id})> " if txn is not None else "yoursql> "
                 try:
-                    line = input("yoursql> ")
+                    line = input(prompt)
                 except EOFError:
                     print()
                     return 0
