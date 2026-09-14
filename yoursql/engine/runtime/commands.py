@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from typing import Callable, Iterable
 
 from ...common import (
@@ -59,8 +59,33 @@ from ...sql.ast import (
 from ...sql.binder import BoundStatement
 from ...sql.lexer import KEYWORDS
 from ...sql.parser import Parser
-from ...storage import TableHeap
+from ...storage import IndexPayloadEntry, TableHeap
 from ..catalog import IndexMetadata, TableMetadata, ViewMetadata
+
+
+@dataclass(frozen=True)
+class _UpdateTarget:
+    """UPDATE 先收集的行位置、旧值和新值。"""
+
+    row_id: RowId
+    old_row: tuple[object, ...]
+    new_row: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _DeleteTarget:
+    """DELETE 先收集的行位置和原始行值。"""
+
+    row_id: RowId
+    row: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _IndexedRow:
+    """批量维护索引时已写入堆表的行。"""
+
+    row: tuple[object, ...]
+    row_id: RowId
 
 
 def _with_location(
@@ -111,6 +136,7 @@ class DatabaseCommandMixin:
     # ----- 语句路由、对象定位与权限检查 -----
     @staticmethod
     def _action_for(statement: Statement) -> str:
+        """根据语句类型确定所需的权限动作。"""
         if isinstance(statement, (CreateRole, CreateUser, Grant, Revoke)):
             return "SECURITY"
         if isinstance(statement, ShowGrants):
@@ -131,6 +157,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _object_for(statement: Statement) -> str | None:
+        """根据语句提取受影响的对象名称。"""
         if isinstance(statement, Show):
             return statement.object_name
         if isinstance(statement, (Grant, Revoke)):
@@ -228,6 +255,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _subqueries(node: Node) -> Iterable[Select]:
+        """递归收集语句中的子查询。"""
         for descriptor in fields(node):
             value = getattr(node, descriptor.name)
             values = value if isinstance(value, tuple) else (value,)
@@ -239,6 +267,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _object_names(statement: Statement) -> tuple[str, ...]:
+        """提取语句涉及的对象名称。"""
         if isinstance(statement, Explain):
             return DatabaseCommandMixin._object_names(statement.statement)
         if isinstance(statement, Show) and statement.object_name is not None:
@@ -284,6 +313,7 @@ class DatabaseCommandMixin:
     def _execute_statement(
         self, statement: Statement, bound: BoundStatement, plan: PlanNode
     ) -> ExecutionResult:
+        """按语句类型执行 DDL、DML、DCL 或查询命令。"""
         if isinstance(statement, Explain):
             child = (
                 plan.children[0]
@@ -374,6 +404,7 @@ class DatabaseCommandMixin:
     def _permission_keys(
         privileges: tuple[str, ...], object_name: str | None
     ) -> tuple[str, ...]:
+        """将语句转换为需要检查的权限键集合。"""
         keys: list[str] = []
         for privilege in privileges:
             action = "*" if privilege.upper() in {"ALL", "*"} else privilege.upper()
@@ -383,6 +414,7 @@ class DatabaseCommandMixin:
     def _grant_permissions(
         self, privileges: tuple[str, ...], target_kind: str, target_name: str
     ) -> None:
+        """执行 GRANT 命令并持久化权限变化。"""
         if target_kind.upper() == "ROLE":
             for privilege in privileges:
                 self.rbac.grant(privilege, role=target_name)
@@ -393,6 +425,7 @@ class DatabaseCommandMixin:
     def _revoke_permissions(
         self, privileges: tuple[str, ...], target_kind: str, target_name: str
     ) -> None:
+        """执行 REVOKE 命令并持久化权限变化。"""
         if target_kind.upper() == "ROLE":
             for privilege in privileges:
                 self.rbac.revoke(privilege, role=target_name)
@@ -401,6 +434,7 @@ class DatabaseCommandMixin:
             self.rbac.revoke(privilege, user=target_name)
 
     def _show_grants(self, statement: ShowGrants) -> ExecutionResult:
+        """生成指定主体的权限列表。"""
         target_kind = (statement.target_kind or "USER").upper()
         target_name = statement.target_name or self.session.user.name
         try:
@@ -554,7 +588,9 @@ class DatabaseCommandMixin:
 
     # ----- 表、视图和索引的 DDL -----
     # HOW: CREATE 入口：查重 -> 构造 Schema -> 登记 Catalog；此处不分配用户数据页。
-    def _create_table(self, statement: CreateTable) -> ExecutionResult:#创建表.先创建表，再创建索引
+    # 创建表.先创建表，再创建索引
+    def _create_table(self, statement: CreateTable) -> ExecutionResult:
+        """解析或创建表定义。"""
         if self.catalog.find_table(statement.name) is not None:
             if statement.if_not_exists:
                 return ExecutionResult(message=f"table {statement.name} already exists")
@@ -599,6 +635,7 @@ class DatabaseCommandMixin:
         return ExecutionResult(message=f"CREATE VIEW {view.name}")
 
     def _drop_view(self, statement: DropView) -> ExecutionResult:
+        """删除视图并清理目录定义。"""
         view = self.catalog.find_view(statement.name)
         if view is None:
             if statement.if_exists:
@@ -681,6 +718,7 @@ class DatabaseCommandMixin:
             ) from exc
 
     def _view_expression_type(self, expression: Expr, refs: list[TableRef]) -> DataType:
+        """推断视图表达式的输出数据类型。"""
         if isinstance(expression, ColumnRef):
             relation = self._view_column_relation(expression, refs)
             return relation.schema.column(expression.name).data_type
@@ -734,6 +772,7 @@ class DatabaseCommandMixin:
     def _view_column_relation(
         self, expression: ColumnRef, refs: list[TableRef]
     ) -> TableMetadata | ViewMetadata:
+        """解析视图输出列所属的关系。"""
         if expression.table:
             for ref in refs:
                 if expression.table.lower() in {
@@ -767,6 +806,7 @@ class DatabaseCommandMixin:
         """为手工构造 AST 提供一个可持久化的最小 SQL 渲染器。"""
 
         def render_expr(expression: Expr) -> str:
+            """将表达式渲染为可保存的 SQL 文本。"""
             if isinstance(expression, Literal):
                 return _sql_literal(expression.value)
             if isinstance(expression, Star):
@@ -818,6 +858,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _default_value(definition: ColumnDefinition) -> Value | None:
+        """计算列定义对应的默认值。"""
         if definition.default is None:
             return None
         if not isinstance(definition.default, Literal):
@@ -830,6 +871,7 @@ class DatabaseCommandMixin:
             raise _with_node_location(exc, definition.default) from exc
 
     def _drop_table(self, statement: DropTable) -> ExecutionResult:
+        """删除表及其关联索引和存储页。"""
         table = self.catalog.find_table(statement.name)
         if table is None:
             if statement.if_exists:
@@ -851,10 +893,14 @@ class DatabaseCommandMixin:
     # ----- 行级 DML -----
     # HOW: INSERT 入口：整理校验字段 -> 写堆表 -> 维护索引与元数据 -> 返回影响行数。
     def _insert(self, statement: Insert, bound: BoundStatement) -> ExecutionResult:
-        table = self.catalog.get_table(statement.table)#查Catalog：知道这张表要求什么样的数据
-        heap = self._heap(table)#取得操作这张表记录的工具
+        # 查Catalog：知道这张表要求什么样的数据
+        # 取得操作这张表记录的工具
         # HOW: Binder 提供插入列的位置，例如 (name,id) 对应表下标 (1,0)。
-        insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))#确定 INSERT 提供的值分别属于哪一列
+        # 确定 INSERT 提供的值分别属于哪一列
+        """执行插入操作并维护关联状态。"""
+        table = self.catalog.get_table(statement.table)
+        heap = self._heap(table)
+        insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))
         inserted = 0
         for row_index, expressions in enumerate(statement.values):#把表达式变成实际值
             supplied = [self._eval_expr(expression, {}) for expression in expressions]
@@ -879,7 +925,8 @@ class DatabaseCommandMixin:
             #真正写进页面
             # HOW: 用返回的物理地址维护索引，并将新增页和行数同步到表元数据。
             row_id = heap.insert(row)
-            #维护索引：让索引也能找到新记录
+            # 维护索引：让索引也能找到新记录
+            # WHY：只有堆表写入后才能得到最终页号和槽号；索引条目必须指向这个稳定的 RowId。
             self._update_indexes(table, row, row_id, insert=True)
             #⑨ 更新目录中的页号列表和行数
             table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
@@ -889,16 +936,19 @@ class DatabaseCommandMixin:
         return ExecutionResult(affected_rows=inserted, message=f"INSERT {inserted}")
 
     def _update(self, statement: Update) -> ExecutionResult:
+        """执行更新操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
-        targets: list[tuple[RowId, tuple[object, ...], tuple[object, ...]]] = []
-        for row_id, row in heap.scan():
-            context = self._table_context(TableRef(table.name), row, row_id, table)
+        targets: list[_UpdateTarget] = []
+        for record in heap.scan():
+            context = self._table_context(
+                TableRef(table.name), record.row, record.row_id, table
+            )
             if statement.where is not None and not sql_truth(
                 self._eval_expr(statement.where, context)
             ):
                 continue
-            values = list(row)
+            values = list(record.row)
             for column_name, expression in statement.assignments:
                 values[table.schema.index(column_name)] = self._eval_expr(
                     expression, context
@@ -909,17 +959,23 @@ class DatabaseCommandMixin:
             except YourSQLError as exc:
                 raise _with_location(exc, assignment_location) from exc
             self._check_constraints(
-                table, new_row, row_id, location=assignment_location
+                table, new_row, record.row_id, location=assignment_location
             )
-            targets.append((row_id, row, new_row))
-        for row_id, old_row, new_row in targets:
-            self._update_indexes(table, old_row, row_id, insert=False)
-            heap.update(row_id, new_row)
+            targets.append(_UpdateTarget(record.row_id, record.row, new_row))
+        for target in targets:
+            # WHY：更新可能改变索引键或覆盖索引携带的列值，因此先移除旧入口，
+            # 堆表更新成功后再按新行值建立入口；失败时下面的异常分支恢复两者。
+            self._update_indexes(table, target.old_row, target.row_id, insert=False)
+            heap.update(target.row_id, target.new_row)
             try:
-                self._update_indexes(table, new_row, row_id, insert=True)
+                self._update_indexes(
+                    table, target.new_row, target.row_id, insert=True
+                )
             except Exception:
-                heap.update(row_id, old_row)
-                self._update_indexes(table, old_row, row_id, insert=True)
+                heap.update(target.row_id, target.old_row)
+                self._update_indexes(
+                    table, target.old_row, target.row_id, insert=True
+                )
                 raise
         return ExecutionResult(
             affected_rows=len(targets), message=f"UPDATE {len(targets)}"
@@ -927,22 +983,28 @@ class DatabaseCommandMixin:
 
     # HOW: 先收集符合 WHERE 的地址和原记录，再删除索引与堆记录，避免边扫边改。
     def _delete(self, statement: Delete) -> ExecutionResult:
-        #查目录，取得表堆
+        # 查目录，取得表堆
+        # 扫描记录，判断 WHERE
+        # 如果没有where就走这个
+        # 先收集目标，不立即删除
+        # 先维护索引，再删除堆记录
+        # insert=False 表示删除索引条目
+        # 按页号和槽号删除
+        """执行删除操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
-        #扫描记录，判断 WHERE
-        targets: list[tuple[RowId, tuple[object, ...]]] = []
-        for row_id, row in heap.scan():
-            context = self._table_context(TableRef(table.name), row, row_id, table)
-            #如果没有where就走这个
+        targets: list[_DeleteTarget] = []
+        for record in heap.scan():
+            context = self._table_context(
+                TableRef(table.name), record.row, record.row_id, table
+            )
             if statement.where is None or sql_truth(
                 self._eval_expr(statement.where, context)
-            ):#先收集目标，不立即删除
-                targets.append((row_id, row))
-                #先维护索引，再删除堆记录
-        for row_id, row in targets:
-            self._update_indexes(table, row, row_id, insert=False)#insert=False 表示删除索引条目
-            heap.delete(row_id)#按页号和槽号删除
+            ):
+                targets.append(_DeleteTarget(record.row_id, record.row))
+        for target in targets:
+            self._update_indexes(table, target.row, target.row_id, insert=False)
+            heap.delete(target.row_id)
             table.row_count = max(0, table.row_count - 1)
         return ExecutionResult(
             affected_rows=len(targets), message=f"DELETE {len(targets)}"
@@ -953,7 +1015,7 @@ class DatabaseCommandMixin:
         table: TableMetadata,
         heap: TableHeap,
         rows: list[tuple[object, ...]],
-        pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]]
+        pending_entries: dict[str, list[IndexPayloadEntry]]
         | None = None,
         written_row_ids: list[RowId] | None = None,
     ) -> int:
@@ -975,10 +1037,10 @@ class DatabaseCommandMixin:
                 ):
                     continue
                 pending_entries[metadata.name].extend(
-                    (
+                    IndexPayloadEntry(
                         self._index_key(table, metadata, row),
                         row_id,
-                        self._index_payload(table, metadata, row),
+                        list(self._index_payload(table, metadata, row)),
                     )
                     for row, row_id in zip(rows, row_ids, strict=True)
                     if not (
@@ -990,14 +1052,19 @@ class DatabaseCommandMixin:
                     )
                 )
             return len(row_ids)
-        indexed: list[tuple[tuple[object, ...], RowId]] = []
+        indexed: list[_IndexedRow] = []
         try:
             for row, row_id in zip(rows, row_ids, strict=True):
                 self._update_indexes(table, row, row_id, insert=True)
-                indexed.append((row, row_id))
+                indexed.append(_IndexedRow(row, row_id))
         except Exception:
-            for row, row_id in indexed:
-                self._update_indexes(table, row, row_id, insert=False)
+            for indexed_row in indexed:
+                self._update_indexes(
+                    table,
+                    indexed_row.row,
+                    indexed_row.row_id,
+                    insert=False,
+                )
             for row_id in row_ids:
                 heap.delete(row_id)
             raise
@@ -1008,7 +1075,7 @@ class DatabaseCommandMixin:
         table: TableMetadata,
         heap: TableHeap,
         fresh_indexes: list[IndexMetadata],
-        pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]],
+        pending_entries: dict[str, list[IndexPayloadEntry]],
         written_row_ids: list[RowId],
     ) -> None:
         """把装载期间登记的索引入口一次性建树；失败时回滚本次写入的堆行。"""
@@ -1032,6 +1099,7 @@ class DatabaseCommandMixin:
         *,
         location: tuple[int, int] | None = None,
     ) -> None:
+        """检查插入或更新行是否满足列和唯一性约束。"""
         indexed_unique_columns = {
             metadata.columns[0].lower()
             for metadata in self.catalog.indexes()
@@ -1073,6 +1141,7 @@ class DatabaseCommandMixin:
         *,
         insert: bool,
     ) -> None:
+        """根据行变更维护相关索引条目。"""
         for metadata in self.catalog.indexes():
             if metadata.table_id != table.table_id:
                 continue
@@ -1091,6 +1160,7 @@ class DatabaseCommandMixin:
     def _index_key(
         table: TableMetadata, metadata: IndexMetadata, row: tuple[object, ...]
     ) -> tuple[object, ...]:
+        """从一行数据构造索引键。"""
         return tuple(row[table.schema.index(column)] for column in metadata.columns)
 
     @staticmethod
@@ -1105,6 +1175,7 @@ class DatabaseCommandMixin:
 
     # ----- 索引维护 -----
     def _create_index(self, statement: CreateIndex) -> ExecutionResult:
+        """解析或创建索引定义。"""
         if any(
             index.name.lower() == statement.name.lower()
             for index in self.catalog.indexes()
@@ -1149,9 +1220,13 @@ class DatabaseCommandMixin:
         )
         try:
             tree.bulk_load(
-                (key, row_id, self._index_payload(table, metadata, row))
-                for row_id, row in self._heap(table).scan()
-                for key in (self._index_key(table, metadata, row),)
+                (
+                    key,
+                    record.row_id,
+                    self._index_payload(table, metadata, record.row),
+                )
+                for record in self._heap(table).scan()
+                for key in (self._index_key(table, metadata, record.row),)
                 if not (metadata.unique and any(value is None for value in key))
             )
             self.catalog.create_index(metadata)
@@ -1169,6 +1244,7 @@ class DatabaseCommandMixin:
         return ExecutionResult(message=f"CREATE INDEX {statement.name}")
 
     def _drop_index(self, statement: DropIndex) -> ExecutionResult:
+        """删除索引并释放其存储资源。"""
         try:
             metadata = self.catalog.get_index(statement.name)
         except CatalogError:

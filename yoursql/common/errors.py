@@ -18,9 +18,11 @@ class YourSQLError(Exception):
     details: dict[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         Exception.__init__(self, self.message)
 
     def __str__(self) -> str:
+        """返回适合展示的字符串表示。"""
         location = ""
         if self.line is not None:
             location = f" at line {self.line}"
@@ -29,6 +31,7 @@ class YourSQLError(Exception):
         return f"[{self.code}]{location}: {self.message}"
 
     def as_dict(self) -> JsonObject:
+        """将对象转换为可序列化的字典。"""
         result: JsonObject = {"error": self.code, "message": self.message}
         if self.line is not None:
             result["line"] = self.line
@@ -50,6 +53,7 @@ class LexerError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "LEXER_ERROR", line, column, details)
 
 
@@ -64,6 +68,7 @@ class ParserError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "PARSER_ERROR", line, column, details)
 
 
@@ -78,6 +83,7 @@ class BinderError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "BINDER_ERROR", line, column, details)
 
 
@@ -92,6 +98,7 @@ class CatalogError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "CATALOG_ERROR", line, column, details)
 
 
@@ -106,6 +113,7 @@ class StorageError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "STORAGE_ERROR", line, column, details)
 
 
@@ -120,6 +128,7 @@ class ExecutionError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "EXECUTION_ERROR", line, column, details)
 
 
@@ -134,4 +143,5 @@ class AuthorizationError(YourSQLError):
         column: int | None = None,
         **details: JsonValue,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         super().__init__(message, "AUTHORIZATION_ERROR", line, column, details)

@@ -6,7 +6,7 @@ import json
 import os
 import struct
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from types import TracebackType
@@ -32,7 +32,15 @@ from ...planner.optimizer import CostEstimate, Optimizer, StatisticsStore
 from ...planner.physical import PhysicalPlanNode, PlanNode
 from ...execution.evaluator import ExpressionEvaluator
 from ...execution.query import QueryExecutionMixin, _RowContextTemplate
-from ...storage import BufferPool, DiskManager, IndexManager, Page, PageType, TableHeap
+from ...storage import (
+    BufferPool,
+    DiskManager,
+    IndexManager,
+    IndexPayloadEntry,
+    Page,
+    PageType,
+    TableHeap,
+)
 from ...storage.page import HEADER_SIZE
 from ..security.audit import AuditLog
 from ..security.auth import RBAC
@@ -47,6 +55,14 @@ _INSERT_BATCH_ROWS = 4096
 
 _CATALOG_CHAIN_MAGIC = b"MCAT2"
 _CATALOG_CHAIN_HEADER = struct.Struct("<5sQ")
+
+
+@dataclass(frozen=True)
+class _CatalogPageChunk:
+    """目录页链解码结果。"""
+
+    next_page_id: int | None
+    chunk: bytes
 
 
 def _with_location(
@@ -119,6 +135,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         user: str = "admin",
         password: str = "admin",
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         selected_page_size = None
         if config is None and path is not None and str(path) != ":memory:":
             selected_page_size = self.detect_page_size(path)
@@ -181,6 +198,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
     # HOW: 恢复链路：命名入口 catalog -> 目录页链 -> JSON 字典 -> 内存 Catalog。
     def _load_catalog(self) -> Catalog:
         # HOW: 找到的是目录首页；用户表的数据位置保存在目录的 page_ids 中。
+        """从目录页链加载 Catalog，必要时创建空目录。"""
         page_id = self.disk.named_page("catalog")
         if page_id is None:
             catalog = Catalog()
@@ -202,11 +220,11 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             page = self.disk.read(current_page_id)
             if page.page_type is not PageType.CATALOG:
                 raise CatalogError("命名 catalog 页类型错误")
-            next_page_id, chunk = self._decode_catalog_page(page.payload)
-            chunks.append(chunk)
-            if next_page_id is None:
+            decoded = self._decode_catalog_page(page.payload)
+            chunks.append(decoded.chunk)
+            if decoded.next_page_id is None:
                 break
-            current_page_id = next_page_id or None
+            current_page_id = decoded.next_page_id or None
         try:
             data = json.loads(b"".join(chunks).decode("utf-8")) if chunks else {}
         except (UnicodeDecodeError, ValueError) as exc:
@@ -218,6 +236,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
     @staticmethod
     def _catalog_payload(catalog: Catalog) -> bytes:
+        """将 Catalog 编码为目录页链使用的字节载荷。"""
         return json.dumps(
             catalog.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
         ).encode("utf-8")
@@ -231,11 +250,11 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         )
 
     @staticmethod
-    def _decode_catalog_page(payload: bytes) -> tuple[int | None, bytes]:
+    def _decode_catalog_page(payload: bytes) -> _CatalogPageChunk:
         """读取链式 Catalog 页，兼容旧版裸 JSON 页。"""
 
         if not payload.startswith(_CATALOG_CHAIN_MAGIC):
-            return None, payload
+            return _CatalogPageChunk(None, payload)
         if len(payload) < _CATALOG_CHAIN_HEADER.size:
             raise CatalogError("catalog 页链头部不完整")
         magic, next_page_id = _CATALOG_CHAIN_HEADER.unpack(
@@ -243,7 +262,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         )
         if magic != _CATALOG_CHAIN_MAGIC:
             raise CatalogError("catalog 页链魔数错误")
-        return int(next_page_id), payload[_CATALOG_CHAIN_HEADER.size :]
+        return _CatalogPageChunk(
+            int(next_page_id), payload[_CATALOG_CHAIN_HEADER.size :]
+        )
 
     def _catalog_page_ids(self, first_page_id: int) -> list[int]:
         """返回当前 Catalog 页链，供扩容和缩容时复用物理页。"""
@@ -263,12 +284,17 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
             if page.page_type is not PageType.CATALOG:
                 raise CatalogError("catalog 页链包含非 CATALOG 页")
-            next_page_id, _chunk = self._decode_catalog_page(page.payload)
-            current_page_id = None if next_page_id in {None, 0} else next_page_id
+            decoded = self._decode_catalog_page(page.payload)
+            current_page_id = (
+                None
+                if decoded.next_page_id in {None, 0}
+                else decoded.next_page_id
+            )
         return page_ids
 
     # HOW: 保存链路：Catalog -> 字典 -> JSON 字节 -> 分片目录页 -> 刷新到文件。
     def _persist_catalog(self) -> None:
+        """把当前 Catalog 分块写入目录页链。"""
         payload = self._catalog_payload(self.catalog)
         chunk_capacity = (
             self.config.page_size - Page.HEADER_SIZE - _CATALOG_CHAIN_HEADER.size
@@ -310,10 +336,12 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self.system_catalog.persist_rbac(self.rbac)
 
     def _rebuild_indexes(self) -> None:
+        """根据目录元数据重建索引并更新根页。"""
         metadata_changed = False
         for metadata in self.catalog.indexes():
 
             def update_root(page_id: int, metadata: IndexMetadata = metadata) -> None:
+                """更新索引根页等关联状态。"""
                 nonlocal metadata_changed
                 selected = PageId(page_id)
                 if metadata.root_page_id != selected:
@@ -338,6 +366,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             self._persist_catalog()
 
     def _refresh_statistics(self) -> None:
+        """刷新表统计信息并使相关计划缓存失效。"""
         for table in self.catalog.tables():
             self.optimizer.statistics.update(table.name, table.stats)
         # WHY：计划同时依赖行数与索引元数据；写入或 DDL 后不能继续复用旧访问路径。
@@ -345,6 +374,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
     # HOW: 按表 ID 缓存表堆对象，首次用目录中的 page_ids 构建，不加载全表数据。
     def _heap(self, table: TableMetadata) -> TableHeap:
+        """获取或创建表对应的堆表实例。"""
         key = int(table.table_id)
         heap = self._heaps.get(key)
         if heap is None:
@@ -374,6 +404,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self.session.authorize("INSERT", table_name)
 
         def operation() -> ExecutionResult:
+            """封装一次操作并返回执行结果。"""
             table = self.catalog.get_table(table_name)
             heap = self._heap(table)
             indexes = [
@@ -398,7 +429,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             ]
             unique_seen: dict[int, set[object]] = {}
             if unique_positions:
-                existing_rows = [row for _row_id, row in heap.scan()]
+                existing_rows = [record.row for record in heap.scan()]
                 for position in unique_positions:
                     unique_seen[position] = {
                         row[position]
@@ -413,9 +444,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 if not self.index_manager.get(metadata.name).has_entries()
             ]
             deferred = bool(indexes) and len(fresh_indexes) == len(indexes)
-            pending_entries: dict[
-                str, list[tuple[object, RowId, tuple[object, ...]]]
-            ] = {metadata.name: [] for metadata in fresh_indexes}
+            pending_entries: dict[str, list[IndexPayloadEntry]] = {
+                metadata.name: [] for metadata in fresh_indexes
+            }
             written_row_ids: list[RowId] = []
             inserted = 0
             buffer: list[tuple[object, ...]] = []
@@ -465,12 +496,19 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
     # HOW: SQL 总入口：Token -> AST -> 绑定 -> 计划 -> 权限与优化 -> 逐条执行。
     def execute_script(self, sql: str) -> list[ExecutionResult]:
-        tokens = tuple(tokenize(sql))#词法分析
-        statements = Parser(tokens).parse_script()#语法分析
-        results: list[ExecutionResult] = []#存储每条语句的结果
-        cache_sql = sql if len(statements) == 1 else None#如果只有一条语句，缓存SQL
-        for statement in statements:#遍历每条语句
-            bound = Binder(self.catalog).bind(statement)#绑定表名和列名
+        # 词法分析
+        # 语法分析
+        # 存储每条语句的结果
+        # 如果只有一条语句，缓存SQL
+        # 遍历每条语句
+        # 绑定表名和列名
+        """执行 SQL 脚本并返回各语句结果。"""
+        tokens = tuple(tokenize(sql))
+        statements = Parser(tokens).parse_script()
+        results: list[ExecutionResult] = []
+        cache_sql = sql if len(statements) == 1 else None
+        for statement in statements:
+            bound = Binder(self.catalog).bind(statement)
             compilation = CompilationResult(
                 tokens, statement, bound, plan_from_statement(statement)#生成计划
             )
@@ -541,6 +579,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             return plan
 
         def rewrite(node: PlanNode) -> PlanNode:
+            """重写输入结构以应用当前规则。"""
             node_table = node.properties.get("table")
             if (
                 node.kind == "IndexScan"
@@ -577,6 +616,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         sql: str | None = None,
         optimized_plan: PhysicalPlanNode | None = None,
     ) -> ExecutionResult:
+        """执行已完成编译和绑定的 SQL 语句。"""
         statement = compilation.statement
         action = self._action_for(statement)
         object_name = self._object_for(statement)
@@ -619,6 +659,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
     # ----- 计划估算、运行状态与资源释放 -----
     def health(self) -> dict[str, object]:
+        """返回当前组件的健康状态。"""
         return {
             "status": "ok" if not self._closed else "closed",
             "path": str(self.path),
@@ -627,9 +668,10 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         }
 
     def metrics(self) -> dict[str, object]:
+        """返回当前运行指标。"""
         return {
             "health": self.health(),
-            "buffer_pool": self.buffer_pool.stats(),
+            "buffer_pool": self.buffer_pool.stats().to_dict(),
             "catalog": {
                 "tables": len(self.catalog),
                 "indexes": len(self.catalog.indexes()),
@@ -639,6 +681,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
     # HOW: 正常关闭保存权限状态并关闭缓存和文件；不等于具备断电恢复能力。
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         with self._lock:
             if self._closed:
                 return
@@ -648,6 +691,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             self._closed = True
 
     def __enter__(self) -> "Database":
+        """进入上下文管理器并返回当前对象。"""
         return self
 
     def __exit__(
@@ -656,4 +700,5 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        """退出上下文管理器并完成资源清理。"""
         self.close()

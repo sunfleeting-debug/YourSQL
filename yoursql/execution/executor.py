@@ -15,15 +15,19 @@ class Executor(Generic[OutT]):
     """提供 open/next/close 与 Python 迭代协议。"""
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         return None
 
     def next(self) -> OutT | None:
+        """拉取下一个输出项；输入耗尽时返回 None。"""
         raise StopIteration
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         return None
 
     def __iter__(self) -> Iterator[OutT]:
+        """返回对象的迭代器。"""
         self.open()
         try:
             while True:
@@ -39,13 +43,16 @@ class ValuesExecutor(Executor[RowT]):
     """从可迭代输入逐行产出数据；也作为物化算子的公共基类。"""
 
     def __init__(self, rows: Iterable[RowT]) -> None:
+        """初始化实例所需的状态和依赖。"""
         self._source = rows
         self._iterator: Iterator[RowT] | None = None
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         self._iterator = iter(self._source)
 
     def next(self) -> RowT | None:
+        """拉取下一个输出项；输入耗尽时返回 None。"""
         iterator = self._iterator
         if iterator is None:
             self.open()
@@ -68,13 +75,16 @@ class FilterExecutor(Executor[RowT]):
     def __init__(
         self, child: Executor[RowT], predicate: Callable[[RowT], bool]
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.child = child
         self.predicate = predicate
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         self.child.open()
 
     def next(self) -> RowT | None:
+        """拉取下一个输出项；输入耗尽时返回 None。"""
         while True:
             row = self.child.next()
             if row is None:
@@ -83,6 +93,7 @@ class FilterExecutor(Executor[RowT]):
                 return row
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         self.child.close()
 
 
@@ -92,16 +103,20 @@ class ProjectExecutor(Executor[OutT]):
     def __init__(
         self, child: Executor[RowT], projection: Callable[[RowT], OutT]
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.child, self.projection = child, projection
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         self.child.open()
 
     def next(self) -> OutT | None:
+        """拉取下一个输出项；输入耗尽时返回 None。"""
         row = self.child.next()
         return None if row is None else self.projection(row)
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         self.child.close()
 
 
@@ -115,10 +130,12 @@ class SortExecutor(ValuesExecutor[RowT]):
         *,
         reverse: bool = False,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.child, self.key, self.reverse = child, key, reverse
         super().__init__(())
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         self._source = sorted(list(self.child), key=self.key, reverse=self.reverse)
         self._iterator = iter(self._source)
 
@@ -129,15 +146,18 @@ class LimitExecutor(Executor[RowT]):
     def __init__(
         self, child: Executor[RowT], limit: int | None, offset: int = 0
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.child, self.limit, self.offset = child, limit, offset
         self._seen = 0
         self._returned = 0
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         self.child.open()
         self._seen = self._returned = 0
 
     def next(self) -> RowT | None:
+        """拉取下一个输出项；输入耗尽时返回 None。"""
         while self._seen < self.offset:
             if self.child.next() is None:
                 return None
@@ -151,6 +171,7 @@ class LimitExecutor(Executor[RowT]):
         return row
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         self.child.close()
 
 
@@ -163,10 +184,12 @@ class NestedLoopJoinExecutor(ValuesExecutor[tuple[RowT, OutT]]):
         right: Executor[OutT],
         predicate: Callable[[RowT, OutT], bool],
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.left, self.right, self.predicate = left, right, predicate
         super().__init__(())
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         left_rows = list(self.left)
         right_rows = list(self.right)
         self._source = [
@@ -186,9 +209,11 @@ class AggregateExecutor(ValuesExecutor[OutT]):
     aggregate: Callable[[list[RowT]], OutT]
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         ValuesExecutor.__init__(self, ())
 
     def open(self) -> None:
+        """打开资源并初始化迭代或访问状态。"""
         self._source = [self.aggregate(list(self.child))]
         self._iterator = iter(self._source)
 

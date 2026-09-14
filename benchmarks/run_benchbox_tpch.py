@@ -35,14 +35,17 @@ class _YourSQLCursor:
     _rows: list[tuple[Any, ...]] | None = None
 
     def execute(self, statement: str) -> "_YourSQLCursor":
+        """执行底层数据库语句。"""
         result = self.connection.database.execute(statement)
         self._rows = list(result.rows)
         return self
 
     def fetchall(self) -> list[tuple[Any, ...]]:
+        """读取底层数据库游标的全部结果行。"""
         return list(self._rows or [])
 
     def close(self) -> None:
+        """关闭底层数据库游标或连接。"""
         return None
 
 
@@ -50,16 +53,20 @@ class _YourSQLConnection:
     """最小 DB-API 适配层，仅用于调用 BenchBox 的 SQL 执行路径。"""
 
     def __init__(self, database: Database) -> None:
+        """初始化基准数据库连接或执行器。"""
         self.database = database
 
     def cursor(self) -> _YourSQLCursor:
+        """返回底层数据库游标。"""
         return _YourSQLCursor(self)
 
     def close(self) -> None:
+        """关闭底层数据库游标或连接。"""
         self.database.close()
 
 
 def _base_type(type_name: str) -> str:
+    """提取类型声明中的基础类型名称。"""
     return type_name.split("(", 1)[0].strip().upper()
 
 
@@ -75,12 +82,14 @@ def _yoursql_type(type_name: str) -> str:
 
 
 def _create_lineitem(database: Database, benchmark: TPCH) -> None:
+    """创建 TPC-H lineitem 表。"""
     schema = benchmark.get_schema()["lineitem"]
     columns = ", ".join(f"{column['name']} {_yoursql_type(column['type'])}" for column in schema["columns"])
     database.execute(f"CREATE TABLE lineitem ({columns});")
 
 
 def _typed_value(value: str, type_name: str) -> Any:
+    """将文本字段转换为声明的数据类型。"""
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return int(value)
@@ -90,6 +99,7 @@ def _typed_value(value: str, type_name: str) -> Any:
 
 
 def _read_rows(data_path: Path, column_types: list[str]) -> Iterable[tuple[str, ...]]:
+    """流式读取 TPC-H 数据文件中的记录。"""
     with data_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             raw_fields = line.rstrip("\r\n").split("|")
@@ -102,6 +112,7 @@ def _read_rows(data_path: Path, column_types: list[str]) -> Iterable[tuple[str, 
 
 
 def _load_lineitem(database: Database, benchmark: TPCH, data_dir: Path) -> int:
+    """将 lineitem 数据批量导入数据库。"""
     schema = benchmark.get_schema()["lineitem"]
     column_types = [str(column["type"]) for column in schema["columns"]]
     data_path = data_dir / "lineitem.tbl"
@@ -113,6 +124,7 @@ def _load_lineitem(database: Database, benchmark: TPCH, data_dir: Path) -> int:
 
 
 def _remove_database(path: Path) -> None:
+    """删除基准脚本生成的数据库文件。"""
     allowed_root = (ROOT / "benchmarks" / "results").resolve()
     resolved = path.resolve()
     if allowed_root not in resolved.parents:
@@ -122,6 +134,7 @@ def _remove_database(path: Path) -> None:
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
+    """运行单条基准查询并返回结果。"""
     data_dir = Path(args.data_dir).resolve()
     db_path = Path(args.database).resolve()
     report_path = Path(args.report).resolve()
@@ -197,6 +210,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--database", type=Path, default=DEFAULT_DB_PATH)

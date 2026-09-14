@@ -42,6 +42,7 @@ class SQLSlice:
     column: int
 
     def location(self) -> dict[str, int]:
+        """返回对象记录的源码位置信息。"""
         return {
             "start": self.start,
             "end": self.end,
@@ -95,6 +96,7 @@ def split_sql(sql: str, *, max_statements: int = MAX_STATEMENTS) -> list[SQLSlic
 
 
 def _slice(sql: str, start: int, end: int) -> SQLSlice:
+    """根据字符范围构造带位置的 SQL 片段。"""
     while start < end and sql[start].isspace():
         start += 1
     prefix = sql[:start].replace("\r\n", "\n").replace("\r", "\n")
@@ -278,6 +280,7 @@ def stage(
     reason: str | None = None,
     error: JsonObject | None = None,
 ) -> JsonObject:
+    """记录或构造一个执行阶段。"""
     return {
         "name": name,
         "status": status,
@@ -301,6 +304,7 @@ def compile_observed(
     def capture(
         name: str, operation: Callable[[], T], serialize: Callable[[T], object]
     ) -> T:
+        """采集当前阶段的执行信息。"""
         started = perf_counter()
         try:
             value = operation()

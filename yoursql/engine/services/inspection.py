@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import zlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
 
@@ -35,6 +36,14 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True)
+class IndexPageBinding:
+    """索引物理页到目录元数据的绑定。"""
+
+    index_name: str
+    table: TableMetadata | None
+
+
 def authorize_storage(database: Database) -> None:
     """原始页可能含多个对象，仅允许拥有全库读取和安全管理权限的会话。"""
     database.session.authorize("SECURITY")
@@ -49,6 +58,7 @@ def _is_admin(database: Database) -> bool:
 
 
 def _table_for_page(database: Database, page_id: int) -> TableMetadata | None:
+    """根据页号查找所属的表元数据。"""
     for table in database.catalog.tables(include_system=True):
         if page_id in {int(item) for item in table.page_ids}:
             return table
@@ -57,13 +67,13 @@ def _table_for_page(database: Database, page_id: int) -> TableMetadata | None:
 
 def _index_pages(
     database: Database,
-) -> dict[int, list[tuple[str, TableMetadata | None]]]:
+) -> dict[int, list[IndexPageBinding]]:
     """建立索引物理页到索引目录项的反向映射。"""
 
     tables = {
         table.table_id: table for table in database.catalog.tables(include_system=True)
     }
-    bindings: dict[int, list[tuple[str, TableMetadata | None]]] = {}
+    bindings: dict[int, list[IndexPageBinding]] = {}
     for metadata in database.catalog.indexes():
         try:
             page_ids = database.index_manager.get(metadata.name).physical_page_ids(
@@ -74,7 +84,9 @@ def _index_pages(
             continue
         table = tables.get(metadata.table_id)
         for page_id in page_ids:
-            bindings.setdefault(int(page_id), []).append((metadata.name, table))
+            bindings.setdefault(int(page_id), []).append(
+                IndexPageBinding(metadata.name, table)
+            )
     return bindings
 
 
@@ -91,8 +103,9 @@ def page_header(
     page: Page,
     database: Database | None = None,
     *,
-    index_pages: Mapping[int, list[tuple[str, TableMetadata | None]]] | None = None,
+    index_pages: Mapping[int, list[IndexPageBinding]] | None = None,
 ) -> JsonObject:
+    """构造工作台展示用的页头摘要。"""
     result: JsonObject = {
         "page_id": page.page_id,
         "type": page.page_type.value,
@@ -120,10 +133,10 @@ def page_header(
             node = index_page_info(page, offset=0, limit=32)
             result.update(
                 {
-                    "index_format": node["format"],
-                    "index_node_type": node["node_type"],
-                    "index_level": node["level"],
-                    "index_key_count": node["key_count"],
+                    "index_format": node.format,
+                    "index_node_type": node.node_type,
+                    "index_level": node.level,
+                    "index_key_count": node.key_count,
                 }
             )
         except YourSQLError:
@@ -136,7 +149,9 @@ def page_header(
             result["masked"] = table.system and not _is_admin(database)
         if page.page_type is PageType.INDEX:
             bindings = _index_pages(database) if index_pages is None else index_pages
-            for index_name, index_table in bindings.get(page.page_id, []):
+            for binding in bindings.get(page.page_id, []):
+                index_name = binding.index_name
+                index_table = binding.table
                 is_masked = (
                     index_table is not None
                     and index_table.system
@@ -193,16 +208,16 @@ def storage_snapshot(
         "offset": offset,
         "limit": limit,
         "page_size": disk.page_size,
-        "next_page_id": metadata["next_page_id"],
-        "free_pages": list(metadata["free_pages"])[offset : offset + limit],
-        "free_page_count": len(metadata["free_pages"]),
-        "named_pages": metadata["named_pages"],
+        "next_page_id": metadata.next_page_id,
+        "free_pages": list(metadata.free_pages)[offset : offset + limit],
+        "free_page_count": len(metadata.free_pages),
+        "named_pages": dict(metadata.named_pages),
         "system_tables": [table.to_dict() for table in database.catalog.system_tables()]
         if _is_admin(database)
         else "MASKED",
-        "storage_revision": buffer_pool["revision"],
-        "buffer_pool": buffer_pool,
-        "io": disk.io_stats(),
+        "storage_revision": buffer_pool.revision,
+        "buffer_pool": buffer_pool.to_dict(),
+        "io": disk.io_stats().to_dict(),
         "indexes": [index.to_dict() for index in database.catalog.indexes()][:limit],
         "limitations": [
             "B+Tree 的内部页、叶子页、分裂/合并和 key/RowId 均已落盘。",
@@ -217,9 +232,9 @@ def storage_page_changes(database: Database, since: int, limit: int) -> JsonObje
 
     authorize_storage(database)
     changes = database.buffer_pool.changes_since(since)
-    page_ids = [int(page_id) for page_id in changes["changed_page_ids"]]
-    revision = int(changes["revision"])
-    truncated = bool(changes["truncated"]) or len(page_ids) > limit
+    page_ids = [int(page_id) for page_id in changes.changed_page_ids]
+    revision = changes.revision
+    truncated = changes.truncated or len(page_ids) > limit
     if truncated:
         return {
             "snapshot_at": datetime.now(timezone.utc).isoformat(),
@@ -251,8 +266,8 @@ def storage_page_changes(database: Database, since: int, limit: int) -> JsonObje
         "pages": pages,
         "total": disk.page_count,
         "page_size": disk.page_size,
-        "free_pages": list(metadata["free_pages"]),
-        "free_page_count": len(metadata["free_pages"]),
+        "free_pages": list(metadata.free_pages),
+        "free_page_count": len(metadata.free_pages),
         "truncated": False,
     }
 
@@ -264,8 +279,8 @@ def storage_cache_snapshot(database: Database, offset: int, limit: int) -> JsonO
     return {
         "snapshot_at": datetime.now(timezone.utc).isoformat(),
         "readonly": True,
-        "buffer_pool": database.buffer_pool.snapshot(offset, limit),
-        "io": database.disk.io_stats(),
+        "buffer_pool": database.buffer_pool.snapshot(offset, limit).to_dict(),
+        "io": database.disk.io_stats().to_dict(),
         "note": "缓存统计为进程内累计值；读取本接口不会 pin、淘汰或改变替换时钟。",
     }
 
@@ -284,6 +299,7 @@ def storage_index_snapshot(database: Database, limit: int) -> JsonObject:
 def inspect_page(
     database: Database, page_id: int, offset: int, limit: int
 ) -> JsonObject:
+    """读取并返回指定页的只读检查信息。"""
     authorize_storage(database)
     if page_id >= database.disk.page_count:
         raise YourSQLError("页不存在", "NOT_FOUND")
@@ -418,12 +434,12 @@ def inspect_page(
             "permission_storage": "internal_tables" if admin else "MASKED",
         }
     elif page.page_type == PageType.SUPERBLOCK:
-        result["metadata"] = database.disk.metadata()
+        result["metadata"] = database.disk.metadata().to_dict()
     elif page.page_type == PageType.INDEX:
         # INDEX 页现在是真实 B+Tree 节点；旧数据库留下的空根页仍由 index_page_info
         result["index_node"] = index_page_info(
             page, offset=offset, limit=min(limit, 100)
-        )
+        ).to_dict()
         result["note"] = (
             "真实落盘 B+Tree 节点；entries 是叶子 key/RowId，children 是内部页子节点。"
         )
@@ -433,9 +449,10 @@ def inspect_page(
 
 
 def inspect_index(database: Database, name: str, offset: int, limit: int) -> JsonObject:
+    """读取并返回指定索引的只读检查信息。"""
     authorize_storage(database)
     metadata = database.catalog.get_index(name)
     return {
         "metadata": metadata.to_dict(),
-        **database.index_manager.get(name).snapshot(offset, limit),
+        **database.index_manager.get(name).snapshot(offset, limit).to_dict(),
     }

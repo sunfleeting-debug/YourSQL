@@ -38,6 +38,7 @@ SUPPORTED_QUERIES = (1, 3, 5, 6, 10, 16, 18, 19)
 
 
 def yoursql_type(type_name: str) -> str:
+    """将 TPC-H 类型转换为当前基准使用的 SQL 类型。"""
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return "INT"
@@ -61,6 +62,7 @@ def load_table(database: Database, benchmark: TPCH, table: str, data_dir: Path) 
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    """装载基准数据并运行支持的查询集合。"""
     data_dir = Path(args.data_dir).resolve()
     db_path = Path(args.database).resolve()
     report_path = Path(args.report).resolve()
@@ -157,6 +159,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--database", type=Path, default=DEFAULT_DB_PATH)

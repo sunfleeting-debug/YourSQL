@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, timedelta
 from typing import Callable
 
@@ -29,6 +29,29 @@ from ..sql.ast import (
 _MISSING = object()
 _AMBIGUOUS = object()
 _AGGREGATE_NAMES = {"count", "sum", "avg", "min", "max"}
+
+
+@dataclass(frozen=True)
+class ConstantValue:
+    """静态表达式提取结果；区分“值为 NULL”和“无法静态确定”。"""
+
+    found: bool
+    value: object
+
+    def __iter__(self):
+        """兼容旧的 ``found, value = constant_value(...)`` 调用。"""
+
+        yield self.found
+        yield self.value
+
+
+@dataclass(frozen=True)
+class FoldResult:
+    """常量折叠节点及其判定结果。"""
+
+    expression: Expr
+    is_constant: bool
+    value: object
 
 
 def _with_location(
@@ -173,38 +196,38 @@ class ExpressionEvaluator:
         )
 
     def _fold_constants(self, expression: Expr | None) -> Expr | None:
+        """递归折叠可在执行前计算的常量表达式。"""
         if expression is None:
             return None
-        folded, _constant, _value = self._fold_node(expression)
-        return folded
+        return self._fold_node(expression).expression
 
-    def _fold_node(self, expression: Expr) -> tuple[Expr, bool, object]:
-        """自下而上折叠常量子树，返回（节点, 是否常量, 常量值）。
+    def _fold_node(self, expression: Expr) -> FoldResult:
+        """自下而上折叠常量子树，返回带字段名的 ``FoldResult``。
 
         HOW：只在求值成功时替换为 Literal；失败（如常量除零）保留原节点，
         使错误时机与折叠前一致——例如 `WHERE FALSE AND 1/0 = 1` 仍由短路决定是否报错。
         """
 
         if isinstance(expression, Literal):
-            return expression, True, expression.value
+            return FoldResult(expression, True, expression.value)
         if isinstance(expression, (ColumnRef, Parameter, Star)):
-            return expression, False, None
+            return FoldResult(expression, False, None)
         if isinstance(expression, Subquery):
-            return expression, False, None
+            return FoldResult(expression, False, None)
         if (
             isinstance(expression, FunctionCall)
             and expression.name.lower() in _AGGREGATE_NAMES
         ):
-            return expression, False, None
+            return FoldResult(expression, False, None)
         updates: dict[str, object] = {}
         constant = True
         for field in fields(expression):
             current = getattr(expression, field.name)
             if isinstance(current, Expr):
-                child, child_constant, _child_value = self._fold_node(current)
-                constant &= child_constant
-                if child is not current:
-                    updates[field.name] = child
+                child = self._fold_node(current)
+                constant &= child.is_constant
+                if child.expression is not current:
+                    updates[field.name] = child.expression
             elif isinstance(current, tuple) and any(
                 isinstance(item, Expr) for item in current
             ):
@@ -212,10 +235,10 @@ class ExpressionEvaluator:
                 changed = False
                 for position, item in enumerate(items):
                     if isinstance(item, Expr):
-                        child, child_constant, _child_value = self._fold_node(item)
-                        constant &= child_constant
-                        if child is not item:
-                            items[position] = child
+                        child = self._fold_node(item)
+                        constant &= child.is_constant
+                        if child.expression is not item:
+                            items[position] = child.expression
                             changed = True
                 # WHY：只在真的变化时重建节点，否则会丢掉节点上的 source_location，错误行列会不准。
                 if changed:
@@ -225,12 +248,12 @@ class ExpressionEvaluator:
                 constant = False
         rebuilt = replace(expression, **updates) if updates else expression
         if not constant:
-            return rebuilt, False, None
+            return FoldResult(rebuilt, False, None)
         try:
             value = self._eval_expr(rebuilt, {})
         except Exception:  # noqa: BLE001 - 折叠失败时保留原节点，不影响运行时语义
-            return rebuilt, False, None
-        return Literal(value), True, value
+            return FoldResult(rebuilt, False, None)
+        return FoldResult(Literal(value), True, value)
 
     def _compile_expr(
         self, expression: Expr | None
@@ -251,6 +274,7 @@ class ExpressionEvaluator:
             qualified = expression.qualified_name
 
             def evaluate_column(context: dict[str, object]) -> object:
+                """从查询上下文读取列引用的值。"""
                 value = context.get(key, _MISSING)
                 if value is _MISSING or value is _AMBIGUOUS:
                     raise _with_node_location(
@@ -268,6 +292,7 @@ class ExpressionEvaluator:
                 )
 
             def evaluate_unary(context: dict[str, object]) -> object:
+                """计算一元运算符表达式。"""
                 value = operand(context)
                 if value is None:
                     return None
@@ -296,6 +321,7 @@ class ExpressionEvaluator:
                 pattern = _compile_like(fixed) if fixed is not None else None
 
                 def evaluate_like(context: dict[str, object]) -> object:
+                    """按 SQL LIKE 规则匹配字符串。"""
                     left_value = left(context)
                     right_value = right(context)
                     if left_value is None or right_value is None:
@@ -309,6 +335,7 @@ class ExpressionEvaluator:
                 return evaluate_like
 
             def evaluate_binary(context: dict[str, object]) -> object:
+                """计算二元运算符表达式并处理 NULL 语义。"""
                 left_value = left(context)
                 right_value = right(context)
                 if left_value is None or right_value is None:
@@ -348,6 +375,7 @@ class ExpressionEvaluator:
             negated = expression.negated
 
             def evaluate_between(context: dict[str, object]) -> object:
+                """计算 BETWEEN 范围谓词。"""
                 result = compare_values(
                     value(context), lower(context), ">="
                 ) and compare_values(value(context), upper(context), "<=")
@@ -374,6 +402,7 @@ class ExpressionEvaluator:
                     dynamic.append(self._compile_expr(value))
 
             def evaluate_in(context: dict[str, object]) -> object:
+                """计算 IN 或 NOT IN 成员谓词。"""
                 left_value = inner(context)
                 result: bool | None = False
                 candidates = static if reused else ()
@@ -602,8 +631,10 @@ class ExpressionEvaluator:
         return False
 
 
-def constant_value(expression: Expr) -> tuple[bool, object]:
-    """提取可静态确定的表达式值；返回（是否可确定, 值）。"""
+def constant_value(expression: Expr) -> ConstantValue:
+    """提取可静态确定的表达式值，返回带字段名的 ``ConstantValue``。"""
 
-    folded, constant, value = ExpressionEvaluator()._fold_node(expression)
-    return (True, value) if constant and isinstance(folded, Literal) else (False, None)
+    folded = ExpressionEvaluator()._fold_node(expression)
+    if folded.is_constant and isinstance(folded.expression, Literal):
+        return ConstantValue(True, folded.value)
+    return ConstantValue(False, None)

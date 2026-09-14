@@ -43,6 +43,7 @@ __all__ = ["QueryTask", "WebSession", "Workbench", "now"]
 
 
 def now() -> str:
+    """返回当前时间的标准化表示。"""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -81,6 +82,7 @@ class Workbench:
         session_ttl: float | None = None,
         settings: RuntimeConfig | None = None,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.database = database
         self._path_root = Path.cwd().resolve()
         self.settings = settings or RuntimeConfig()
@@ -99,9 +101,11 @@ class Workbench:
 
     @staticmethod
     def _key(token: str) -> str:
+        """根据输入生成稳定的内部键。"""
         return hashlib.sha256(token.encode()).hexdigest()
 
     def login(self, username: str, password: str) -> tuple[str, WebSession]:
+        """验证凭据并创建登录会话。"""
         with self.connection(None):
             user = self.database.rbac.authenticate(username, password)
             with self._lock:
@@ -117,6 +121,7 @@ class Workbench:
         return token, session
 
     def authenticate(self, token: str) -> WebSession:
+        """校验凭据并返回认证后的主体。"""
         with self._lock:
             session = self._sessions.get(self._key(token))
             if session is None or session.closed or monotonic() >= session.expires_at:
@@ -125,6 +130,7 @@ class Workbench:
 
     def _reap(self) -> None:
         # 调用方持有 Database 锁；过期会话和已完成任务一起清理。
+        """清理已过期的会话和已完成任务。"""
         with self._lock:
             for key, session in tuple(self._sessions.items()):
                 if session.closed or monotonic() >= session.expires_at:
@@ -142,6 +148,7 @@ class Workbench:
 
     @contextmanager
     def connection(self, session: WebSession | None) -> Iterator[None]:
+        """建立或复用当前请求的数据库连接上下文。"""
         if not self.database._lock.acquire(timeout=2):
             raise YourSQLError("数据库正在执行请求，请稍后重试", "SERVICE_BUSY")
         original = self.database.session
@@ -157,12 +164,14 @@ class Workbench:
             self.database._lock.release()
 
     def logout(self, session: WebSession) -> None:
+        """注销会话并清理认证状态。"""
         with self._lock:
             session.closed = True
             if session.active_task and session.active_task in self._tasks:
                 self._tasks[session.active_task].cancel.set()
 
     def me(self, session: WebSession) -> JsonObject:
+        """返回当前会话用户及其权限摘要。"""
         return {
             "user": session.connection.user.name,
             "roles": sorted(session.connection.user.roles),
@@ -176,6 +185,7 @@ class Workbench:
         }
 
     def metadata(self, session: WebSession, name: str | None = None) -> JsonObject:
+        """返回当前数据库或对象的元数据。"""
         with self.connection(session):
             tables = []
             views = []
@@ -586,11 +596,12 @@ class Workbench:
                     "changed": changed,
                     "previous_policy": previous,
                     "replacement_policy": policy,
-                    "buffer_pool": buffer_pool,
+                    "buffer_pool": buffer_pool.to_dict(),
                     "note": "策略仅影响当前服务进程；现有缓存帧和累计统计保持不变，下一次淘汰开始采用新策略。",
                 }
 
     def dialect(self) -> JsonObject:
+        """返回工作台支持的 SQL 方言信息。"""
         return {
             "keywords": sorted(set(KEYWORDS) | {"NULL", "TRUE", "FALSE"}),
             "types": [
@@ -634,6 +645,7 @@ class Workbench:
         }
 
     def validate(self, session: WebSession, sql: str) -> JsonObject:
+        """校验输入或内部状态是否满足约束。"""
         del session  # 路由已认证；语法验证不读取目录，允许 CREATE 后 INSERT 的脚本。
         statements = split_sql(sql, max_statements=self.settings.max_statements)
         diagnostics: list[JsonObject] = []
@@ -657,6 +669,7 @@ class Workbench:
     def submit(
         self, session: WebSession, sql: str, timeout: float, row_limit: int
     ) -> QueryTask:
+        """提交查询任务并返回任务标识。"""
         if not split_sql(sql, max_statements=self.settings.max_statements):
             raise YourSQLError("没有可执行的 SQL", "BAD_REQUEST")
         with self._lock:
@@ -691,6 +704,7 @@ class Workbench:
             return task
 
     def _run(self, session: WebSession, task: QueryTask) -> None:
+        """在线程中执行查询任务并记录阶段状态。"""
         started = perf_counter()
         try:
             with self.connection(session):
@@ -882,6 +896,7 @@ class Workbench:
         trace: ExecutionTrace,
         statistics: JsonObject,
     ) -> None:
+        """补全查询阶段统计并生成最终阶段结果。"""
         stages.extend(
             [
                 stage(
@@ -923,6 +938,7 @@ class Workbench:
         offset: int = 0,
         limit: int = 100,
     ) -> JsonObject:
+        """返回查询任务的当前状态或结果。"""
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None or task.session_key != session.key:
@@ -951,6 +967,7 @@ class Workbench:
             }
 
     def cancel(self, session: WebSession, task_id: str) -> JsonObject:
+        """取消尚未完成的查询任务。"""
         with self._lock:
             self.task(session, task_id)
             task = self._tasks[task_id]
@@ -964,6 +981,7 @@ class Workbench:
             }
 
     def history(self, session: WebSession, offset: int, limit: int) -> JsonObject:
+        """返回当前会话保留的查询历史。"""
         with self._lock:
             items = list(self._history.get(session.connection.user.name.lower(), ()))
             return {
@@ -975,6 +993,7 @@ class Workbench:
             }
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         with self._lock:
             self._stopped = True
             for task in self._tasks.values():

@@ -24,6 +24,7 @@ class DataType(str, Enum):
 
     @classmethod
     def parse(cls, name: str) -> "DataType":
+        """解析输入文本并返回对应的值。"""
         normalized = name.strip().upper()
         aliases = {
             "INTEGER": cls.INT,
@@ -47,6 +48,7 @@ class TableId:
     value: int
 
     def __int__(self) -> int:
+        """返回对象对应的整数值。"""
         return self.value
 
 
@@ -55,6 +57,7 @@ class PageId:
     value: int
 
     def __int__(self) -> int:
+        """返回对象对应的整数值。"""
         return self.value
 
 
@@ -64,6 +67,7 @@ class RowId:
     slot_id: int
 
     def as_tuple(self) -> tuple[int, int]:
+        """返回对象的元组表示。"""
         return int(self.page_id), self.slot_id
 
 
@@ -76,10 +80,12 @@ class Value:
 
     @classmethod
     def null(cls) -> "Value":
+        """返回表示 SQL NULL 的值。"""
         return cls(DataType.NULL, None)
 
     @classmethod
     def infer(cls, value: object) -> "Value":
+        """根据输入推断所需的类型或结构。"""
         if value is None:
             return cls.null()
         if isinstance(value, bool):
@@ -91,6 +97,7 @@ class Value:
         return cls(DataType.VARCHAR, str(value))
 
     def coerce(self, target: DataType) -> "Value":
+        """将输入值转换为目标类型。"""
         if self.data_type is DataType.NULL:
             return Value(target, None)
         if self.data_type is target:
@@ -115,9 +122,11 @@ class Value:
         raise BinderError(f"不能把 {self.data_type.value} 转换为 {target.value}")
 
     def unwrap(self) -> SqlValue:
+        """取出包装值中的底层内容。"""
         return self.value
 
     def __hash__(self) -> int:
+        """返回对象的哈希值。"""
         try:
             return hash((self.data_type, self.value))
         except TypeError:
@@ -134,6 +143,7 @@ class Column:
     default: Value | None = None
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         if not self.name or self.name.strip() != self.name:
             raise ValueError("列名不能为空且不能带首尾空格")
         if self.primary_key and self.nullable:
@@ -145,6 +155,7 @@ class Schema:
     columns: tuple[Column, ...]
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         if not self.columns:
             raise ValueError("模式至少要有一列")
         names = [column.name.lower() for column in self.columns]
@@ -153,15 +164,19 @@ class Schema:
 
     @classmethod
     def from_iterable(cls, columns: Iterable[Column]) -> "Schema":
+        """从可迭代输入构造对象实例。"""
         return cls(tuple(columns))
 
     def __len__(self) -> int:
+        """返回对象包含的元素数量。"""
         return len(self.columns)
 
     def __iter__(self) -> Iterator[Column]:
+        """返回对象的迭代器。"""
         return iter(self.columns)
 
     def index(self, name: str) -> int:
+        """按索引或位置访问目标数据。"""
         target = name.lower()
         for index, column in enumerate(self.columns):
             if column.name.lower() == target:
@@ -169,14 +184,17 @@ class Schema:
         raise BinderError(f"列 {name!r} 不存在")
 
     def column(self, name: str) -> Column:
+        """按名称或位置获取列信息。"""
         return self.columns[self.index(name)]
 
     def names(self) -> tuple[str, ...]:
+        """返回对象包含的名称列表。"""
         return tuple(column.name for column in self.columns)
 
     def validate_row(
         self, row: Iterable[object], *, partial: bool = False
     ) -> tuple[SqlValue, ...]:
+        """校验一行数据的长度、类型和约束，并返回规范化后的行。"""
         values = tuple(row)
         if len(values) > len(self.columns):
             raise BinderError(
@@ -227,6 +245,7 @@ class ExecutionResult:
     stats: JsonObject = field(default_factory=dict)
 
     def as_dict(self) -> JsonObject:
+        """将对象转换为可序列化的字典。"""
         return {
             "columns": list(self.columns),
             "rows": [list(row) for row in self.rows],
@@ -237,6 +256,7 @@ class ExecutionResult:
         }
 
     def __bool__(self) -> bool:
+        """返回对象在布尔上下文中的真值。"""
         return bool(self.rows) or self.affected_rows > 0
 
 

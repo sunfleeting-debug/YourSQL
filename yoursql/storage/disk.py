@@ -4,13 +4,74 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import Iterator
 from typing import Mapping
 
 from ..common.errors import StorageError
 from ..common.trace import current_trace
 from .page import Page, PageType
+
+
+@dataclass(frozen=True)
+class DiskMetadata:
+    """磁盘文件布局的只读摘要。"""
+
+    page_size: int
+    page_count: int
+    next_page_id: int
+    free_pages: tuple[int, ...]
+    named_pages: Mapping[str, int]
+
+    def __getitem__(self, key: str) -> object:
+        """兼容存储检查适配层的旧映射式读取。"""
+
+        return self.to_dict()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """返回对象的迭代器。"""
+        return iter(
+            ("page_size", "page_count", "next_page_id", "free_pages", "named_pages")
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "page_size": self.page_size,
+            "page_count": self.page_count,
+            "next_page_id": self.next_page_id,
+            "free_pages": list(self.free_pages),
+            "named_pages": dict(self.named_pages),
+        }
+
+
+@dataclass(frozen=True)
+class DiskIOStats:
+    """磁盘管理器进程内累计页 I/O 统计。"""
+
+    page_reads: int
+    page_writes: int
+    bytes_read: int
+    bytes_written: int
+
+    def __getitem__(self, key: str) -> int:
+        """按键或下标读取对象中的元素。"""
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        """返回对象的迭代器。"""
+        return iter(("page_reads", "page_writes", "bytes_read", "bytes_written"))
+
+    def to_dict(self) -> dict[str, int]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "page_reads": self.page_reads,
+            "page_writes": self.page_writes,
+            "bytes_read": self.bytes_read,
+            "bytes_written": self.bytes_written,
+        }
 
 
 class DiskManager:
@@ -19,6 +80,7 @@ class DiskManager:
     FORMAT_VERSION = 1
 
     def __init__(self, path: str | os.PathLike[str], *, page_size: int = 4096) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.path = Path(path)
         self.page_size = page_size
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,26 +102,30 @@ class DiskManager:
 
     @property
     def page_count(self) -> int:
+        """返回数据库文件中的页数量。"""
         with self._lock:
             # WHY：BufferedRandom.seek 会隐式刷出待写字节，元数据查看不能触发写盘。
             # 页文件只扩展不收缩，next_page_id 即当前逻辑文件页数。
             return self._next_page_id
 
-    def metadata(self) -> dict[str, object]:
+    def metadata(self) -> DiskMetadata:
+        """返回当前数据库或对象的元数据。"""
         with self._lock:
-            return {
-                "page_size": self.page_size,
-                "page_count": self.page_count,
-                "next_page_id": self._next_page_id,
-                "free_pages": sorted(self._free_pages),
-                "named_pages": dict(self._named_pages),
-            }
+            return DiskMetadata(
+                page_size=self.page_size,
+                page_count=self.page_count,
+                next_page_id=self._next_page_id,
+                free_pages=tuple(sorted(self._free_pages)),
+                named_pages=dict(self._named_pages),
+            )
 
     def _ensure_open(self) -> None:
+        """检查磁盘管理器仍处于打开状态。"""
         if self._closed:
             raise StorageError("数据库文件已经关闭")
 
     def _load_superblock(self) -> None:
+        """读取并校验数据库文件的 superblock。"""
         raw = self._read_raw(0)
         page = Page.from_bytes(raw, page_size=self.page_size)
         if page.page_type is not PageType.SUPERBLOCK:
@@ -87,6 +153,7 @@ class DiskManager:
         )
 
     def _superblock_payload(self) -> bytes:
+        """构造可持久化的 superblock 载荷。"""
         data = {
             "magic": "YOURSQLMS",
             "version": self.FORMAT_VERSION,
@@ -98,6 +165,7 @@ class DiskManager:
         return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     def _read_raw(self, page_id: int) -> bytes:
+        """从数据库文件读取原始页字节。"""
         self._reads += 1
         trace = current_trace.get()
         if trace is not None:
@@ -109,6 +177,7 @@ class DiskManager:
         return raw
 
     def _write_raw(self, page: Page) -> None:
+        """向数据库文件写入原始页字节。"""
         self._writes += 1
         trace = current_trace.get()
         if trace is not None:
@@ -117,11 +186,13 @@ class DiskManager:
         self._file.write(page.to_bytes())
 
     def _write_superblock(self) -> None:
+        """将当前 superblock 写回数据库文件。"""
         self._write_raw(
             Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload())
         )
 
     def register_named_page(self, name: str, page_id: int) -> None:
+        """注册带名称的页并记录其页号。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(page_id)
@@ -129,12 +200,14 @@ class DiskManager:
             self._write_superblock()
 
     def named_page(self, name: str) -> int | None:
+        """按名称查找已注册的页。"""
         with self._lock:
             return self._named_pages.get(name.strip().lower())
 
     def allocate(
         self, page_type: PageType = PageType.FREE, payload: bytes = b""
     ) -> Page:
+        """分配新的数据库页。"""
         with self._lock:
             self._ensure_open()
             if self._free_pages:
@@ -149,6 +222,7 @@ class DiskManager:
             return page
 
     def free(self, page_id: int) -> None:
+        """释放数据库页并回收其页号。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(page_id)
@@ -162,10 +236,12 @@ class DiskManager:
             self._write_superblock()
 
     def _check_page_id(self, page_id: int) -> None:
+        """校验页号是否位于有效范围内。"""
         if page_id < 0 or page_id >= self.page_count:
             raise StorageError(f"页号 {page_id} 越界")
 
     def read(self, page_id: int) -> Page:
+        """读取指定页并恢复为页对象。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(int(page_id))
@@ -174,6 +250,7 @@ class DiskManager:
             )
 
     def write(self, page: Page) -> None:
+        """将页对象写回数据库文件。"""
         with self._lock:
             self._ensure_open()
             if page.page_size != self.page_size:
@@ -181,15 +258,15 @@ class DiskManager:
             self._check_page_id(page.page_id)
             self._write_raw(page)
 
-    def io_stats(self) -> dict[str, int]:
+    def io_stats(self) -> DiskIOStats:
         """返回进程内页 I/O 计数；调试读取单独排除。"""
         with self._lock:
-            return {
-                "page_reads": self._reads,
-                "page_writes": self._writes,
-                "bytes_read": self._reads * self.page_size,
-                "bytes_written": self._writes * self.page_size,
-            }
+            return DiskIOStats(
+                page_reads=self._reads,
+                page_writes=self._writes,
+                bytes_read=self._reads * self.page_size,
+                bytes_written=self._writes * self.page_size,
+            )
 
     def peek(self, page_id: int) -> Page:
         """只读调试页，恢复文件游标且不改变正常读写计数。"""
@@ -212,12 +289,14 @@ class DiskManager:
                 )
 
     def sync(self) -> None:
+        """将文件缓冲区同步到持久化介质。"""
         with self._lock:
             self._ensure_open()
             self._file.flush()
             os.fsync(self._file.fileno())
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         with self._lock:
             if not self._closed:
                 self.sync()
@@ -225,9 +304,11 @@ class DiskManager:
                 self._closed = True
 
     def __enter__(self) -> "DiskManager":
+        """进入上下文管理器并返回当前对象。"""
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """退出上下文管理器并完成资源清理。"""
         self.close()
 
 

@@ -37,6 +37,7 @@ PAGE_SIZE_CANDIDATES = (512, 1024, 2048, 4096, 8192, 16 * 1024, 32 * 1024, 64 * 
 
 
 def page_type_from_code(code: int) -> PageType:
+    """将旧页头编码转换为 PageType。"""
     values = tuple(PageType)
     if code < 1 or code > len(values):
         raise ValueError(f"未知页类型编码: {code}")
@@ -160,6 +161,7 @@ def decode_heap_slots(payload: bytes) -> list[bytes | None]:
 
 
 def migrate_page(page_id: int, page_type: PageType, payload: bytes, page_size: int) -> Page:
+    """将单个旧页转换为新页格式。"""
     if page_type is PageType.HEAP:
         slots = decode_old_heap_slots(payload)
         if slots is not None:
@@ -172,6 +174,7 @@ def migrate_page(page_id: int, page_type: PageType, payload: bytes, page_size: i
 
 
 def _old_catalog(path: Path, page_size: int) -> Catalog:
+    """从旧数据库读取目录元数据。"""
     _page_id, page_type, payload = read_old_page(path, page_size, 0)
     if page_type is not PageType.SUPERBLOCK:
         raise StorageError("旧数据库第 0 页不是 superblock")
@@ -220,6 +223,7 @@ def _pack_rows(database: Database, table: TableMetadata, rows: list[tuple[object
     current: list[bytes] = []
 
     def flush_current() -> None:
+        """将当前待写记录刷新到新的堆页。"""
         if not current:
             return
         page = database.buffer_pool.new_page(PageType.HEAP)
@@ -310,6 +314,7 @@ def migrate_raw(path: Path, page_size: int, *, write: bool) -> int:
 
 
 def migrate(path: Path, *, write: bool) -> None:
+    """迁移数据库文件，必要时回退到逻辑重建。"""
     page_size = detect_page_size(path)
     try:
         page_count = migrate_raw(path, page_size, write=write)
@@ -325,6 +330,7 @@ def migrate(path: Path, *, write: bool) -> None:
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--write", action="store_true", help="写回原数据库文件")

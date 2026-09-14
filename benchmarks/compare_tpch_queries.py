@@ -48,6 +48,7 @@ _DATE_MODIFIER = re.compile(r"DATE\('(\d{4}-\d{2}-\d{2})',\s*'([+-])(\d+)\s+(day
 
 
 def _sqlite_type(type_name: str) -> str:
+    """将 TPC-H 类型转换为 SQLite 类型。"""
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return "INTEGER"
@@ -57,6 +58,7 @@ def _sqlite_type(type_name: str) -> str:
 
 
 def _yoursql_type(type_name: str) -> str:
+    """将 TPC-H 类型转换为 YourSQL 类型。"""
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return "INT"
@@ -69,6 +71,7 @@ def to_duckdb(sql: str) -> str:
     """把 BenchBox 的 sqlite 方言改写为 DuckDB 可执行形式。"""
 
     def replace(match: re.Match[str]) -> str:
+        """替换 SQL 模板中的占位符。"""
         base, sign, amount, unit = match.groups()
         operator = "+" if sign == "+" else "-"
         return f"(DATE '{base}' {operator} INTERVAL {amount} {unit.upper()})"
@@ -77,6 +80,7 @@ def to_duckdb(sql: str) -> str:
 
 
 def load_yoursql(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, int]:
+    """创建 YourSQL 表并导入 TPC-H 数据。"""
     loaded: dict[str, int] = {}
     with Database(db_path, config=BENCHMARK_DATABASE_CONFIG) as database:
         for table in TABLES:
@@ -96,6 +100,7 @@ def load_yoursql(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, in
 
 
 def load_sqlite(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, int]:
+    """创建 SQLite 表并导入 TPC-H 数据。"""
     db_path.unlink(missing_ok=True)
     connection = sqlite3.connect(str(db_path))
     loaded: dict[str, int] = {}
@@ -122,6 +127,7 @@ def load_sqlite(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, int
 
 
 def load_duckdb(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, int]:
+    """创建 DuckDB 表并导入 TPC-H 数据。"""
     db_path.unlink(missing_ok=True)
     connection = duckdb.connect(str(db_path))
     loaded: dict[str, int] = {}
@@ -140,6 +146,7 @@ def load_duckdb(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, int
 
 
 def best_of(iterations: int, action) -> tuple[list[float], Any]:
+    """多次执行基准函数并返回最快耗时。"""
     times: list[float] = []
     result = None
     for _ in range(iterations):
@@ -150,6 +157,7 @@ def best_of(iterations: int, action) -> tuple[list[float], Any]:
 
 
 def run_yoursql_query(db_path: Path, data_dir: Path, query_id: int, iterations: int, timeout: float) -> dict[str, Any]:
+    """执行一条 YourSQL TPC-H 查询并记录耗时。"""
     command = [
         sys.executable, "-m", "benchmarks.run_tpch_query",
         "--database", str(db_path), "--query", str(query_id),
@@ -199,6 +207,7 @@ def _sample_match(entry: dict[str, Any]) -> dict[str, bool]:
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)

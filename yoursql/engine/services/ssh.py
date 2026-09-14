@@ -27,11 +27,13 @@ class SSHStdioServer:
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.database = database
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
 
     def run(self, lines: Iterable[str] | None = None) -> int:
+        """运行当前任务并返回状态码或结果。"""
         source = self.stdin if lines is None else lines
         for line in source:
             sql = line.strip()
@@ -52,11 +54,13 @@ class SSHCommandClient:
     """调用系统 ssh 程序连接远端 stdio 服务。"""
 
     def __init__(self, executable: str = "ssh") -> None:
+        """初始化实例所需的状态和依赖。"""
         self.executable = executable
 
     def execute(
         self, destination: str, sql: str, *, remote_command: str = "yoursql --stdio"
     ) -> JsonObject:
+        """执行操作并返回执行结果。"""
         if shutil.which(self.executable) is None:
             raise SSHAdapterError(f"未找到外部 SSH 程序: {self.executable}")
         completed = subprocess.run(
@@ -80,6 +84,7 @@ class SSHCommandClient:
 
 
 def serve_ssh_stdio(database: Database) -> int:
+    """通过标准输入输出启动 SSH 兼容服务。"""
     return SSHStdioServer(database).run()
 
 

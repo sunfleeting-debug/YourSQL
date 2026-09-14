@@ -23,6 +23,7 @@ class ExecutionTrace:
 
     def check(self) -> None:
         # WHY：写操作只能在语句边界取消，避免在更新索引期间留下半完成状态。
+        """检查输入或内部状态是否满足约束。"""
         if not self.interruptible:
             return
         if self.cancelled.is_set():
@@ -36,10 +37,12 @@ class ExecutionTrace:
             )
 
     def step(self) -> None:
+        """记录当前执行路径中的一个步骤，并检查步数限制。"""
         self.steps += 1
         self.check()
 
     def event(self, action: str, page_id: int, **details: object) -> None:
+        """向当前执行轨迹追加结构化事件。"""
         if len(self.events) < 256:
             self.events.append({"action": action, "page_id": page_id, **details})
         else:

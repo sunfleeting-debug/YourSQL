@@ -18,6 +18,7 @@ from .engine.services.ssh import serve_ssh_stdio
 
 
 def _format_result(result: ExecutionResult) -> str:
+    """将执行结果格式化为命令行可读的文本。"""
     data = result.as_dict()
     if not data["columns"]:
         return str(data["message"] or f"affected rows: {data['affected_rows']}")
@@ -55,6 +56,7 @@ def _format_result(result: ExecutionResult) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构造命令行参数解析器。"""
     load_dotenv()
     parser = argparse.ArgumentParser(description="YourSQL educational database")
     database_default = (
@@ -75,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """解析命令行参数并启动对应的工作模式。"""
     load_dotenv()
     args = build_parser().parse_args(argv)
     try:
