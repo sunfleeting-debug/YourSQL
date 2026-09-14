@@ -6,7 +6,9 @@ import json
 import os
 import struct
 import tempfile
+import threading
 from dataclasses import replace
+from itertools import count
 from pathlib import Path
 from threading import RLock
 from types import TracebackType
@@ -14,15 +16,36 @@ from typing import Iterable
 
 from ...common import (
     CatalogError,
+    ConcurrencyError,
     DatabaseConfig,
     ExecutionResult,
     ExecutionError,
     SqlValue,
+    TransactionError,
     YourSQLError,
     StorageError,
 )
 from ...common.types import PageId, RowId
-from ...sql.ast import Explain, Select, Statement
+from ...sql.ast import (
+    BeginTransaction,
+    Commit,
+    CreateIndex,
+    CreateTable,
+    CreateView,
+    Delete,
+    DropIndex,
+    DropTable,
+    DropView,
+    Explain,
+    Insert,
+    Rollback,
+    Select,
+    SetTransaction,
+    Show,
+    ShowGrants,
+    Statement,
+    Update,
+)
 from ...sql.binder import Binder
 from ...sql.compiler import CompilationResult, Compiler
 from ...sql.lexer import tokenize
@@ -33,8 +56,27 @@ from ...planner.optimizer import CostEstimate, Optimizer, StatisticsStore
 from ...planner.physical import PhysicalPlanNode, PlanNode
 from ...execution.evaluator import ExpressionEvaluator
 from ...execution.query import QueryExecutionMixin, _RowContextTemplate
-from ...storage import BufferPool, DiskManager, IndexManager, Page, PageType, TableHeap
+from ...storage import (
+    BufferPool,
+    DiskManager,
+    IndexManager,
+    Page,
+    PageType,
+    RecoveryReport,
+    TableHeap,
+    WriteAheadLog,
+    recover,
+    wal_path_for,
+)
 from ...storage.page import HEADER_SIZE
+from ...storage.wal import ABORT, ALLOCATE, BEGIN, COMMIT as WAL_COMMIT, PAGE
+from ..concurrency import (
+    LockManager,
+    LockMode,
+    Transaction,
+    TransactionManager,
+    TransactionState,
+)
 from ..security.audit import AuditLog
 from ..security.auth import RBAC
 from ..catalog import Catalog, IndexMetadata, TableMetadata
@@ -138,9 +180,37 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             # HOW：默认数据库位于 ./data；首次启动时自动准备父目录，CLI、Web 和直接 API 行为保持一致。
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.disk = DiskManager(self.path, page_size=self.config.page_size)
-        self.buffer_pool = BufferPool(
-            self.disk, self.config.buffer_pool_size, self.config.replacement_policy
+        # HOW：日志必须早于缓冲池建立——脏页写回时要先刷日志（写前日志规则）；
+        # 恢复也必须早于目录装载，否则会把未提交事务的目录改动当成现状读进来。
+        self.wal = WriteAheadLog(
+            wal_path_for(self.path), enabled=self.config.wal_enabled
         )
+        self.buffer_pool = BufferPool(
+            self.disk,
+            self.config.buffer_pool_size,
+            self.config.replacement_policy,
+            wal=self.wal,
+        )
+        self.buffer_pool.image_sink = None
+        self.disk.allocate_hook = None
+        self.recovery_report: RecoveryReport = recover(
+            self.wal, self.buffer_pool, self.disk
+        )
+        # ----- 事务与并发（必须早于目录装载：分配目录页会走 allocate_hook） -----
+        self.txn_manager = TransactionManager()
+        self.lock_manager = LockManager(
+            timeout=self.config.lock_timeout_seconds,
+            enabled=self.config.lock_mode != "none",
+        )
+        self._default_isolation = self.config.default_isolation
+        # HOW：线程局部保存"当前线程正在执行的事务"。数据库实例可被多线程共享，
+        # 每个线程各自开着一条事务，封锁冲突才真正发生。
+        self._txn_local = threading.local()
+        # HOW：自动提交的只读语句用负数编号临时占用锁，避免与真实事务号冲突。
+        self._read_scope_seq = count(1)
+        # HOW：恢复阶段的改动不属于任何事务，因此两个回调在恢复之后才挂上。
+        self.buffer_pool.image_sink = self._capture_page_image
+        self.disk.allocate_hook = self._note_page_allocation
         self.catalog = self._load_catalog()
         self.index_manager = IndexManager()
         self._heaps: dict[int, TableHeap] = {}
@@ -353,6 +423,236 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
             self._heaps[key] = heap
         return heap
+
+    # ----- 事务生命周期 -----
+    def current_transaction(self) -> Transaction | None:
+        """返回当前线程的活动事务；没有则返回 ``None``。"""
+
+        txn = getattr(self._txn_local, "txn", None)
+        return txn if txn is not None and txn.active else None
+
+    def begin_transaction(
+        self,
+        isolation: str | None = None,
+        *,
+        snapshot_catalog: bool = True,
+        implicit: bool = False,
+    ) -> Transaction:
+        """开启一条事务并把它绑定到当前线程。"""
+
+        if self.current_transaction() is not None:
+            raise TransactionError("当前已经有活动事务，不能重复 BEGIN")
+        txn = self.txn_manager.begin(isolation or self._default_isolation)
+        txn.implicit = implicit
+        if snapshot_catalog:
+            # HOW：目录快照让 DDL 也能回滚——回滚时按快照重建目录对象，
+            # 页级前像负责把目录页的物理内容恢复原状。
+            txn.catalog_snapshot = self.catalog.to_dict()
+        self._txn_local.txn = txn
+        self.wal.append(txn.txn_id, BEGIN, description=txn.isolation)
+        return txn
+
+    def explicit_transaction(self) -> Transaction | None:
+        """返回当前线程的显式事务；隐式（自动提交）事务返回 ``None``。"""
+
+        txn = self.current_transaction()
+        return txn if txn is not None and not txn.implicit else None
+
+    def commit_transaction(self) -> dict[str, object]:
+        """提交当前事务；返回事务统计。"""
+
+        txn = self.current_transaction()
+        if txn is None:
+            raise TransactionError("没有活动事务，COMMIT 无处可提交")
+        if txn.failed:
+            raise TransactionError(
+                "事务中有语句执行失败，COMMIT 被拒绝，请先 ROLLBACK",
+                txn_id=txn.txn_id,
+            )
+        dirty = bool(txn.page_images) or txn.catalog_snapshot is not None
+        if dirty:
+            # 提交顺序即恢复策略：先把目录与数据页全部落盘，再写 commit 记录。
+            # 这样"有 commit 记录"就等价于"改动已经全部在磁盘上"，恢复时无需 redo。
+            self._persist_catalog()
+            self.buffer_pool.flush_all()
+            self.wal.append(txn.txn_id, WAL_COMMIT, description="commit")
+            self.wal.flush()
+            if self.txn_manager.active_count == 1:
+                # 没有其它并发事务时，已提交内容全部落盘，日志可以整段截断。
+                self.wal.checkpoint()
+        stats = txn.stats()
+        txn.finish(TransactionState.COMMITTED)
+        self._release_transaction(
+            txn, TransactionState.COMMITTED, dirty=self._is_dirty(txn)
+        )
+        return stats
+
+    def rollback_transaction(self) -> dict[str, object]:
+        """回滚当前事务；返回事务统计。"""
+
+        txn = self.current_transaction()
+        if txn is None:
+            raise TransactionError("没有活动事务，ROLLBACK 无处可回滚")
+        stats = txn.stats()
+        self._undo_transaction(txn)
+        self._release_transaction(
+            txn, TransactionState.ABORTED, dirty=self._is_dirty(txn)
+        )
+        return stats
+
+    def _release_transaction(
+        self, txn: Transaction, state: TransactionState, *, dirty: bool
+    ) -> None:
+        """结束事务、释放锁，并只在真的改过数据时刷新统计与缓存。
+
+        WHY：只读语句也会开事务执行；若无条件刷新统计就没收计划缓存，
+        会让"同一 SQL 第二次执行命中缓存"的行为失效。
+        """
+
+        self.txn_manager.finish(txn, state)
+        self.lock_manager.release_all(txn.txn_id)
+        self._txn_local.txn = None
+        if dirty:
+            self._refresh_statistics()
+            self._invalidate_candidate_cache()
+
+    def _undo_transaction(self, txn: Transaction) -> None:
+        """用前像把事务改动逐页撤销，再恢复目录快照。"""
+
+        for image in txn.undo_plan():
+            self.buffer_pool.restore_page(image.page_id, image.image)
+        # HOW：事务新分配的页在回滚后不再被任何目录结构引用，精确回收它们，
+        # 而不是把 next_page_id 整体回退（并发下回退页号会与其它事务撞车）。
+        for page_id in reversed(txn.allocated_pages):
+            try:
+                self.disk.free(page_id)
+            except StorageError:
+                continue
+        if txn.catalog_snapshot is not None:
+            self._restore_catalog(txn.catalog_snapshot)
+        self.buffer_pool.flush_all()
+        self.wal.append(txn.txn_id, ABORT, description="rollback")
+        self.wal.flush()
+
+    def _restore_catalog(self, snapshot: dict[str, object]) -> None:
+        """按快照重建目录，并让索引/堆缓存与之一致。"""
+
+        restored = Catalog.from_dict(snapshot)
+        wanted = {metadata.name.lower() for metadata in restored.indexes()}
+        for name, tree in self.index_manager.items():
+            self.index_manager.drop(name)
+            if name not in wanted:
+                # 回滚期间新建的索引就此消失，释放它的页。
+                tree.destroy()
+        self.catalog = restored
+        self._heaps.clear()
+        self._rebuild_indexes()
+        self._persist_catalog()
+
+    def set_default_isolation(self, isolation: str) -> str:
+        normalized = isolation.strip().lower()
+        if normalized not in {"serializable", "read_committed"}:
+            raise TransactionError(f"不支持的隔离级别 {isolation!r}")
+        self._default_isolation = normalized
+        return normalized
+
+    def transaction_state(self) -> dict[str, object]:
+        """返回事务/封锁/日志的运行时快照，供工作台与验收演示查看。"""
+
+        txn = self.current_transaction()
+        return {
+            "current": txn.stats() if txn is not None else None,
+            "default_isolation": self._default_isolation,
+            "transactions": self.txn_manager.stats(),
+            "locks": self.lock_manager.snapshot(),
+            "wal": self.wal.stats(),
+            "recovery": self.recovery_report.as_dict(),
+        }
+
+    # ----- 前像捕获、页分配与语句级封锁 -----
+    def _capture_page_image(self, page_id: int, raw: bytes, previous_lsn: int) -> int:
+        """缓冲池回调：把页的首次前像记到当前事务并写入预写日志。"""
+
+        txn = self.current_transaction()
+        if txn is None:
+            return 0
+        existing = txn.page_lsn(page_id)
+        if existing:
+            return existing
+        record = self.wal.append(
+            txn.txn_id, PAGE, page_id=page_id, image=raw, page_lsn=previous_lsn
+        )
+        txn.record_page_image(page_id, raw, previous_lsn, record.lsn)
+        return record.lsn
+
+    def _note_page_allocation(self, page_id: int) -> None:
+        """磁盘回调：页分配绕过了缓冲池，需要事务单独记账才能回滚。"""
+
+        txn = self.current_transaction()
+        if txn is None:
+            return
+        txn.note_allocated(page_id)
+        self.wal.append(txn.txn_id, ALLOCATE, page_id=page_id)
+
+    @staticmethod
+    def _is_read_only(statement: Statement) -> bool:
+        if isinstance(statement, Explain):
+            return Database._is_read_only(statement.statement)
+        return isinstance(statement, (Select, Show, ShowGrants))
+
+    def _statement_resources(
+        self, statement: Statement
+    ) -> tuple[set[str], set[str]]:
+        """把语句映射成（需要 S 锁的表, 需要 X 锁的表）。"""
+
+        if isinstance(statement, Explain):
+            statement = statement.statement
+        names = set(self._object_names(statement))
+        if isinstance(statement, (CreateIndex, DropIndex)):
+            # HOW：CREATE/DROP INDEX 改的是表的数据结构，锁必须落在表上，
+            # 而不是索引名——否则同一张表上的并发写不会被挡住。
+            table_name = statement.table if isinstance(statement, CreateIndex) else None
+            if table_name is None:
+                metadata = self.catalog.find_index(statement.name)
+                if metadata is not None:
+                    table_name = next(
+                        (
+                            table.name
+                            for table in self.catalog.tables(include_system=True)
+                            if int(table.table_id) == int(metadata.table_id)
+                        ),
+                        None,
+                    )
+            names.discard(statement.name)
+            if table_name:
+                names.add(table_name)
+        if not names:
+            return set(), set()
+        if self._is_read_only(statement):
+            return names, set()
+        return set(), names
+
+    def _acquire_locks(self, txn: Transaction, statement: Statement) -> None:
+        reads, writes = self._statement_resources(statement)
+        for name in sorted(writes):
+            self.lock_manager.acquire(txn.txn_id, name, LockMode.EXCLUSIVE)
+            txn.write_resources.add(name.lower())
+        for name in sorted(reads):
+            self.lock_manager.acquire(txn.txn_id, name, LockMode.SHARED)
+            txn.read_resources.add(name.lower())
+
+    def _statement_touches_catalog(self, statement: Statement) -> bool:
+        return isinstance(
+            statement,
+            (
+                CreateTable,
+                CreateView,
+                DropTable,
+                DropView,
+                CreateIndex,
+                DropIndex,
+            ),
+        )
 
     # ----- 对外 SQL 管线与批量写入入口 -----
     def execute(self, sql: str) -> ExecutionResult:
@@ -601,7 +901,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 if isinstance(active_plan.statement, Statement)
                 else statement
             )
-            result = self._execute_statement(
+            result = self._execute_with_transaction(
                 active_statement, compilation.bound, active_plan
             )
             self.audit.record(
@@ -622,6 +922,92 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
             raise
 
+    def _execute_with_transaction(
+        self, statement: Statement, bound, plan: PlanNode
+    ) -> ExecutionResult:
+        """在事务范围内执行一条数据语句。
+
+        HOW：分三种情况——
+        1. 事务控制语句直接分发；
+        2. 自动提交下的只读语句不开事务（开事务会白写 BEGIN 日志、还会误清计划缓存），
+           只取一次临时读锁保护本次读取；
+        3. 其余语句一律跑在事务里：显式事务存在时并入它（锁保持到 COMMIT/ROLLBACK），
+           否则开隐式事务，成功即提交、失败即回滚，等价于自动提交。
+        """
+
+        if isinstance(
+            statement, (BeginTransaction, Commit, Rollback, SetTransaction)
+        ):
+            return self._execute_statement(statement, bound, plan)
+
+        explicit = self.current_transaction()
+        if explicit is None and self._is_read_only(statement):
+            return self._execute_read_only(statement, bound, plan)
+        if explicit is not None and explicit.failed:
+            raise TransactionError(
+                f"事务 {explicit.txn_id} 中的语句已经失败，只能执行 ROLLBACK",
+                txn_id=explicit.txn_id,
+            )
+        implicit = explicit is None
+        txn = explicit or self.begin_transaction(
+            snapshot_catalog=self._statement_touches_catalog(statement),
+            implicit=True,
+        )
+        try:
+            self._acquire_locks(txn, statement)
+            result = self._execute_statement(statement, bound, plan)
+        except ConcurrencyError:
+            # 死锁牺牲者或锁等待超时：事务已不可用，隐式/显式都必须整体回滚。
+            self._rollback_now(txn)
+            raise
+        except Exception:
+            if implicit:
+                self._rollback_now(txn)
+            else:
+                # HOW：与 PostgreSQL 一致——显式事务里语句出错后事务进入失败态，
+                # 锁继续持有，用户只能 ROLLBACK；避免"半条语句"被后续语句读走。
+                txn.state = TransactionState.FAILED
+            raise
+        if implicit:
+            self.commit_transaction()
+        elif txn.isolation == "read_committed":
+            # 读已提交：语句结束就放掉 S 锁，X 锁仍保持到事务结束。
+            self.lock_manager.release_shared(txn.txn_id)
+        txn.touch()
+        return result
+
+    def _execute_read_only(self, statement: Statement, bound, plan: PlanNode):
+        """自动提交的只读语句：不加事务，只用临时锁作用域保护本次读取。
+
+        HOW：锁归属用负数编号，与真实事务号（正整数）区分开，
+        既不占用事务号也不进入事务计数器。
+        """
+
+        scope = -next(self._read_scope_seq)
+        reads, _writes = self._statement_resources(statement)
+        for name in sorted(reads):
+            self.lock_manager.acquire(scope, name, LockMode.SHARED)
+        try:
+            return self._execute_statement(statement, bound, plan)
+        finally:
+            self.lock_manager.release_all(scope)
+
+    def _rollback_now(self, txn: Transaction) -> None:
+        """立即撤销并结束事务（不再抛错，供异常路径调用）。"""
+
+        if not txn.active:
+            return
+        self._undo_transaction(txn)
+        self._release_transaction(
+            txn, TransactionState.ABORTED, dirty=self._is_dirty(txn)
+        )
+
+    @staticmethod
+    def _is_dirty(txn: Transaction) -> bool:
+        """事务是否真的改过东西（决定要不要刷新统计、清理缓存）。"""
+
+        return bool(txn.page_images) or txn.catalog_snapshot is not None
+
     # ----- 计划估算、运行状态与资源释放 -----
     def health(self) -> dict[str, object]:
         return {
@@ -640,14 +1026,23 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 "indexes": len(self.catalog.indexes()),
             },
             "plan_cache": len(self.optimizer.cache),
+            "transactions": self.transaction_state(),
         }
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
+            # HOW：关闭时还挂着的活动事务一律回滚，避免把"半成品"留在磁盘上。
+            txn = self.current_transaction()
+            if txn is not None:
+                self._rollback_now(txn)
             self._persist_rbac()
             self.buffer_pool.close()
+            if self.txn_manager.active_count == 0:
+                # 干净关闭：所有改动都已落盘，日志可以整段截断。
+                self.wal.checkpoint()
+            self.wal.close()
             self.disk.close()
             self._closed = True
 

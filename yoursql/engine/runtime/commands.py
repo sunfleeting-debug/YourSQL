@@ -15,6 +15,7 @@ from ...common import (
     ExecutionError,
     ExecutionResult,
     Schema,
+    TransactionError,
     YourSQLError,
     Value,
     sql_truth,
@@ -24,9 +25,11 @@ from ...planner.logical import plan_from_statement
 from ...planner.physical import PlanNode
 from ...sql.ast import (
     BetweenPredicate,
+    BeginTransaction,
     BinaryOp,
     ColumnDefinition,
     ColumnRef,
+    Commit,
     CreateIndex,
     CreateRole,
     CreateTable,
@@ -46,7 +49,9 @@ from ...sql.ast import (
     Literal,
     Node,
     Revoke,
+    Rollback,
     Select,
+    SetTransaction,
     Show,
     ShowGrants,
     Star,
@@ -115,6 +120,10 @@ class DatabaseCommandMixin:
             return "SECURITY"
         if isinstance(statement, ShowGrants):
             return "SHOW_GRANTS"
+        if isinstance(
+            statement, (BeginTransaction, Commit, Rollback, SetTransaction)
+        ):
+            return "TRANSACTION"
         if isinstance(statement, (Select, Explain, Show)):
             return "SELECT"
         if isinstance(statement, (CreateTable, CreateView, CreateIndex)):
@@ -167,6 +176,12 @@ class DatabaseCommandMixin:
                 self.session.authorize("SECURITY")
             except AuthorizationError as exc:
                 raise _with_node_location(exc, statement) from exc
+            return
+        if isinstance(
+            statement, (BeginTransaction, Commit, Rollback, SetTransaction)
+        ):
+            # WHY：事务控制语句只影响当前会话的运行状态，不触碰任何数据对象，
+            # 因此不做对象级授权——否则普通用户连 BEGIN 都会被拦下。
             return
         if isinstance(statement, ShowGrants):
             if statement.target_kind is None:
@@ -283,6 +298,28 @@ class DatabaseCommandMixin:
     def _execute_statement(
         self, statement: Statement, bound: BoundStatement, plan: PlanNode
     ) -> ExecutionResult:
+        if isinstance(statement, BeginTransaction):
+            txn = self.begin_transaction(statement.isolation)
+            return ExecutionResult(
+                message=f"BEGIN {txn.isolation} (txn {txn.txn_id})",
+                stats={"transaction": txn.stats()},
+            )
+        if isinstance(statement, Commit):
+            stats = self.commit_transaction()
+            return ExecutionResult(
+                message=f"COMMIT {stats['txn_id']}", stats={"transaction": stats}
+            )
+        if isinstance(statement, Rollback):
+            stats = self.rollback_transaction()
+            return ExecutionResult(
+                message=f"ROLLBACK {stats['txn_id']}", stats={"transaction": stats}
+            )
+        if isinstance(statement, SetTransaction):
+            level = self.set_default_isolation(statement.isolation)
+            return ExecutionResult(
+                message=f"SET TRANSACTION ISOLATION LEVEL {level.upper()}",
+                stats={"default_isolation": level},
+            )
         if isinstance(statement, Explain):
             child = (
                 plan.children[0]
@@ -535,9 +572,19 @@ class DatabaseCommandMixin:
 
     # ----- DDL/DML 事务边界与目录失效 -----
     def _mutate(self, operation: Callable[[], ExecutionResult]) -> ExecutionResult:
-        """执行写操作并立即持久化。"""
+        """执行写操作；在显式事务内只改内存与缓冲池，持久化推迟到 COMMIT。
+
+        WHY：事务的原子性依赖"回滚还能把改动撤掉"。如果每条语句都立刻
+        ``flush_all`` + 落目录，一旦后面 ROLLBACK，磁盘上已经留下了无法解释的中间态；
+        改为提交时统一落盘，回滚只需恢复页前像即可。
+        """
 
         result = operation()
+        txn = self.current_transaction()
+        if txn is not None:
+            self._refresh_statistics()
+            self._invalidate_candidate_cache()
+            return result
         self._persist_catalog()
         self.buffer_pool.flush_all()
         self._refresh_statistics()
@@ -833,6 +880,17 @@ class DatabaseCommandMixin:
                 return ExecutionResult(message=f"table {statement.name} does not exist")
             raise _with_node_location(
                 CatalogError(f"表 {statement.name!r} 不存在"), statement
+            )
+        if self.explicit_transaction() is not None:
+            # WHY：DROP TABLE 会立刻把数据页归还空闲链表，页内容随即被覆盖；
+            # 页级前像只覆盖"被写过"的页，救不回已被释放的页。因此显式事务内先禁止，
+            # 避免给出"能回滚"的错觉。（自动提交下该语句自身仍是原子的。）
+            raise _with_node_location(
+                TransactionError(
+                    "显式事务内不支持 DROP TABLE：数据页会被立即释放，无法回滚；"
+                    "请先 COMMIT/ROLLBACK 再执行"
+                ),
+                statement,
             )
         removed_indexes = [self.catalog.get_index(name) for name in table.indexes]
         removed = self.catalog.drop_table(statement.name)
