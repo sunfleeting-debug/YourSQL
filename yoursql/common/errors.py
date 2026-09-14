@@ -135,3 +135,45 @@ class AuthorizationError(YourSQLError):
         **details: JsonValue,
     ) -> None:
         super().__init__(message, "AUTHORIZATION_ERROR", line, column, details)
+
+
+class TransactionError(YourSQLError):
+    """事务状态错误：重复 BEGIN、无事务时 COMMIT/ROLLBACK 等。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        line: int | None = None,
+        column: int | None = None,
+        **details: JsonValue,
+    ) -> None:
+        super().__init__(message, "TRANSACTION_ERROR", line, column, details)
+
+
+class ConcurrencyError(YourSQLError):
+    """封锁冲突与死锁错误。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        line: int | None = None,
+        column: int | None = None,
+        **details: JsonValue,
+    ) -> None:
+        super().__init__(message, "CONCURRENCY_ERROR", line, column, details)
+
+
+class RecoveryError(YourSQLError):
+    """预写日志损坏或崩溃恢复失败。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        line: int | None = None,
+        column: int | None = None,
+        **details: JsonValue,
+    ) -> None:
+        super().__init__(message, "RECOVERY_ERROR", line, column, details)
