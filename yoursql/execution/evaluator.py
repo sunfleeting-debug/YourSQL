@@ -7,8 +7,8 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, timedelta
 from typing import Callable
 
-from ..common import ExecutionError, YourSQLError, compare_values
-from ..sql.ast import (
+from yoursql.common import ExecutionError, YourSQLError, compare_values
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnRef,

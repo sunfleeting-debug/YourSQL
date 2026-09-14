@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..sql.ast import (
+from yoursql.sql.ast import (
     CreateIndex,
     CreateRole,
     CreateTable,
@@ -24,7 +24,7 @@ from ..sql.ast import (
     Statement,
     Update,
 )
-from .physical import PlanNode
+from yoursql.planner.physical import PlanNode
 
 
 @dataclass(frozen=True)

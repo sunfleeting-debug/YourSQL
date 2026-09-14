@@ -1,7 +1,7 @@
 """跨层共享的类型、配置和异常。"""
 
-from .config import DatabaseConfig, RuntimeConfig, configure_logging, load_dotenv
-from .codec import (
+from yoursql.common.config import DatabaseConfig, RuntimeConfig, configure_logging, load_dotenv
+from yoursql.common.codec import (
     MANUAL_CONTENT_TYPE,
     MANUAL_PAYLOAD_MAGIC,
     JsonPayloadCodec,
@@ -13,8 +13,8 @@ from .codec import (
     payload_codec,
     validate_payload_codec,
 )
-from .contracts import JsonObject, JsonPrimitive, JsonValue, SqlRow, SqlValue
-from .errors import (
+from yoursql.common.contracts import JsonObject, JsonPrimitive, JsonValue, SqlRow, SqlValue
+from yoursql.common.errors import (
     AuthorizationError,
     BinderError,
     CatalogError,
@@ -24,7 +24,7 @@ from .errors import (
     ParserError,
     StorageError,
 )
-from .types import (
+from yoursql.common.types import (
     Column,
     DataType,
     ExecutionResult,

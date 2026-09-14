@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar
 
-from ..common.errors import StorageError
+from yoursql.common.errors import StorageError
 
 
 class PageType(str, Enum):

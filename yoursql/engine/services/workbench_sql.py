@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Callable, TypeVar
 
-from ...common import ExecutionResult, JsonObject, YourSQLError, Value
-from ...sql.ast import ColumnRef, Explain, Select, Show, Star, Statement
-from ...sql.binder import Binder
-from ...sql.compiler import CompilationResult
-from ...sql.lexer import KEYWORDS, TokenKind, tokenize
-from ...sql.parser import Parser
-from ...planner.logical import plan_from_statement
-from ..runtime.database import Database
+from yoursql.common import ExecutionResult, JsonObject, YourSQLError, Value
+from yoursql.sql.ast import ColumnRef, Explain, Select, Show, Star, Statement
+from yoursql.sql.binder import Binder
+from yoursql.sql.compiler import CompilationResult
+from yoursql.sql.lexer import KEYWORDS, TokenKind, tokenize
+from yoursql.sql.parser import Parser
+from yoursql.planner.logical import plan_from_statement
+from yoursql.engine.runtime.database import Database
 
 T = TypeVar("T")
 MAX_SQL = 64_000

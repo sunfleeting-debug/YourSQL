@@ -16,7 +16,7 @@ from time import monotonic, perf_counter
 from typing import Iterator
 from uuid import uuid4
 
-from ...common import (
+from yoursql.common import (
     AuthorizationError,
     DatabaseConfig,
     JsonObject,
@@ -24,13 +24,13 @@ from ...common import (
     RuntimeConfig,
     validate_payload_codec,
 )
-from ...common.trace import ExecutionTrace, current_trace
-from ...sql.ast import Explain, Select, Show
-from ...sql.lexer import KEYWORDS, tokenize
-from ...sql.parser import Parser
-from ..runtime.database import Database
-from ..security.session import Session
-from .workbench_sql import (
+from yoursql.common.trace import ExecutionTrace, current_trace
+from yoursql.sql.ast import Explain, Select, Show
+from yoursql.sql.lexer import KEYWORDS, tokenize
+from yoursql.sql.parser import Parser
+from yoursql.engine.runtime.database import Database
+from yoursql.engine.security.session import Session
+from yoursql.engine.services.workbench_sql import (
     SQLSlice,
     compile_observed,
     error_info,

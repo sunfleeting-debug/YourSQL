@@ -8,7 +8,7 @@ from functools import cmp_to_key
 from operator import itemgetter
 from typing import Callable, Iterable, Protocol
 
-from ..common import (
+from yoursql.common import (
     CatalogError,
     ExecutionError,
     ExecutionResult,
@@ -16,9 +16,9 @@ from ..common import (
     compare_values,
     sql_truth,
 )
-from ..common.types import PageId, RowId
-from .evaluator import ConstantValue, _AMBIGUOUS, _MISSING, constant_value
-from ..sql.ast import (
+from yoursql.common.types import PageId, RowId
+from yoursql.execution.evaluator import ConstantValue, _AMBIGUOUS, _MISSING, constant_value
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnRef,
@@ -31,8 +31,8 @@ from ..sql.ast import (
     Subquery,
     TableRef,
 )
-from ..engine.catalog import IndexMetadata, TableMetadata, ViewMetadata
-from ..common.trace import ExecutionTrace, current_trace
+from yoursql.engine.catalog import IndexMetadata, TableMetadata, ViewMetadata
+from yoursql.common.trace import ExecutionTrace, current_trace
 
 # HOW：连接策略的代价常数，全部由本机 TPC-H SF0.01 实测标定。
 _JOIN_HASH_BUILD_COST = 0.22e-6  # 60,175 行建哈希表 13 ms

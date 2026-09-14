@@ -1,7 +1,7 @@
 """查询执行层：表达式求值、查询适配和 Volcano 风格算子。"""
 
-from .evaluator import ConstantValue, ExpressionEvaluator, FoldResult
-from .executor import (
+from yoursql.execution.evaluator import ConstantValue, ExpressionEvaluator, FoldResult
+from yoursql.execution.executor import (
     AggregateExecutor,
     Executor,
     FilterExecutor,
@@ -12,7 +12,7 @@ from .executor import (
     SortExecutor,
     ValuesExecutor,
 )
-from .query import QueryExecutionMixin
+from yoursql.execution.query import QueryExecutionMixin
 
 __all__ = [
     "AggregateExecutor",

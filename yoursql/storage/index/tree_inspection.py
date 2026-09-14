@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from ...common.types import RowId
-from .ordering import Key, _compare_keys, _memory_key
-from .protocols import _TreeContext
-from .types import (
+from yoursql.common.types import RowId
+from yoursql.storage.index.ordering import Key, _compare_keys, _memory_key
+from yoursql.storage.index.protocols import _TreeContext
+from yoursql.storage.index.types import (
     BPlusTreeSnapshot,
     IndexNodeSnapshot,
     IndexSnapshotEntry,

@@ -1,6 +1,6 @@
 """YourSQL SQL 编译器前端的公共入口。"""
 
-from .ast import (
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnDefinition,
@@ -38,10 +38,10 @@ from .ast import (
     UnaryOp,
     Update,
 )
-from .binder import Binder, BoundStatement, CatalogProtocol, TableProtocol
-from .compiler import CompilationResult, Compiler, compile_sql
-from .lexer import KEYWORDS, Lexer, Token, TokenKind, TokenType, lex, tokenize
-from .parser import Parser, parse_one, parse_script
+from yoursql.sql.binder import Binder, BoundStatement, CatalogProtocol, TableProtocol
+from yoursql.sql.compiler import CompilationResult, Compiler, compile_sql
+from yoursql.sql.lexer import KEYWORDS, Lexer, Token, TokenKind, TokenType, lex, tokenize
+from yoursql.sql.parser import Parser, parse_one, parse_script
 
 __all__ = [
     "BetweenPredicate",

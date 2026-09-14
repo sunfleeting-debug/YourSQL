@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from ...common.types import RowId
+from yoursql.common.types import RowId
 
 Key = tuple[object, ...]
 MemoryKey = tuple[tuple[int, object], ...]

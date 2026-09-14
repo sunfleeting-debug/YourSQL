@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ...common.codec import PayloadCodec
-from ...common.codec import payload_codec as get_payload_codec
-from ...common.types import RowId
-from .ordering import Key
+from yoursql.common.codec import PayloadCodec
+from yoursql.common.codec import payload_codec as get_payload_codec
+from yoursql.common.types import RowId
+from yoursql.storage.index.ordering import Key
 
 INDEX_MAGIC = b"MBIX"
 INDEX_VERSION = 1

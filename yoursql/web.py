@@ -3,9 +3,9 @@
 import argparse
 from dataclasses import replace
 
-from .common.config import RuntimeConfig, load_dotenv
-from .engine.runtime.database import Database
-from .engine.services.http import DatabaseHTTPServer
+from yoursql.common.config import RuntimeConfig, load_dotenv
+from yoursql.engine.runtime.database import Database
+from yoursql.engine.services.http import DatabaseHTTPServer
 
 
 def main() -> None:

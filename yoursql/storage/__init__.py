@@ -1,15 +1,15 @@
 """固定页文件、缓存、槽式记录和索引。"""
 
-from .buffer import (
+from yoursql.storage.buffer import (
     BufferFrameSnapshot,
     BufferPool,
     BufferPoolSnapshot,
     BufferPoolStats,
     ChangeSet,
 )
-from .disk import DiskIOStats, DiskManager, DiskMetadata, SingleFileDatabase
-from .heap import HeapRecord, TableHeap
-from .index import (
+from yoursql.storage.disk import DiskIOStats, DiskManager, DiskMetadata, SingleFileDatabase
+from yoursql.storage.heap import HeapRecord, TableHeap
+from yoursql.storage.index import (
     BPlusTree,
     IndexEntry,
     IndexNodeSnapshot,
@@ -21,7 +21,7 @@ from .index import (
     BPlusTreeSnapshot,
     index_page_info,
 )
-from .page import (
+from yoursql.storage.page import (
     Page,
     PageType,
     PageRegion,

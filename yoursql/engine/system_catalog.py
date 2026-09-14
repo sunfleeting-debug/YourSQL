@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..common.errors import CatalogError
-from ..common.types import Column, DataType, PageId, Schema
-from .security.auth import RBAC
-from .catalog import TableMetadata
+from yoursql.common.errors import CatalogError
+from yoursql.common.types import Column, DataType, PageId, Schema
+from yoursql.engine.security.auth import RBAC
+from yoursql.engine.catalog import TableMetadata
 
 if TYPE_CHECKING:
-    from .runtime.database import Database
+    from yoursql.engine.runtime.database import Database
 
 
 @dataclass(frozen=True)

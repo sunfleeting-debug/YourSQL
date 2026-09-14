@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from ...common.errors import StorageError
-from ..page import Page, PageType
-from .codec import INDEX_LINK_RESERVE
-from .node import _IndexNode
-from .ordering import Key, _compare_keys
-from .protocols import _TreeContext
+from yoursql.common.errors import StorageError
+from yoursql.storage.page import Page, PageType
+from yoursql.storage.index.codec import INDEX_LINK_RESERVE
+from yoursql.storage.index.node import _IndexNode
+from yoursql.storage.index.ordering import Key, _compare_keys
+from yoursql.storage.index.protocols import _TreeContext
 
 
 class _TreeStorageMixin(_TreeContext):

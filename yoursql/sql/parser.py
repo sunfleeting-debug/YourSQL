@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Iterable, TypeVar
 
-from ..common.errors import BinderError, ParserError
-from ..common.types import DataType
-from .ast import (
+from yoursql.common.errors import BinderError, ParserError
+from yoursql.common.types import DataType
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnDefinition,
@@ -45,7 +45,7 @@ from .ast import (
     UnaryOp,
     Update,
 )
-from .lexer import Lexer, Token, TokenKind
+from yoursql.sql.lexer import Lexer, Token, TokenKind
 
 
 NodeType = TypeVar("NodeType", bound=Node)

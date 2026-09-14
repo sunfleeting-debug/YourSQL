@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .contracts import JsonObject, JsonValue
+from yoursql.common.contracts import JsonObject, JsonValue
 
 
 @dataclass

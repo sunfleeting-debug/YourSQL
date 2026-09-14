@@ -9,9 +9,9 @@ import sys
 from collections.abc import Iterable
 from typing import TextIO
 
-from ...common import JsonObject
-from ...common.errors import YourSQLError
-from ..runtime.database import Database
+from yoursql.common import JsonObject
+from yoursql.common.errors import YourSQLError
+from yoursql.engine.runtime.database import Database
 
 
 class SSHAdapterError(RuntimeError):

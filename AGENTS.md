@@ -6,6 +6,13 @@
 - 前端（`web/`）代码提交前跑 `npm run format`，保持 `npm run format:check` 通过；Prettier 配置见 `web/.prettierrc.json`。
 - 不把长逻辑链压进一行：单行超过 150 字符（模板字符串、className 拼接除外）应考虑拆分；`className` 这类条件拼接请用 `web/src/view-classes.ts` 的纯函数。
 
+## Python 导入规范
+- `yoursql/` 内的项目代码统一使用绝对导入，例如 `from yoursql.common.types import RowId`；禁止使用 `from .`、`from ..` 等相对导入，避免移动文件时重新计算层级并降低 IDE 静态分析质量。
+- 包内导入应指向具体模块，不要为了方便从上层 `__init__.py` 聚合入口导入内部依赖；`__init__.py` 只负责稳定的公开 API 重导出，避免初始化循环。
+- `TYPE_CHECKING` 分支中的类型导入同样使用绝对导入，不通过 `sys.path`、运行时路径修改或隐式工作目录解决导入问题。
+- mixin、协议适配器等通过组合获得成员的类，必须用 `Protocol` 或明确的类型基类声明宿主属性和协作方法，不能依赖运行时多重继承让 Pylance“猜到”成员存在。
+- 新增或迁移模块后，至少执行 `ruff check yoursql`，并用 `rg -n "^(from|import) \\." yoursql --glob '*.py'` 确认没有新增相对导入；涉及导入拓扑变化时执行完整测试集。
+
 ## 后端代码归属
 - `yoursql/sql/` 只放 SQL 语言前端：词法、语法、AST、绑定和编译入口；不要放代价模型、存储访问或执行算子。
 - `yoursql/sql/` 是语言前端目录，不要整体改名为 `compiler/`；`compiler.py` 只是其中一个“AST/绑定到逻辑计划”的入口文件。

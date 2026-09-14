@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-from ..common.codec import PayloadCodec, PayloadCodecError, decode_payload
-from ..common.codec import payload_codec as get_payload_codec
-from ..common.errors import StorageError
-from ..common.types import PageId, RowId
-from .buffer import BufferPool
-from .page import (
+from yoursql.common.codec import PayloadCodec, PayloadCodecError, decode_payload
+from yoursql.common.codec import payload_codec as get_payload_codec
+from yoursql.common.errors import StorageError
+from yoursql.common.types import PageId, RowId
+from yoursql.storage.buffer import BufferPool
+from yoursql.storage.page import (
     Page,
     PageType,
     SLOTTED_HEADER_SIZE,

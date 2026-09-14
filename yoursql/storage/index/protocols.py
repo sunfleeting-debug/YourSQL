@@ -6,14 +6,14 @@ from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Callable, Protocol
 
-from ...common.codec import PayloadCodec
-from ...common.types import RowId
-from .node import _IndexNode
-from .ordering import Key
-from .types import BPlusTreeSnapshot, IndexEntry, IndexPayloadEntry
+from yoursql.common.codec import PayloadCodec
+from yoursql.common.types import RowId
+from yoursql.storage.index.node import _IndexNode
+from yoursql.storage.index.ordering import Key
+from yoursql.storage.index.types import BPlusTreeSnapshot, IndexEntry, IndexPayloadEntry
 
 if TYPE_CHECKING:
-    from ..buffer import BufferPool
+    from yoursql.storage.buffer import BufferPool
 
 
 class _TreeContext(Protocol):

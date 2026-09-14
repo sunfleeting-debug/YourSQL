@@ -10,12 +10,12 @@ from threading import Thread
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
-from ...common import JsonObject, JsonValue
-from ...common.codec import MANUAL_CONTENT_TYPE, PayloadCodecError, payload_codec
-from ...common.config import RuntimeConfig
-from ...common.errors import YourSQLError
-from ..runtime.database import Database
-from .inspection import (
+from yoursql.common import JsonObject, JsonValue
+from yoursql.common.codec import MANUAL_CONTENT_TYPE, PayloadCodecError, payload_codec
+from yoursql.common.config import RuntimeConfig
+from yoursql.common.errors import YourSQLError
+from yoursql.engine.runtime.database import Database
+from yoursql.engine.services.inspection import (
     inspect_index,
     inspect_page,
     storage_cache_snapshot,
@@ -23,8 +23,8 @@ from .inspection import (
     storage_page_changes,
     storage_snapshot,
 )
-from .workbench import WebSession, Workbench
-from .workbench_sql import MAX_SQL
+from yoursql.engine.services.workbench import WebSession, Workbench
+from yoursql.engine.services.workbench_sql import MAX_SQL
 
 ERROR_STATUS = {
     "BAD_REQUEST": 400,

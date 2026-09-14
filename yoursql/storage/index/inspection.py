@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from ...common.codec import PayloadCodec
-from ..page import Page
-from .node import _IndexNode
-from .types import IndexPageEntry, IndexPageInfo
+from yoursql.common.codec import PayloadCodec
+from yoursql.storage.page import Page
+from yoursql.storage.index.node import _IndexNode
+from yoursql.storage.index.types import IndexPageEntry, IndexPageInfo
 
 
 def index_page_info(

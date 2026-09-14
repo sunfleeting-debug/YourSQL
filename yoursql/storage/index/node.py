@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ...common.codec import PayloadCodec, PayloadCodecError, decode_payload
-from ...common.codec import payload_codec as get_payload_codec
-from ...common.errors import StorageError
-from ...common.types import PageId, RowId
-from .codec import INDEX_MAGIC, INDEX_VERSION
-from .ordering import Key, _compare_entries, _compare_keys
-from .types import IndexPayloadEntry
-from ..page import Page, PageType
+from yoursql.common.codec import PayloadCodec, PayloadCodecError, decode_payload
+from yoursql.common.codec import payload_codec as get_payload_codec
+from yoursql.common.errors import StorageError
+from yoursql.common.types import PageId, RowId
+from yoursql.storage.index.codec import INDEX_MAGIC, INDEX_VERSION
+from yoursql.storage.index.ordering import Key, _compare_entries, _compare_keys
+from yoursql.storage.index.types import IndexPayloadEntry
+from yoursql.storage.page import Page, PageType
 
 
 @dataclass

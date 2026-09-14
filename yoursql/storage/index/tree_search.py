@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from ...common.errors import StorageError
-from ...common.types import RowId
-from .node import _IndexNode
-from .ordering import (
+from yoursql.common.errors import StorageError
+from yoursql.common.types import RowId
+from yoursql.storage.index.node import _IndexNode
+from yoursql.storage.index.ordering import (
     Key,
     _compare_entries,
     _compare_keys,
@@ -15,8 +15,8 @@ from .ordering import (
     _key,
     _memory_key,
 )
-from .protocols import _TreeContext
-from .types import IndexEntry, IndexPayloadEntry
+from yoursql.storage.index.protocols import _TreeContext
+from yoursql.storage.index.types import IndexEntry, IndexPayloadEntry
 
 
 class _TreeSearchMixin(_TreeContext):

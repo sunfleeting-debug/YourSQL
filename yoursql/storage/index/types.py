@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...common.types import RowId
-from .ordering import Key
+from yoursql.common.types import RowId
+from yoursql.storage.index.ordering import Key
 
 
 @dataclass(frozen=True, eq=False)

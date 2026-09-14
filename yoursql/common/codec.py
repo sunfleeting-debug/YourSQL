@@ -7,7 +7,7 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from .contracts import JsonValue
+from yoursql.common.contracts import JsonValue
 
 PayloadCodecName = Literal["json", "manual"]
 MANUAL_PAYLOAD_MAGIC = b"YSPL"

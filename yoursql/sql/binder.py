@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..common.errors import BinderError
-from ..common.types import Schema, Value
-from .ast import (
+from yoursql.common.errors import BinderError
+from yoursql.common.types import Schema, Value
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnRef,

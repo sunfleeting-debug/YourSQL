@@ -4,7 +4,7 @@
 但不应把协议细节反向带入 SQL、存储或安全核心。
 """
 
-from .http import (
+from yoursql.engine.services.http import (
     DatabaseHTTPServer,
     ERROR_STATUS,
     HTTPService,
@@ -13,7 +13,7 @@ from .http import (
     STORAGE_PAGE_LIMIT,
     serve_http,
 )
-from .inspection import (
+from yoursql.engine.services.inspection import (
     authorize_storage,
     inspect_index,
     inspect_page,
@@ -22,9 +22,9 @@ from .inspection import (
     storage_page_changes,
     storage_snapshot,
 )
-from .ssh import SSHAdapterError, SSHCommandClient, SSHStdioServer, serve_ssh_stdio
-from .workbench import QueryTask, WebSession, Workbench
-from .workbench_sql import MAX_SQL, SQLSlice, redact_sql, split_sql
+from yoursql.engine.services.ssh import SSHAdapterError, SSHCommandClient, SSHStdioServer, serve_ssh_stdio
+from yoursql.engine.services.workbench import QueryTask, WebSession, Workbench
+from yoursql.engine.services.workbench_sql import MAX_SQL, SQLSlice, redact_sql, split_sql
 
 __all__ = [
     "DatabaseHTTPServer",

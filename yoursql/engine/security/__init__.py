@@ -4,9 +4,9 @@
 或查询执行细节。这样服务层可以复用同一套 RBAC 与会话对象。
 """
 
-from .audit import AuditLog
-from .auth import RBAC, Role, User
-from .manager import SecurityManager
-from .session import Session
+from yoursql.engine.security.audit import AuditLog
+from yoursql.engine.security.auth import RBAC, Role, User
+from yoursql.engine.security.manager import SecurityManager
+from yoursql.engine.security.session import Session
 
 __all__ = ["AuditLog", "RBAC", "Role", "SecurityManager", "Session", "User"]

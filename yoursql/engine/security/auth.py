@@ -8,7 +8,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
-from ...common.errors import AuthorizationError
+from yoursql.common.errors import AuthorizationError
 
 
 def _hash_password(password: str, salt: bytes | None = None) -> str:

@@ -4,13 +4,13 @@
 辅助逻辑分别放在小模块中，B+Tree 只负责组合这些职责并保留原有 API。
 """
 
-from .codec import INDEX_LINK_RESERVE, INDEX_MAGIC, INDEX_VERSION
-from .inspection import index_page_info
-from .manager import IndexManager
-from .node import _IndexNode
-from .ordering import Key, MemoryKey
-from .tree import BPlusTree
-from .types import (
+from yoursql.storage.index.codec import INDEX_LINK_RESERVE, INDEX_MAGIC, INDEX_VERSION
+from yoursql.storage.index.inspection import index_page_info
+from yoursql.storage.index.manager import IndexManager
+from yoursql.storage.index.node import _IndexNode
+from yoursql.storage.index.ordering import Key, MemoryKey
+from yoursql.storage.index.tree import BPlusTree
+from yoursql.storage.index.types import (
     BPlusTreeSnapshot,
     IndexEntry,
     IndexNodeSnapshot,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from ..common.types import DataType
+from yoursql.common.types import DataType
 
 
 def _as_dict(value: object) -> object:

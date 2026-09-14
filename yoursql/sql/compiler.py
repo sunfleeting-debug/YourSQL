@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ast import Statement
-from .binder import Binder, BoundStatement, CatalogProtocol
-from .lexer import Token, tokenize
-from .parser import Parser
-from ..planner.logical import LogicalPlanNode, plan_from_statement
-from ..planner.physical import PhysicalPlanNode
+from yoursql.sql.ast import Statement
+from yoursql.sql.binder import Binder, BoundStatement, CatalogProtocol
+from yoursql.sql.lexer import Token, tokenize
+from yoursql.sql.parser import Parser
+from yoursql.planner.logical import LogicalPlanNode, plan_from_statement
+from yoursql.planner.physical import PhysicalPlanNode
 
 
 @dataclass(frozen=True)

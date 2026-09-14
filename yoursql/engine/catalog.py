@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from ..common.errors import CatalogError
-from ..common.types import Column, DataType, PageId, Schema, TableId, TableStats, Value
+from yoursql.common.errors import CatalogError
+from yoursql.common.types import Column, DataType, PageId, Schema, TableId, TableStats, Value
 
 
 def _value_to_dict(value: Value | None) -> dict[str, object] | None:
@@ -139,7 +139,7 @@ class TableMetadata:
         raw_columns = value.get("columns")
         if raw_columns is None and bool(value.get("system", False)):
             # HOW：紧凑系统表元数据不重复保存固定列定义，加载时复用系统目录规范。
-            from .system_catalog import SYSTEM_TABLE_SPECS
+            from yoursql.engine.system_catalog import SYSTEM_TABLE_SPECS
 
             table_name = str(value["name"]).lower()
             spec = next(

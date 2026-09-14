@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .auth import RBAC, User
+from yoursql.engine.security.auth import RBAC, User
 
 
 @dataclass

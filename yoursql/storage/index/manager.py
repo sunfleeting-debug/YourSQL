@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Callable
 
-from ...common.errors import ExecutionError
-from ...common.types import PageId
-from .tree import BPlusTree
+from yoursql.common.errors import ExecutionError
+from yoursql.common.types import PageId
+from yoursql.storage.index.tree import BPlusTree
 
 if TYPE_CHECKING:
-    from ..buffer import BufferPool
+    from yoursql.storage.buffer import BufferPool
 
 
 class IndexManager:

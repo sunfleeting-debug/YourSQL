@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ...common.errors import ExecutionError, StorageError
-from ...common.types import RowId
-from ..page import Page
-from .codec import (
+from yoursql.common.errors import ExecutionError, StorageError
+from yoursql.common.types import RowId
+from yoursql.storage.page import Page
+from yoursql.storage.index.codec import (
     INDEX_LINK_RESERVE,
     _entry_payload_size,
     _internal_payload_entry_size,
     _leaf_payload_overhead,
 )
-from .node import _IndexNode
-from .ordering import Key, _compare_entries, _compare_keys, _key, _value_order
-from .protocols import _TreeContext
-from .types import IndexPayloadEntry
+from yoursql.storage.index.node import _IndexNode
+from yoursql.storage.index.ordering import Key, _compare_entries, _compare_keys, _key, _value_order
+from yoursql.storage.index.protocols import _TreeContext
+from yoursql.storage.index.types import IndexPayloadEntry
 
 
 class _TreeBulkMixin(_TreeContext):

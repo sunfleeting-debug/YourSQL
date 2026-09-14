@@ -11,7 +11,7 @@ from threading import RLock
 from types import TracebackType
 from typing import Iterable
 
-from ...common import (
+from yoursql.common import (
     CatalogError,
     DatabaseConfig,
     ExecutionResult,
@@ -20,20 +20,20 @@ from ...common import (
     YourSQLError,
     StorageError,
 )
-from ...common.config import default_audit_path
-from ...common.codec import PayloadCodecError, decode_payload
-from ...common.types import PageId, RowId
-from ...sql.ast import Explain, Select, Statement
-from ...sql.binder import Binder
-from ...sql.compiler import CompilationResult, Compiler
-from ...sql.lexer import tokenize
-from ...sql.parser import Parser
-from ...planner.logical import LogicalPlanNode, plan_from_statement
-from ...planner.optimizer import CostEstimate, Optimizer, StatisticsStore
-from ...planner.physical import PhysicalPlanNode, PlanNode
-from ...execution.evaluator import ExpressionEvaluator
-from ...execution.query import QueryExecutionMixin, _RowContextTemplate
-from ...storage import (
+from yoursql.common.config import default_audit_path
+from yoursql.common.codec import PayloadCodecError, decode_payload
+from yoursql.common.types import PageId, RowId
+from yoursql.sql.ast import Explain, Select, Statement
+from yoursql.sql.binder import Binder
+from yoursql.sql.compiler import CompilationResult, Compiler
+from yoursql.sql.lexer import tokenize
+from yoursql.sql.parser import Parser
+from yoursql.planner.logical import LogicalPlanNode, plan_from_statement
+from yoursql.planner.optimizer import CostEstimate, Optimizer, StatisticsStore
+from yoursql.planner.physical import PhysicalPlanNode, PlanNode
+from yoursql.execution.evaluator import ExpressionEvaluator
+from yoursql.execution.query import QueryExecutionMixin, _RowContextTemplate
+from yoursql.storage import (
     BufferPool,
     DiskManager,
     IndexManager,
@@ -42,13 +42,13 @@ from ...storage import (
     PageType,
     TableHeap,
 )
-from ...storage.page import HEADER_SIZE
-from ..security.audit import AuditLog
-from ..security.auth import RBAC
-from ..catalog import Catalog, IndexMetadata, TableMetadata
-from ..security.session import Session
-from ..system_catalog import SystemCatalog
-from .commands import DatabaseCommandMixin
+from yoursql.storage.page import HEADER_SIZE
+from yoursql.engine.security.audit import AuditLog
+from yoursql.engine.security.auth import RBAC
+from yoursql.engine.catalog import Catalog, IndexMetadata, TableMetadata
+from yoursql.engine.security.session import Session
+from yoursql.engine.system_catalog import SystemCatalog
+from yoursql.engine.runtime.commands import DatabaseCommandMixin
 
 
 # HOW：批量导入按块处理，既让页写入成批（减少整页重编码），又不把全部行都堆在内存里。

@@ -10,11 +10,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
-from .common.config import DEFAULT_DATABASE_PATH, DatabaseConfig, load_dotenv
-from .common.errors import YourSQLError
-from .common.types import ExecutionResult
-from .engine.runtime.database import Database
-from .engine.services.ssh import serve_ssh_stdio
+from yoursql.common.config import DEFAULT_DATABASE_PATH, DatabaseConfig, load_dotenv
+from yoursql.common.errors import YourSQLError
+from yoursql.common.types import ExecutionResult
+from yoursql.engine.runtime.database import Database
+from yoursql.engine.services.ssh import serve_ssh_stdio
 
 
 def _format_result(result: ExecutionResult) -> str:

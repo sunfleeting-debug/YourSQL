@@ -9,8 +9,8 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from threading import RLock
 
-from ..common.types import TableStats, compare_values
-from ..sql.ast import (
+from yoursql.common.types import TableStats, compare_values
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnRef,
@@ -35,8 +35,8 @@ from ..sql.ast import (
     UnaryOp,
     Update,
 )
-from ..sql.lexer import tokenize
-from .cost import (
+from yoursql.sql.lexer import tokenize
+from yoursql.planner.cost import (
     DECODE_ROW_COST,
     INDEX_ENTRY_COST,
     INDEX_ONLY_ENTRY_COST,
@@ -44,8 +44,8 @@ from .cost import (
     SEQ_PAGE_COST,
     CostEstimate,
 )
-from .logical import plan_from_statement
-from .physical import PlanNode, PhysicalPlanNode, as_physical
+from yoursql.planner.logical import plan_from_statement
+from yoursql.planner.physical import PlanNode, PhysicalPlanNode, as_physical
 
 
 # HOW：小表直接走索引的收益有限，但不值得为其引入额外的计划探测逻辑。

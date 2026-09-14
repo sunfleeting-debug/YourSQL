@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from threading import Event
 from time import monotonic
 
-from .errors import YourSQLError
+from yoursql.common.errors import YourSQLError
 
 
 @dataclass

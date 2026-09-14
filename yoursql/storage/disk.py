@@ -9,11 +9,11 @@ from threading import RLock
 from typing import Iterator
 from typing import Mapping
 
-from ..common.codec import PayloadCodec, PayloadCodecName, decode_payload
-from ..common.codec import payload_codec as get_payload_codec
-from ..common.errors import StorageError
-from ..common.trace import current_trace
-from .page import Page, PageType
+from yoursql.common.codec import PayloadCodec, PayloadCodecName, decode_payload
+from yoursql.common.codec import payload_codec as get_payload_codec
+from yoursql.common.errors import StorageError
+from yoursql.common.trace import current_trace
+from yoursql.storage.page import Page, PageType
 
 
 @dataclass(frozen=True)

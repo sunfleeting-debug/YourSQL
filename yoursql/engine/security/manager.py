@@ -1,7 +1,7 @@
 """兼容名称：安全管理器复用 RBAC 和审计日志。"""
 
-from .audit import AuditLog
-from .auth import RBAC, Role, User
+from yoursql.engine.security.audit import AuditLog
+from yoursql.engine.security.auth import RBAC, Role, User
 
 
 class SecurityManager:

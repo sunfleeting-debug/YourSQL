@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, Iterator, Mapping
 
-from .contracts import JsonObject, SqlValue
-from .errors import BinderError
+from yoursql.common.contracts import JsonObject, SqlValue
+from yoursql.common.errors import BinderError
 
 
 class DataType(str, Enum):

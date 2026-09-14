@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Iterator
 
-from ..common.errors import StorageError
-from ..common.trace import current_trace
-from .disk import DiskManager
-from .page import Page, PageType
+from yoursql.common.errors import StorageError
+from yoursql.common.trace import current_trace
+from yoursql.storage.disk import DiskManager
+from yoursql.storage.page import Page, PageType
 
 
 @dataclass

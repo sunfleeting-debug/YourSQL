@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from .codec import PayloadCodecName, validate_payload_codec
+from yoursql.common.codec import PayloadCodecName, validate_payload_codec
 
 # HOW：命令行和 Web 工作台共用这个相对项目目录的默认文件位置，避免把运行数据散落在仓库根目录。
 DEFAULT_DATABASE_PATH = Path("data") / "workbench.db"

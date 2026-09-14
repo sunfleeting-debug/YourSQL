@@ -7,8 +7,8 @@ from enum import Enum
 import re
 from typing import Iterator
 
-from ..common.contracts import SqlValue
-from ..common.errors import LexerError
+from yoursql.common.contracts import SqlValue
+from yoursql.common.errors import LexerError
 
 
 class TokenKind(str, Enum):

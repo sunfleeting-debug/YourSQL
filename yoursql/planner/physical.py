@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
 
-from ..sql.ast import Statement
+from yoursql.sql.ast import Statement
 
 
 def _json_value(value: object) -> object:

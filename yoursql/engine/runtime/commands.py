@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, fields
 from typing import Callable, Iterable
 
-from ...common import (
+from yoursql.common import (
     AuthorizationError,
     BinderError,
     CatalogError,
@@ -19,10 +19,10 @@ from ...common import (
     Value,
     sql_truth,
 )
-from ...common.types import PageId, RowId
-from ...planner.logical import plan_from_statement
-from ...planner.physical import PlanNode
-from ...sql.ast import (
+from yoursql.common.types import PageId, RowId
+from yoursql.planner.logical import plan_from_statement
+from yoursql.planner.physical import PlanNode
+from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
     ColumnDefinition,
@@ -56,11 +56,11 @@ from ...sql.ast import (
     UnaryOp,
     Update,
 )
-from ...sql.binder import BoundStatement
-from ...sql.lexer import KEYWORDS
-from ...sql.parser import Parser
-from ...storage import IndexPayloadEntry, TableHeap
-from ..catalog import IndexMetadata, TableMetadata, ViewMetadata
+from yoursql.sql.binder import BoundStatement
+from yoursql.sql.lexer import KEYWORDS
+from yoursql.sql.parser import Parser
+from yoursql.storage import IndexPayloadEntry, TableHeap
+from yoursql.engine.catalog import IndexMetadata, TableMetadata, ViewMetadata
 
 
 @dataclass(frozen=True)

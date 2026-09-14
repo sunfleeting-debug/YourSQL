@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
 
-from ...common import JsonObject
-from ...common.errors import YourSQLError
-from ...storage.heap import TableHeap
-from ...storage.index import index_page_info
-from ...storage.page import (
+from yoursql.common import JsonObject
+from yoursql.common.errors import YourSQLError
+from yoursql.storage.heap import TableHeap
+from yoursql.storage.index import index_page_info
+from yoursql.storage.page import (
     HEADER_SIZE,
     PAGE_VERSION,
     SLOT_ENTRY_SIZE,
@@ -21,8 +21,8 @@ from ...storage.page import (
     PageType,
     SlottedPage,
 )
-from ..catalog import TableMetadata
-from ..runtime.database import Database
+from yoursql.engine.catalog import TableMetadata
+from yoursql.engine.runtime.database import Database
 
 __all__ = [
     "authorize_storage",
