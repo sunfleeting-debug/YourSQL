@@ -1,5 +1,5 @@
 """SQL 语句命令的授权、DDL、DML 和索引变更处理。"""
-
+#处理SQL语句的授权、DDL、DML和索引变更
 from __future__ import annotations
 
 import re
@@ -145,6 +145,7 @@ class DatabaseCommandMixin:
                 return value
         if isinstance(statement, Explain):
             return DatabaseCommandMixin._object_for(statement.statement)
+        # HOW: SELECT 交给 query.py；写命令经 _mutate 正常执行后统一保存。
         if isinstance(statement, Select):
             names: list[str] = []
             if statement.from_table is not None:
@@ -537,6 +538,7 @@ class DatabaseCommandMixin:
     def _mutate(self, operation: Callable[[], ExecutionResult]) -> ExecutionResult:
         """执行写操作并立即持久化。"""
 
+        # HOW: 先执行写操作，再保存目录和刷新页面；这里不提供完整事务回滚。
         result = operation()
         self._persist_catalog()
         self.buffer_pool.flush_all()
@@ -551,7 +553,8 @@ class DatabaseCommandMixin:
         self._candidate_cache.clear()
 
     # ----- 表、视图和索引的 DDL -----
-    def _create_table(self, statement: CreateTable) -> ExecutionResult:
+    # HOW: CREATE 入口：查重 -> 构造 Schema -> 登记 Catalog；此处不分配用户数据页。
+    def _create_table(self, statement: CreateTable) -> ExecutionResult:#创建表.先创建表，再创建索引
         if self.catalog.find_table(statement.name) is not None:
             if statement.if_not_exists:
                 return ExecutionResult(message=f"table {statement.name} already exists")
@@ -846,15 +849,19 @@ class DatabaseCommandMixin:
         return ExecutionResult(message=f"DROP TABLE {removed.name}")
 
     # ----- 行级 DML -----
+    # HOW: INSERT 入口：整理校验字段 -> 写堆表 -> 维护索引与元数据 -> 返回影响行数。
     def _insert(self, statement: Insert, bound: BoundStatement) -> ExecutionResult:
-        table = self.catalog.get_table(statement.table)
-        heap = self._heap(table)
-        insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))
+        table = self.catalog.get_table(statement.table)#查Catalog：知道这张表要求什么样的数据
+        heap = self._heap(table)#取得操作这张表记录的工具
+        # HOW: Binder 提供插入列的位置，例如 (name,id) 对应表下标 (1,0)。
+        insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))#确定 INSERT 提供的值分别属于哪一列
         inserted = 0
-        for row_index, expressions in enumerate(statement.values):
+        for row_index, expressions in enumerate(statement.values):#把表达式变成实际值
             supplied = [self._eval_expr(expression, {}) for expression in expressions]
             values: list[object] = []
+            # HOW: 按列下标映射输入值，后续补遗漏列的默认值；显式 NULL 不替换。
             supplied_map = dict(zip(insert_indexes, supplied, strict=True))
+            #按表的正式列顺序遍历
             for index, column in enumerate(table.schema):
                 values.append(
                     supplied_map.get(
@@ -864,12 +871,17 @@ class DatabaseCommandMixin:
                 )
             row_location = statement.source_location_for(f"row:{row_index}")
             try:
+                #校验：这条记录能不能放进这张表
                 row = table.schema.validate_row(tuple(values))
             except YourSQLError as exc:
                 raise _with_location(exc, row_location) from exc
             self._check_constraints(table, row, None, location=row_location)
+            #真正写进页面
+            # HOW: 用返回的物理地址维护索引，并将新增页和行数同步到表元数据。
             row_id = heap.insert(row)
+            #维护索引：让索引也能找到新记录
             self._update_indexes(table, row, row_id, insert=True)
+            #⑨ 更新目录中的页号列表和行数
             table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
             table.first_page_id = table.page_ids[0] if table.page_ids else None
             table.row_count += 1
@@ -913,19 +925,24 @@ class DatabaseCommandMixin:
             affected_rows=len(targets), message=f"UPDATE {len(targets)}"
         )
 
+    # HOW: 先收集符合 WHERE 的地址和原记录，再删除索引与堆记录，避免边扫边改。
     def _delete(self, statement: Delete) -> ExecutionResult:
+        #查目录，取得表堆
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
+        #扫描记录，判断 WHERE
         targets: list[tuple[RowId, tuple[object, ...]]] = []
         for row_id, row in heap.scan():
             context = self._table_context(TableRef(table.name), row, row_id, table)
+            #如果没有where就走这个
             if statement.where is None or sql_truth(
                 self._eval_expr(statement.where, context)
-            ):
+            ):#先收集目标，不立即删除
                 targets.append((row_id, row))
+                #先维护索引，再删除堆记录
         for row_id, row in targets:
-            self._update_indexes(table, row, row_id, insert=False)
-            heap.delete(row_id)
+            self._update_indexes(table, row, row_id, insert=False)#insert=False 表示删除索引条目
+            heap.delete(row_id)#按页号和槽号删除
             table.row_count = max(0, table.row_count - 1)
         return ExecutionResult(
             affected_rows=len(targets), message=f"DELETE {len(targets)}"

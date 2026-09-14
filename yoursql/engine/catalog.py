@@ -88,22 +88,24 @@ class IndexMetadata:
 
 
 @dataclass
+# HOW: 表元数据保存结构、页号列表和行数；实际用户记录在 HEAP 页中。
 class TableMetadata:
     """目录中的表定义、数据页和行数统计。"""
 
-    table_id: TableId
-    name: str
-    schema: Schema
-    first_page_id: PageId | None = None
-    page_ids: list[PageId] = field(default_factory=list)
-    row_count: int = 0
-    indexes: list[str] = field(default_factory=list)
-    system: bool = False
+    table_id: TableId#数据库内部给表分配的编号
+    name: str#表名
+    schema: Schema#完整列定义
+    first_page_id: PageId | None = None#第一个数据页号
+    page_ids: list[PageId] = field(default_factory=list)#所有数据页号,数据库怎样知道数据在哪里
+    row_count: int = 0#维护的记录数量
+    indexes: list[str] = field(default_factory=list)#与这张表关联的索引名称
+    system: bool = False#是否为系统表
 
     @property
     def stats(self) -> TableStats:
         return TableStats(self.row_count, len(self.page_ids))
 
+    # HOW: 表对象转为字典供目录序列化，实际写盘在 Database._persist_catalog。
     def to_dict(self, *, compact_system: bool = False) -> dict[str, object]:
         result: dict[str, object] = {
             "table_id": int(self.table_id),
@@ -123,6 +125,7 @@ class TableMetadata:
         return result
 
     @classmethod
+    # HOW: 从字典恢复列定义和页号列表，不在这里读取用户记录。
     def from_dict(cls, value: Mapping[str, object]) -> "TableMetadata":
         raw_columns = value.get("columns")
         if raw_columns is None and bool(value.get("system", False)):
@@ -300,6 +303,7 @@ class Catalog:
         if any(item.table_id == selected for item in self._tables.values()):
             raise CatalogError(f"表 ID {int(selected)} 已存在")
         self._next_table_id = max(self._next_table_id, int(selected) + 1)
+        # HOW: 建表登记内存元数据，用户数据页按插入需要分配。
         table = TableMetadata(selected, name, schema, system=system)
         self._tables[key] = table
         return table

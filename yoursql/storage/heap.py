@@ -1,5 +1,5 @@
 """基于槽式页的变长记录堆表。"""
-
+#将记录写入槽式页的空槽位，扫描更新删除记录
 from __future__ import annotations
 
 import json
@@ -33,6 +33,7 @@ class TableHeap:
         return self.buffer_pool.disk.page_size
 
     @staticmethod
+    # HOW: 字段元组编码为 JSON 数组的 UTF-8 字节，供槽式页保存。
     def _encode(row: tuple[object, ...]) -> bytes:
         return json.dumps(list(row), ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
@@ -55,9 +56,11 @@ class TableHeap:
         finally:
             self.buffer_pool.unpin(page_id)
 
+    # HOW: 修改后的页面放回缓冲池并标脏，标脏不等于已经落盘。
     def _write_slotted(self, slotted: SlottedPage) -> None:
         self.buffer_pool.put_page(slotted.to_page(), dirty=True)
 
+    # HOW: 输入已校验的字段值，返回页号和槽号组成的 RowId，与用户 id 列不同。
     def insert(self, row: tuple[object, ...]) -> RowId:
         encoded = self._encode(row)
         # HOW：新记录优先尝试尾页，避免大表插入时逐行扫描所有已满页。
@@ -149,6 +152,7 @@ class TableHeap:
         slotted.update(row_id.slot_id, self._encode(row))
         self._write_slotted(slotted)
 
+    # HOW: 按物理地址清除槽位，保留表及页列表；索引维护由上层负责。
     def delete(self, row_id: RowId) -> bool:
         page_id = int(row_id.page_id)
         if page_id not in self.page_ids:
@@ -160,6 +164,7 @@ class TableHeap:
         self._write_slotted(slotted)
         return True
 
+    # HOW: 按页号列表遍历有效槽位，逐条产生记录地址和解码后的字段值。
     def scan(self) -> Iterator[tuple[RowId, tuple[object, ...]]]:
         for page_id in tuple(self.page_ids):
             slotted = self._read_slotted(page_id)

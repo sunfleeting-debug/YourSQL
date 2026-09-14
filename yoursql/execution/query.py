@@ -165,6 +165,7 @@ class QueryExecutionMixin:
         plan: _PlanNodeLike | None = None,
         allow_system_tables: bool = False,
     ) -> ExecutionResult:
+        # HOW：查询入口组织记录流，再处理聚合、投影、去重、排序和分页，最后返回结果。
         trace = current_trace.get()
         if trace is not None:
             trace.check()
@@ -191,7 +192,7 @@ class QueryExecutionMixin:
             )
         before = self.buffer_pool.stats()
         # HOW：列名先按折叠前的语句计算，避免 `SELECT 1 + 2` 这类表达式的输出名随折叠改变。
-        names = list(output_columns)
+        names = list(output_columns)#开始时先确定结果列名：
         if not names:
             names = self._output_names(statement)
         statement = self._fold_statement(statement)
@@ -205,7 +206,7 @@ class QueryExecutionMixin:
             for item in iterable:
                 scanned += 1
                 yield item
-
+        #请下层提供这次查询需要处理的记录，我再对这些记录计算输出内容。
         contexts: Iterable[dict[str, object]] = _count(
             self._iter_select_contexts(
                 statement, plan=plan, allow_system_tables=allow_system_tables
@@ -276,6 +277,7 @@ class QueryExecutionMixin:
                     continue
                 if evaluator is None:
                     raise ExecutionError("非 Star 投影缺少表达式求值器")
+                # HOW：计算当前行的 SELECT 表达式，例如 name 或 age+1，不修改表中的原值。
                 value = evaluator(context)
                 values.append(value)
                 if item.alias:
@@ -356,7 +358,8 @@ class QueryExecutionMixin:
         )
 
     # ----- 扫描与连接上下文 -----
-    def _iter_select_contexts(
+    # HOW：决定 WHERE 的执行位置；单表可以先过滤再创建完整上下文，覆盖索引可直接供值。
+    def _iter_select_contexts(#决定记录怎样产生、条件在哪里判断
         self,
         statement: Select,
         *,
@@ -1061,7 +1064,8 @@ class QueryExecutionMixin:
             predicate = BinaryOp(predicate, "AND", extra)
         return self._compile_expr(self._fold_constants(predicate)), frozenset(needed)
 
-    def _scan_contexts(
+    # HOW：从目录取得表和堆，根据访问路径读取记录，建立列名到字段值的查询上下文。
+    def _scan_contexts(#找符合条件的记录
         self,
         reference: TableRef,
         predicate: Expr | None,
@@ -1145,6 +1149,7 @@ class QueryExecutionMixin:
                 }
             )
         if candidates is None:
+            # HOW：没有索引候选集才全表扫描；空候选集表示无候选记录，不会回退全表扫描。
             rows = heap.scan()
         else:
             rows = ((row_id, heap.read(row_id)) for row_id in candidates)
