@@ -1,3 +1,4 @@
+/* —— 应用壳层与连接状态 —— */
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -83,6 +84,8 @@
 .workbench.left-collapsed.right-collapsed {
   grid-template-columns: 1fr;
 }
+
+/* —— 数据库目录与历史侧栏 —— */
 .sidebar {
   background: var(--side);
   border-right: 1px solid var(--border);
@@ -310,6 +313,8 @@
   color: #96a2b0;
   margin: 8px 16px;
 }
+
+/* —— SQL 标签、编辑器与结果区 —— */
 .main-workspace {
   display: flex;
   flex-direction: column;
@@ -907,6 +912,8 @@
 .pipeline-caption {
   display: none;
 }
+
+/* —— 底部状态栏与存储基础布局 —— */
 .app-status {
   height: 28px;
   min-height: 28px;

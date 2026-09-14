@@ -1,12 +1,14 @@
+/** 存储检查工作区：页面地图、缓存、索引和页详情。 */
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, WheelEvent } from 'react'
 import { ArrowLeft, ChevronLeft, ChevronRight, HardDrive, List, ListTree, LockKeyhole, Network, RefreshCw, Settings2, Table2, X } from 'lucide-react'
-import { api, ApiError, errorMessage } from '../api'
-import { pageTileAction } from '../storage-selection'
-import { pageMapClassName, pageTileClassName } from '../view-classes'
+import { api, ApiError, errorMessage } from '../../api'
+import { pageTileAction } from '../../storage-selection'
+import { pageMapClassName, pageTileClassName } from '../../view-classes'
+import type { JsonObject, JsonValue } from '../../types/common'
+import type { IndexNode, IndexSnapshot } from '../../types/catalog'
 import type {
-  IndexNode,
-  IndexSnapshot,
   PageHeader,
   RawPayload,
   ReplacementPolicy,
@@ -16,89 +18,29 @@ import type {
   StoragePageDetail,
   StoragePolicyChange,
   StorageSlot,
-  StorageSnapshot,
-  TableMeta
-} from '../types'
-import JsonTree from './JsonTree'
+  StorageSnapshot
+} from '../../types/storage'
+import { PAGE_TYPE_LABELS, PAGE_TYPE_LEGEND, STORAGE_TAB_OPTIONS, loadStorageSnapshot, pageOccupancy, rawValue, slotRecordLoaded } from './model'
+import type { InspectableStorageKind, PageUsageVisual, StoragePanelProps, StorageSelection, StorageTab } from './model'
+import JsonTree from '../query/JsonTree'
 import PageGrid, { PageGridSelectionDetail } from './PageGrid'
 import type { PageGridSelection } from './PageGrid'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
 
-interface Props {
-  fullMode?: boolean
-  onExit?: () => void
-  selectedTable?: TableMeta | null
-  onSelectTable?: (tableName: string) => void
-  active?: boolean
-  refreshToken?: number
-}
-const STORAGE_PAGE_BATCH = 500
-const pageTypeLabels: Record<string, string> = {
-  superblock: '数据库元数据',
-  catalog: '目录与权限',
-  heap: '表记录与槽位',
-  index: 'B+Tree 索引页',
-  free: '可复用空闲页'
-}
-const pageTypeLegend = [
-  { type: 'superblock', label: '元数据' },
-  { type: 'catalog', label: '目录' },
-  { type: 'heap', label: '表记录' },
-  { type: 'index', label: '索引' },
-  { type: 'free', label: '空闲' }
-]
+type StorageDetail = StoragePageDetail | IndexSnapshot
 
-interface SnapshotProgress {
-  loaded: number
-  total: number
-  snapshot: StorageSnapshot
+// WHY：页详情和索引详情共享同一块展示状态，但字段集合不同；联合类型让分支必须先说明当前详情种类。
+function isPageDetail(value: StorageDetail): value is StoragePageDetail {
+  return 'page_id' in value
 }
 
-type PageUsageVisual = 'color' | 'fill'
-
-/** 分批补齐页头；fields=map 只取画图所需字段，表/索引标签在选中页按需获取。 */
-async function loadStorageSnapshot(onProgress?: (progress: SnapshotProgress) => void): Promise<StorageSnapshot> {
-  const first = await api<StorageSnapshot>(`/api/storage?offset=0&limit=${STORAGE_PAGE_BATCH}&fields=map`)
-  const pages = [...first.pages]
-  const total = Math.max(first.total, pages.length)
-  const publish = () =>
-    onProgress?.({
-      loaded: pages.length,
-      total,
-      snapshot: { ...first, pages: [...pages], offset: 0, limit: pages.length }
-    })
-  publish()
-  if (pages.length >= total) return first
-  let nextOffset = pages.length
-  while (nextOffset < total) {
-    const chunk = await api<StorageSnapshot>(`/api/storage?offset=${nextOffset}&limit=${STORAGE_PAGE_BATCH}&fields=map`)
-    if (chunk.pages.length === 0) throw new Error(`页面总览只加载了 ${pages.length} / ${first.total} 页，服务端未返回后续页。`)
-    pages.push(...chunk.pages)
-    nextOffset = pages.length
-    publish()
-  }
-  return { ...first, pages, offset: 0, limit: pages.length }
+function isIndexDetail(value: StorageDetail): value is IndexSnapshot {
+  return 'entries' in value
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function rawValue(value: unknown): RawPayload | null {
-  if (!isRecord(value) || typeof value.encoding !== 'string' || typeof value.hex !== 'string' || typeof value.base64 !== 'string') return null
-  return value as unknown as RawPayload
-}
-
-function slotRecordLoaded(slot: StorageSlot): boolean {
-  return slot.deleted || typeof slot.storage_encoding === 'string'
-}
-
-// HOW：页块颜色只表达空间密度，保留 page type 的色相作为第二层语义。
-function pageOccupancy(page: PageHeader): { ratio: number; freeRatio: number } {
-  const capacity = Math.max(1, page.page_size)
-  const freeSpace = Math.max(0, Math.min(capacity, page.logical_free_space ?? page.free_space))
-  const freeRatio = freeSpace / capacity
-  return { ratio: 1 - freeRatio, freeRatio }
+function jsonDetailValue(detail: StorageDetail, omitPagePayload: boolean): JsonObject {
+  const entries = Object.entries(detail).filter(([key]) => !omitPagePayload || !['raw_payload', 'raw_page', 'slots'].includes(key))
+  return Object.fromEntries(entries) as JsonObject
 }
 
 function PageData({ detail }: { detail: StoragePageDetail }) {
@@ -205,7 +147,7 @@ function PagePayloadWorkbench({
   onOpenIndex
 }: {
   detail: StoragePageDetail
-  jsonDetail: Record<string, unknown> | null
+  jsonDetail: JsonObject | null
   raw: RawPayload | null
   onSelectTable?: (tableName: string) => void
   onOpenIndex?: (indexName: string) => void
@@ -254,7 +196,7 @@ function RawPreview({ payload, title = '原始 payload 预览', pageWide = false
   )
 }
 
-function indexKey(value: unknown[] | null): string {
+function indexKey(value: JsonValue[] | null): string {
   return value === null ? '—' : JSON.stringify(value)
 }
 
@@ -704,7 +646,7 @@ function IndexScreen({
   onPage: (pageId: number) => void
   onNavigate: (offset: number) => void
   busy: boolean
-  jsonDetail: Record<string, unknown> | null
+  jsonDetail: JsonObject | null
   raw: RawPayload | null
   headingRef: { current: HTMLHeadingElement | null }
 }) {
@@ -747,7 +689,14 @@ function IndexScreen({
   )
 }
 
-export default function StoragePanel({ fullMode = false, onExit, selectedTable = null, onSelectTable, active = true, refreshToken = 0 }: Props) {
+export default function StoragePanel({
+  fullMode = false,
+  onExit,
+  selectedTable = null,
+  onSelectTable,
+  active = true,
+  refreshToken = 0
+}: StoragePanelProps) {
   // 快照、缓存与刷新忙态
   const [snapshot, setSnapshot] = useState<StorageSnapshot | null>(null)
   const [cacheSnapshot, setCacheSnapshot] = useState<StorageCacheSnapshot | null>(null)
@@ -765,15 +714,15 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
   const [detailLoading, setDetailLoading] = useState(false)
 
   // 页签与地图显示选项
-  const [tab, setTab] = useState('pages')
+  const [tab, setTab] = useState<StorageTab>('pages')
   const [cacheFocus, setCacheFocus] = useState(false)
   const [pageUsageVisual, setPageUsageVisual] = useState<PageUsageVisual>('color')
 
   // 选中对象与详情：选中页、选中块、索引页联动
-  const [detail, setDetail] = useState<Record<string, unknown> | null>(null)
+  const [detail, setDetail] = useState<StorageDetail | null>(null)
   const [detailTitle, setDetailTitle] = useState('')
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null)
-  const [selected, setSelected] = useState<{ kind: 'pages' | 'indexes'; value: string } | null>(null)
+  const [selected, setSelected] = useState<StorageSelection | null>(null)
   const [detailOffset, setDetailOffset] = useState(0)
   const [detailTotal, setDetailTotal] = useState(0)
   const [cellSelection, setCellSelection] = useState<PageGridSelection | null>(null)
@@ -907,7 +856,7 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
       try {
         const data = await api<StoragePageDetail>(`/api/storage/pages/${encodeURIComponent(pageId)}?offset=${offset}&limit=40`)
         if (requestId !== detailRequestRef.current) return
-        setDetail(data as unknown as Record<string, unknown>)
+        setDetail(data)
         setSelected({ kind: 'pages', value: pageId })
         setSelectedPageId(pageId)
         setDetailOffset(offset)
@@ -959,7 +908,7 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
       if (requestId === changeRequestRef.current) setIncrementalBusy(false)
     }
   }, [refreshSnapshot, snapshot])
-  async function inspect(kind: 'pages' | 'indexes', value: string, start = 0) {
+  async function inspect(kind: InspectableStorageKind, value: string, start = 0) {
     const requestId = ++detailRequestRef.current
     setDetailBusy(true)
     setDetailLoading(true)
@@ -976,13 +925,13 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
       setCellSelection(null)
     }
     try {
-      const data = await api<Record<string, unknown>>(`/api/storage/${kind}/${encodeURIComponent(value)}?offset=${start}&limit=40`)
+      const data = await api<StorageDetail>(`/api/storage/${kind}/${encodeURIComponent(value)}?offset=${start}&limit=40`)
       if (requestId !== detailRequestRef.current) return
       setDetail(data)
       setSelected({ kind, value })
       if (kind === 'pages') setSelectedPageId(value)
       setDetailOffset(start)
-      setDetailTotal(Number(data.total_slots ?? data.total ?? 0))
+      setDetailTotal(Number(isPageDetail(data) ? (data.total_slots ?? 0) : data.total))
       setDetailTitle(kind === 'pages' ? '' : `索引 ${value}`)
     } catch (error) {
       if (requestId === detailRequestRef.current) setError(errorMessage(error))
@@ -1026,7 +975,7 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
     if (pageTileAction(selectedPageId, pageId, pageDetail !== null) === 'noop') return
     void inspect('pages', pageId)
   }
-  function selectTab(value: string) {
+  function selectTab(value: StorageTab) {
     setTab(value)
     setDetail(null)
     setSelected(null)
@@ -1038,8 +987,8 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
     if (value === 'buffer') void refreshCache()
     if (value === 'indexes') void refreshIndexCatalog()
   }
-  const pageDetail = selected?.kind === 'pages' && detail ? (detail as unknown as StoragePageDetail) : null
-  const indexDetail = selected?.kind === 'indexes' && detail ? (detail as unknown as IndexSnapshot) : null
+  const pageDetail = selected?.kind === 'pages' && detail && isPageDetail(detail) ? detail : null
+  const indexDetail = selected?.kind === 'indexes' && detail && isIndexDetail(detail) ? detail : null
   const handleCellDetail = useCallback(
     (selection: PageGridSelection | null) => {
       const requestId = ++slotDetailRequestRef.current
@@ -1106,11 +1055,8 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [detail, detailLoading, selected])
-  const raw = detail ? rawValue(detail.raw_payload) : null
-  const jsonDetail =
-    detail && pageDetail
-      ? Object.fromEntries(Object.entries(detail).filter(([key]) => key !== 'raw_payload' && key !== 'raw_page' && key !== 'slots'))
-      : detail
+  const raw = pageDetail ? rawValue(pageDetail.raw_payload) : null
+  const jsonDetail = detail ? jsonDetailValue(detail, pageDetail !== null) : null
   const currentCache = cacheSnapshot?.buffer_pool ?? snapshot?.buffer_pool
   const evictionOrder = currentCache?.eviction_order ?? []
   const evictionRankByPageId = new Map(evictionOrder.map((pageId, index) => [pageId, index + 1] as const))
@@ -1122,7 +1068,7 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
     const rightRank = evictionRankByPageId.get(right.page_id) ?? Number.MAX_SAFE_INTEGER
     return leftRank - rightRank || left.page_id - right.page_id
   })
-  const visiblePageTypes = pageTypeLegend.filter(item => snapshot?.pages.some(page => page.type === item.type))
+  const visiblePageTypes = PAGE_TYPE_LEGEND.filter(item => snapshot?.pages.some(page => page.type === item.type))
   const usageFill = pageUsageVisual === 'fill'
   const linkedDataPageIds = new Set(selectedTable?.page_ids.map(pageId => Number(pageId)) ?? [])
   const linkedIndexRootIds = new Set(
@@ -1327,11 +1273,7 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
                     </div>
                   )}
                   <div className="storage-tabs">
-                    {[
-                      ['pages', '页面'],
-                      ['buffer', '缓存'],
-                      ['indexes', '索引']
-                    ].map(([value, label]) => (
+                    {STORAGE_TAB_OPTIONS.map(([value, label]) => (
                       <button key={value} className={tab === value ? 'active' : ''} onClick={() => selectTab(value)}>
                         {label}
                       </button>
@@ -1418,7 +1360,7 @@ export default function StoragePanel({ fullMode = false, onExit, selectedTable =
                           // HOW：tooltip 拼接拆成常量，避免单行超出 150 字符。
                           const cacheText = cached ? ` · 缓存${cacheOrderText}` : ''
                           const linkText = selectedTable && linked ? ` · ${linkedIndexPage ? (indexRoot ? '索引根页' : '索引页') : '关联表'}` : ''
-                          const pageText = `#${page.page_id} · ${pageTypeLabels[page.type] ?? page.type}`
+                          const pageText = `#${page.page_id} · ${PAGE_TYPE_LABELS[page.type] ?? page.type}`
                           const usageText = `${used} B 已用 · ${page.free_space} B 空闲`
                           const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}`
                           return (

@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { pageCellClassName, pageCellSegmentClassName, pageMapClassName, pageTileClassName, workbenchClassName } from './view-classes'
+import {
+  pageCellClassName,
+  pageCellSegmentClassName,
+  pageMapClassName,
+  pageTileClassName,
+  pipelineLaunchClassName,
+  pipelineWorkspaceClassName,
+  queryTabClassName,
+  statusDotClassName,
+  workbenchClassName
+} from './view-classes'
 
 /** HOW：参照实现直接抄自重构前的模板字符串，用于逐例校验类名 token 完全一致。 */
 const tokens = (value: string) => value.split(/\s+/).filter(Boolean)
@@ -28,6 +38,13 @@ const referenceWorkbench = (options: Parameters<typeof workbenchClassName>[0]) =
   `workbench ${options.leftOpen ? '' : 'left-collapsed'} ${options.storage ? 'storage-active' : ''} ${options.pipelineOpen ? 'pipeline-open' : ''}`
 
 describe('视图类名纯函数', () => {
+  it('集中处理工作区状态类名', () => {
+    expect(queryTabClassName({ active: true, running: true })).toBe('query-tab active running')
+    expect(pipelineLaunchClassName(false)).toBe('pipeline-launch subtle')
+    expect(pipelineWorkspaceClassName(true)).toBe('pipeline-workspace is-resizing')
+    expect(statusDotClassName(false)).toBe('status-dot offline')
+  })
+
   it('页面单元格在所有开关组合下与模板串等价', () => {
     for (const kind of ['header', 'record', 'free']) {
       for (const masked of [true, false]) {

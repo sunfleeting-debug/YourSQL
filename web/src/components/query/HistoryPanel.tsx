@@ -1,7 +1,9 @@
+/** 历史执行记录的内嵌列表。 */
+
 import { useState } from 'react'
 import { ChevronLeft, ChevronRight, Clock3, RefreshCw } from 'lucide-react'
-import { elapsed } from '../api'
-import type { History } from '../types'
+import { elapsed } from '../../api'
+import type { History } from '../../types/query'
 
 export default function HistoryPanel({ history, refresh, inspect }: { history: History | null; refresh: () => void; inspect: (id: string) => void }) {
   const [page, setPage] = useState(0)

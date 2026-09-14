@@ -1,34 +1,39 @@
+/** EXPLAIN 结果摘要与执行计划画布。 */
+
 import StageCanvas from './StageCanvas'
-import type { PlanEstimate, QueryResult } from '../types'
+import type { JsonObject, JsonValue } from '../../types/common'
+import type { PlanEstimate, QueryResult } from '../../types/query'
+
+type PlanValue = JsonValue | undefined
 
 interface PlanRecord {
-  node?: unknown
-  kind?: unknown
-  properties?: unknown
-  children?: unknown
+  node?: PlanValue
+  kind?: PlanValue
+  properties?: PlanValue
+  children?: PlanValue
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: PlanValue): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function recordValue(value: unknown): Record<string, unknown> {
+function recordValue(value: PlanValue): JsonObject {
   return isRecord(value) ? value : {}
 }
 
-function unwrapExplainPlan(value: unknown): unknown {
+function unwrapExplainPlan(value: PlanValue): PlanValue {
   const plan = recordValue(value)
   const node = typeof plan.node === 'string' ? plan.node : typeof plan.kind === 'string' ? plan.kind : ''
   if (node === 'Explain' && Array.isArray(plan.children) && plan.children.length > 0) return plan.children[0]
   return value
 }
 
-function optimizedPlan(result: QueryResult): unknown {
+function optimizedPlan(result: QueryResult): PlanValue {
   const stage = result.stages.find(item => item.name === 'optimized_plan' && item.data !== null && item.data !== undefined)
   return unwrapExplainPlan(stage?.data ?? result.plan)
 }
 
-function planNodes(value: unknown): PlanRecord[] {
+function planNodes(value: PlanValue): PlanRecord[] {
   const plan = recordValue(value) as PlanRecord
   const node = typeof plan.node === 'string' || typeof plan.kind === 'string' ? [plan] : []
   const children = Array.isArray(plan.children) ? plan.children.flatMap(planNodes) : []
@@ -39,7 +44,7 @@ function planKind(node: PlanRecord): string {
   return typeof node.node === 'string' ? node.node : typeof node.kind === 'string' ? node.kind : 'Plan'
 }
 
-function planSummary(result: QueryResult, plan: unknown): { count: string; access: string; raw: string; estimate: PlanEstimate | null } {
+function planSummary(result: QueryResult, plan: PlanValue): { count: string; access: string; raw: string; estimate: PlanEstimate | null } {
   const nodes = planNodes(plan)
   const scans = nodes.filter(node => planKind(node).endsWith('Scan'))
   const scan = scans[0]

@@ -1,3 +1,5 @@
+/** CodeMirror SQL 编辑器及其诊断、补全和快捷键绑定。 */
+
 import { useEffect, useRef } from 'react'
 import { basicSetup } from 'codemirror'
 import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state'
@@ -8,11 +10,12 @@ import { acceptCompletion, autocompletion, startCompletion, type CompletionConte
 import { indentSelection } from '@codemirror/commands'
 import { lintGutter, linter, setDiagnostics, setDiagnosticsEffect, type Diagnostic } from '@codemirror/lint'
 import { tags } from '@lezer/highlight'
-import { api } from '../api'
-import { currentStatement, positionOffset, quoteName } from '../sql'
-import type { DBError, Dialect, TableMeta } from '../types'
+import { api } from '../../api'
+import { currentStatement, positionOffset, quoteName } from '../../sql'
+import type { DBError } from '../../types/common'
+import type { Dialect, TableMeta } from '../../types/catalog'
 
-interface Props {
+export interface SqlEditorProps {
   value: string
   onChange: (value: string) => void
   tables: TableMeta[]
@@ -121,7 +124,7 @@ const activeStatement = StateField.define({
   provide: field => EditorView.decorations.from(field)
 })
 
-export default function SqlEditor(props: Props) {
+export default function SqlEditor(props: SqlEditorProps) {
   const container = useRef<HTMLDivElement>(null)
   const live = useRef(props)
   live.current = props

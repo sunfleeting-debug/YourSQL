@@ -1,11 +1,14 @@
+/** 查询结果、分页结果和结果级执行计划。 */
+
 import { useEffect, useState, useTransition } from 'react'
 import { CheckCircle2, ChevronLeft, ChevronRight, Clipboard, Clock3, Download, FileJson, Play, RefreshCw, Table2, TriangleAlert } from 'lucide-react'
-import { api, elapsed, errorMessage } from '../api'
-import { csv } from '../sql'
-import type { History, QueryResult, QueryTask, Stage } from '../types'
+import { api, elapsed, errorMessage } from '../../api'
+import { csv } from '../../sql'
+import type { JsonValue } from '../../types/common'
+import type { History, QueryResult, QueryTask, QueryTaskStatus, ResultViewMode, Stage } from '../../types/query'
 import ExplainResult from './ExplainResult'
 
-interface Props {
+export interface ResultPanelProps {
   task: QueryTask | null
   index: number
   onIndex: (index: number) => void
@@ -15,9 +18,25 @@ interface Props {
   onPipelineStages: (stages: Stage[]) => void
 }
 
-export default function ResultPanel({ task, index, onIndex, notify, history, onHistory, onPipelineStages }: Props) {
+const RESULT_VIEW_OPTIONS: Array<readonly [ResultViewMode, string]> = [
+  ['table', '结果'],
+  ['messages', '消息'],
+  ['history', '历史'],
+  ['json', 'JSON']
+]
+
+const TASK_STATUS_LABELS: Record<QueryTaskStatus, string> = {
+  success: '执行成功',
+  error: '执行失败',
+  running: '执行中',
+  queued: '排队中',
+  cancelled: '已取消',
+  timeout: '已超时'
+}
+
+export default function ResultPanel({ task, index, onIndex, notify, history, onHistory, onPipelineStages }: ResultPanelProps) {
   const [result, setResult] = useState<QueryResult | null>(null)
-  const [mode, setMode] = useState('table')
+  const [mode, setMode] = useState<ResultViewMode>('table')
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(100)
   const [loading, setLoading] = useState(false)
@@ -51,7 +70,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
     return () => controller.abort()
   }, [id, index, offset, pageSize, resultCount, revision])
 
-  function switchMode(nextMode: string) {
+  function switchMode(nextMode: ResultViewMode) {
     if (nextMode === mode || isModePending) return
     startModeTransition(() => setMode(nextMode))
   }
@@ -70,7 +89,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
     if (!result || !id) return
     setExporting(true)
     try {
-      const rows: unknown[][] = []
+      const rows: JsonValue[][] = []
       for (let from = 0; from < result.retained_rows; from += 500) {
         const part = await api<QueryResult>(`/api/queries/${id}/results/${index}?offset=${from}&limit=500`)
         rows.push(...part.rows)
@@ -99,12 +118,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
     <section className="results" aria-label="执行结果" aria-busy={loading || isModePending}>
       <div className="result-heading">
         <div className="tab-strip">
-          {[
-            ['table', '结果'],
-            ['messages', '消息'],
-            ['history', '历史'],
-            ['json', 'JSON']
-          ].map(([value, label]) => (
+          {RESULT_VIEW_OPTIONS.map(([value, label]) => (
             <button key={value} className={mode === value ? 'active' : ''} disabled={isModePending} onClick={() => switchMode(value)}>
               {value === 'history' && <Clock3 size={12} />} {label}
               {value === 'history' && history && <span className="tab-badge">{history.total}</span>}
@@ -120,18 +134,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
             ) : (
               <span className="status-dot" />
             )}
-            {
-              (
-                {
-                  success: '执行成功',
-                  error: '执行失败',
-                  running: '执行中',
-                  queued: '排队中',
-                  cancelled: '已取消',
-                  timeout: '已超时'
-                } as Record<string, string>
-              )[task.status]
-            }
+            {TASK_STATUS_LABELS[task.status]}
             <small>{elapsed(task.elapsed_ms)}</small>
           </span>
         )}

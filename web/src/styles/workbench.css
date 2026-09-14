@@ -1,4 +1,6 @@
 /* 工作台模式切换、结果内流水线和存储页面检查的增量样式。 */
+
+/* —— 工作区模式与结果流水线基础 —— */
 .app-status-hint {
   min-width: 0;
   overflow: hidden;
@@ -26,20 +28,8 @@
   color: #6f8294;
   font-size: 10px;
 }
-.workbench,
-.workbench.left-collapsed,
-.workbench.right-collapsed,
-.workbench.left-collapsed.right-collapsed {
-  grid-template-columns: 238px minmax(480px, 1fr) !important;
-}
-.workbench.left-collapsed {
-  grid-template-columns: minmax(480px, 1fr) !important;
-}
 .workbench.storage-active .main-workspace {
   background: #f7fafb;
-}
-.inspector {
-  display: none !important;
 }
 .mode-switch {
   display: flex;
@@ -249,6 +239,8 @@
   fill: #7e8f9d;
   font-family: 'Cascadia Code', Consolas, monospace;
 }
+
+/* —— 存储检查全屏视图与页面地图 —— */
 .storage-panel.full-storage {
   padding: 0 26px 26px;
   overflow: auto;
@@ -7096,4 +7088,16 @@
 .compact-table th:first-child,
 .compact-table td:first-child {
   white-space: nowrap;
+}
+
+/* HOW：详情栏保持诊断内容的最低可读宽度，把多出来的空间优先留给页面地图。 */
+@media (min-width: 921px) {
+  .storage-mode-layout.has-rail {
+    grid-template-columns: minmax(0, 1fr) minmax(330px, 36%);
+  }
+}
+@media (max-width: 920px) and (min-width: 701px) {
+  .storage-mode-layout.has-rail {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 40%);
+  }
 }

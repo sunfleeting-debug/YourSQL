@@ -1,9 +1,14 @@
+/** 存储页的字节/区域可视化与选中详情。 */
+
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Grid3X3 } from 'lucide-react'
-import type { RawPayload, StorageLayout, StoragePageDetail, StorageSlot } from '../types'
-import { pageCellClassName, pageCellSegmentClassName } from '../view-classes'
+import type { JsonObject, JsonValue } from '../../types/common'
+import type { RawPayload, StorageLayout, StoragePageDetail, StorageRegion, StorageSlot } from '../../types/storage'
+import { pageCellClassName, pageCellSegmentClassName } from '../../view-classes'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
+
+type PageGridValue = JsonValue | undefined
 
 export interface PageGridSelection {
   cellIndex: number
@@ -177,12 +182,6 @@ function rangeText(start: number, end: number): string {
   return `${start.toString(16).padStart(4, '0')}–${end.toString(16).padStart(4, '0')}`
 }
 
-function isRegion(value: unknown): value is { start: number; end: number; size: number; direction?: string } {
-  if (typeof value !== 'object' || value === null) return false
-  const region = value as Record<string, unknown>
-  return typeof region.start === 'number' && typeof region.end === 'number' && typeof region.size === 'number'
-}
-
 function makeCells(detail: StoragePageDetail): { cells: PageCell[]; slotWidth: number } {
   const { bytes, masked } = pageBytes(detail)
   const pageSize = Math.max(0, detail.page_size)
@@ -201,8 +200,7 @@ function makeCells(detail: StoragePageDetail): { cells: PageCell[]; slotWidth: n
     }
   }
 
-  const addRegion = (region: unknown, kind: CellKind, slotIds: number[] = []) => {
-    if (!isRegion(region)) return
+  const addRegion = (region: StorageRegion, kind: CellKind, slotIds: number[] = []) => {
     addRange(region.start, region.size, kind, slotIds)
   }
 
@@ -377,21 +375,21 @@ interface PageFactRaw {
   binary: string
 }
 
-function recordValue(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+function recordValue(value: PageGridValue): JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}
 }
 
-function textValue(value: unknown, fallback = '—'): string {
+function textValue(value: PageGridValue, fallback = '—'): string {
   if (typeof value === 'string' && value.length > 0) return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return fallback
 }
 
-function byteValue(value: unknown): string {
+function byteValue(value: PageGridValue): string {
   return typeof value === 'number' ? `${value.toLocaleString()} B` : '—'
 }
 
-function offsetValue(value: unknown): string {
+function offsetValue(value: PageGridValue): string {
   return typeof value === 'number' ? `0x${value.toString(16)}` : '—'
 }
 
@@ -588,10 +586,9 @@ function PageInnerHeaderByteMap({ detail }: { detail: StoragePageDetail }) {
   )
 }
 
-function regionValue(value: unknown): string {
-  const region = recordValue(value)
-  const start = typeof region.start === 'number' ? region.start : null
-  const end = typeof region.end === 'number' ? region.end : null
+function regionValue(region: StorageRegion | undefined): string {
+  const start = region?.start ?? null
+  const end = region?.end ?? null
   if (start === null || end === null || end <= start) return '—'
   return `${offsetValue(start)}–${offsetValue(end - 1)}`
 }
@@ -677,7 +674,7 @@ function structureFacts(detail: StoragePageDetail, focus: StructureFocus): PageF
     { label: '记录区范围', value: regionValue(record), code: true, raw: derivedFact('布局范围') },
     {
       label: '记录方向',
-      value: textValue(recordValue(record).direction === 'backward' ? '从页尾向前' : recordValue(record).direction),
+      value: textValue(record?.direction === 'backward' ? '从页尾向前' : record?.direction),
       raw: derivedFact('布局规则')
     }
   ]

@@ -76,3 +76,23 @@ export function pageMapClassName(options: { usageFill: boolean; cacheFocus: bool
 export function workbenchClassName(options: { leftOpen: boolean; storage: boolean; pipelineOpen: boolean }): string {
   return classNames('workbench', !options.leftOpen && 'left-collapsed', options.storage && 'storage-active', options.pipelineOpen && 'pipeline-open')
 }
+
+/** 查询标签：活动标签与正在执行的标签可以同时出现。 */
+export function queryTabClassName(options: { active: boolean; running: boolean }): string {
+  return classNames('query-tab', options.active && 'active', options.running && 'running')
+}
+
+/** 右侧流水线入口按钮。 */
+export function pipelineLaunchClassName(open: boolean): string {
+  return classNames('pipeline-launch', 'subtle', open && 'active')
+}
+
+/** 右侧流水线容器的拖拽状态。 */
+export function pipelineWorkspaceClassName(resizing: boolean): string {
+  return classNames('pipeline-workspace', resizing && 'is-resizing')
+}
+
+/** 在线/离线指示灯。 */
+export function statusDotClassName(online: boolean): string {
+  return classNames('status-dot', online ? 'online' : 'offline')
+}

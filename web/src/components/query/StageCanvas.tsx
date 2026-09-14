@@ -1,10 +1,15 @@
+/** 执行计划的 SVG 拓扑画布。 */
+
 import { useEffect, useId, useMemo, useState } from 'react'
 import { Minus, Plus, RotateCcw } from 'lucide-react'
+import type { JsonObject, JsonValue } from '../../types/common'
+
+type PlanValue = JsonValue | undefined
 
 interface PlanNode {
   id: string
   kind: string
-  properties: Record<string, unknown>
+  properties: JsonObject
   children: PlanNode[]
 }
 
@@ -29,11 +34,11 @@ const COLUMN_GAP = 20
 const ROW_GAP = 16
 const PADDING = 16
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: PlanValue): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function textValue(value: unknown): string {
+function textValue(value: PlanValue): string {
   if (value === undefined) return '—'
   if (value === null) return 'NULL'
   if (typeof value === 'string') return value
@@ -49,14 +54,14 @@ function clip(value: string, length: number): string {
   return value.length > length ? `${value.slice(0, length - 1)}…` : value
 }
 
-function compactParameter(value: unknown): string | null {
+function compactParameter(value: PlanValue): string | null {
   if (value === null || value === undefined) return '""'
   if (typeof value === 'string' && value.length <= 12) return JSON.stringify(value)
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return null
 }
 
-function formatLiteral(value: unknown): string {
+function formatLiteral(value: PlanValue): string {
   if (value === null) return 'NULL'
   if (typeof value === 'string') return JSON.stringify(value)
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
@@ -64,7 +69,7 @@ function formatLiteral(value: unknown): string {
   return textValue(value)
 }
 
-function formatExpression(value: unknown, depth = 0): string | null {
+function formatExpression(value: PlanValue, depth = 0): string | null {
   if (depth > 4 || value === null || value === undefined) return null
   if (!isRecord(value)) return formatLiteral(value)
   const node = typeof value.node === 'string' ? value.node : ''
@@ -112,7 +117,7 @@ function formatExpression(value: unknown, depth = 0): string | null {
   return null
 }
 
-function formatList(value: unknown, formatter = formatExpression): string | null {
+function formatList(value: PlanValue, formatter = formatExpression): string | null {
   if (!Array.isArray(value) || !value.length) return null
   const items = value.map(item => formatter(item)).filter((item): item is string => Boolean(item))
   return items.length ? items.join(', ') : null
@@ -163,9 +168,9 @@ function nodeWidth(node: PlanNode): number {
   return Math.min(NODE_MAX_WIDTH, Math.max(NODE_MIN_WIDTH, 20 + label.length * 5.6))
 }
 
-function readPlan(value: unknown): PlanNode | null {
+function readPlan(value: PlanValue): PlanNode | null {
   let serial = 0
-  const visit = (item: unknown): PlanNode | null => {
+  const visit = (item: PlanValue): PlanNode | null => {
     if (!isRecord(item)) return null
     const kind =
       typeof item.node === 'string' ? item.node : typeof item.kind === 'string' ? item.kind : typeof item.type === 'string' ? item.type : 'Plan'
@@ -216,7 +221,7 @@ function layoutPlan(root: PlanNode): PlanGraph {
 }
 
 /** 绘制算子输入关系，并在节点内保留一行可读参数；完整 properties 仍放在详情区。 */
-export default function StageCanvas({ value, title, variant = 'pipeline' }: { value: unknown; title: string; variant?: 'pipeline' | 'result' }) {
+export default function StageCanvas({ value, title, variant = 'pipeline' }: { value: PlanValue; title: string; variant?: 'pipeline' | 'result' }) {
   const [zoom, setZoom] = useState(1)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const markerId = `plan-arrow-${useId().replace(/:/g, '')}`

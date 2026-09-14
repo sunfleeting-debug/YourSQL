@@ -1,4 +1,9 @@
+/** 通用 JSON 值的可折叠查看器。 */
+
 import { useState } from 'react'
+import type { JsonValue } from '../../types/common'
+
+type JsonTreeValue = JsonValue | undefined
 
 /** 有界树视图，浏览器不根据数据推导任何计划或存储结构。 */
 export default function JsonTree({
@@ -7,7 +12,7 @@ export default function JsonTree({
   depth = 0,
   defaultExpandedDepth = 1
 }: {
-  value: unknown
+  value: JsonTreeValue
   name?: string
   depth?: number
   defaultExpandedDepth?: number

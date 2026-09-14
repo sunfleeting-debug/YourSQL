@@ -1,4 +1,9 @@
+/** AST 产物的可折叠树形查看器。 */
+
 import { useState } from 'react'
+import type { JsonObject, JsonValue } from '../../types/common'
+
+type AstValue = JsonValue | undefined
 
 interface AstItem {
   id: string
@@ -35,11 +40,11 @@ const fieldNames: Record<string, string> = {
   upper: '上界'
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: AstValue): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function textValue(value: unknown): string {
+function textValue(value: AstValue): string {
   if (value === null) return 'NULL'
   if (value === undefined) return '—'
   if (typeof value === 'string') return value
@@ -48,7 +53,7 @@ function textValue(value: unknown): string {
   return JSON.stringify(value) ?? '—'
 }
 
-function nodeTitle(item: Record<string, unknown>): { label: string; value?: string } {
+function nodeTitle(item: JsonObject): { label: string; value?: string } {
   const node = typeof item.node === 'string' ? item.node : ''
   if (node === 'Select') return { label: '查询 SELECT' }
   if (node === 'Insert') return { label: '插入 INSERT', value: typeof item.table === 'string' ? item.table : undefined }
@@ -73,7 +78,7 @@ function childLabel(key: string): string {
   return fieldNames[key] ?? key
 }
 
-function buildItem(value: unknown, key = 'root'): AstItem | null {
+function buildItem(value: AstValue, key = 'root'): AstItem | null {
   const id = `ast-${key}`
   if (Array.isArray(value)) {
     if (!value.length) return null
@@ -147,7 +152,7 @@ function Branch({ item, depth }: { item: AstItem; depth: number }) {
 }
 
 /** 面向 SQL 结构的 AST 树；字段改成语义标签，避免把原始 JSON 当作语法树展示。 */
-export default function AstTree({ value }: { value: unknown }) {
+export default function AstTree({ value }: { value: AstValue }) {
   const root = buildItem(value)
   return root ? (
     <div className="ast-tree" aria-label="AST 结构树">

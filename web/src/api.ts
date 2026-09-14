@@ -1,4 +1,6 @@
-import type { DBError } from './types'
+import type { DBError, JsonObject } from './types/common'
+
+export type ApiRequestBody = JsonObject
 
 export class ApiError extends Error {
   constructor(
@@ -10,7 +12,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, body?: object, signal?: AbortSignal): Promise<T> {
+export async function api<T>(path: string, body?: ApiRequestBody, signal?: AbortSignal): Promise<T> {
   let response: Response
   try {
     response = await fetch(path, {

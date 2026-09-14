@@ -1,3 +1,5 @@
+/** 页面地图的悬浮详情状态与提示层。 */
+
 import { useCallback, useState } from 'react'
 import type { FocusEvent, PointerEvent } from 'react'
 

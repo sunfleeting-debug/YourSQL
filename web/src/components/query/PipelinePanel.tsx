@@ -1,9 +1,14 @@
+/** 执行流水线：阶段列表、产物和计划对比。 */
+
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
-import type { DBError, Stage } from '../types'
-import { elapsed } from '../api'
+import type { DBError, JsonObject, JsonValue } from '../../types/common'
+import type { Stage, StageStatus } from '../../types/query'
+import { elapsed } from '../../api'
 import AstTree from './AstTree'
 import JsonTree from './JsonTree'
 import StageCanvas from './StageCanvas'
+
+type StageValue = JsonValue | undefined
 
 const names: Record<string, string> = {
   tokens: 'Token 流',
@@ -14,22 +19,29 @@ const names: Record<string, string> = {
 
 const groupDefinitions = [{ label: '编译器主流程', keys: ['tokens', 'ast', 'binding', 'logical_plan'] }]
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+const STAGE_STATUS_LABELS: Record<StageStatus, string> = {
+  success: '已完成',
+  error: '失败',
+  unsupported: '未接入',
+  partial: '部分支持'
+}
+
+function isRecord(value: StageValue): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function display(value: unknown): string {
+function display(value: StageValue): string {
   if (value === null) return 'NULL'
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return JSON.stringify(value)
 }
 
-function tokenRows(value: unknown): Record<string, unknown>[] {
+function tokenRows(value: StageValue): JsonObject[] {
   return Array.isArray(value) ? value.filter(isRecord) : []
 }
 
-function TokenTable({ value }: { value: unknown }) {
+function TokenTable({ value }: { value: StageValue }) {
   const rows = tokenRows(value)
   if (!rows.length) return <div className="stage-note">无可展示 Token</div>
   return (
@@ -71,7 +83,7 @@ function TokenTable({ value }: { value: unknown }) {
 
 function statusLabel(stage: Stage | undefined): string {
   if (!stage) return '未接入'
-  return ({ success: '已完成', error: '失败', unsupported: '未接入', partial: '部分支持' } as Record<string, string>)[stage.status] ?? stage.status
+  return STAGE_STATUS_LABELS[stage.status]
 }
 
 function optionLabel(name: string, stage: Stage | undefined): string {
@@ -79,11 +91,11 @@ function optionLabel(name: string, stage: Stage | undefined): string {
   return `${names[name] ?? name} · ${statusLabel(stage)}`
 }
 
-function recordValue(value: unknown): Record<string, unknown> {
+function recordValue(value: StageValue): JsonObject {
   return isRecord(value) ? value : {}
 }
 
-function semanticSummary(value: unknown): { statement: string; tables: string; output: string; binding: string } {
+function semanticSummary(value: StageValue): { statement: string; tables: string; output: string; binding: string } {
   const root = recordValue(value)
   const statement = recordValue(root.statement)
   const tables: string[] = []
@@ -105,7 +117,7 @@ function semanticSummary(value: unknown): { statement: string; tables: string; o
   }
 }
 
-function SemanticSummary({ value }: { value: unknown }) {
+function SemanticSummary({ value }: { value: StageValue }) {
   const summary = semanticSummary(value)
   return (
     <div className="semantic-summary">
@@ -156,7 +168,7 @@ function StageError({ error }: { error: DBError }) {
   )
 }
 
-function planOperators(value: unknown): { kind: string; table: string }[] {
+function planOperators(value: StageValue): { kind: string; table: string }[] {
   const item = recordValue(value)
   const properties = recordValue(item.properties)
   const current = typeof item.node === 'string' ? [{ kind: item.node, table: typeof properties.table === 'string' ? properties.table : '' }] : []
@@ -164,7 +176,7 @@ function planOperators(value: unknown): { kind: string; table: string }[] {
   return [...current, ...children]
 }
 
-function PlanDelta({ before, after }: { before: unknown; after: unknown }) {
+function PlanDelta({ before, after }: { before: StageValue; after: StageValue }) {
   const beforeScans = planOperators(before).filter(item => item.kind.endsWith('Scan'))
   const afterScans = planOperators(after).filter(item => item.kind.endsWith('Scan'))
   if (!beforeScans.length && !afterScans.length) return null
@@ -193,7 +205,7 @@ function PlanDelta({ before, after }: { before: unknown; after: unknown }) {
   )
 }
 
-function artifact(value: unknown, name: string): ReactElement {
+function artifact(value: StageValue, name: string): ReactElement {
   if (name === 'tokens') return <TokenTable value={value} />
   if (name === 'ast') return <AstTree value={value} />
   if (name === 'binding') return <SemanticSummary value={value} />
@@ -211,7 +223,7 @@ function PlanState({
   stage: Stage | undefined
   label: string
   subtitle: string
-  value: unknown
+  value: StageValue
   tone: 'before' | 'after'
 }) {
   const hasData = value !== null && value !== undefined && stage?.status !== 'unsupported'

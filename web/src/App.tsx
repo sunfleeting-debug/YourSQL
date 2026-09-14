@@ -1,85 +1,43 @@
-import { forwardRef, useCallback, useEffect, useRef, useState, useTransition } from 'react'
-import type { ChangeEvent, CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import type { EditorView } from '@codemirror/view'
-import {
-  AlignLeft,
-  Braces,
-  CheckCircle2,
-  CircleAlert,
-  Database,
-  FilePlus2,
-  FolderOpen,
-  HardDrive,
-  LogOut,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Play,
-  Plus,
-  RefreshCw,
-  ShieldCheck,
-  Square,
-  Trash2,
-  UserRound,
-  Workflow,
-  X
-} from 'lucide-react'
 import { api, ApiError, errorMessage, upload } from './api'
+import { DEFAULT_DATABASE_CONFIG, FIRST_QUERY_ID, INITIAL_SQL, createQueryTab } from './app/constants'
+import type { DatabaseCreateConfig, DatabaseDialogMode, QueryTabState, RunSource, ToastState, WorkspaceMode } from './app/types'
+import Login from './components/auth/Login'
+import { AppHeader, PermissionDialog, Toast } from './components/layout'
+import DatabasePickerDialog from './components/database/DatabasePickerDialog'
+import { siblingDatabasePath } from './components/database/utils'
+import { QueryWorkspace } from './components/query'
+import { SchemaBrowser } from './components/schema'
+import { StoragePanel } from './components/storage'
+import WorkbenchStatusBar from './components/layout/WorkbenchStatusBar'
 import { currentStatement, formatSQL } from './sql'
 import { workbenchClassName } from './view-classes'
-import type { DatabaseFile, DatabaseFiles, DatabaseSwitch, DBError, Dialect, History, Metadata, QueryTask, SessionInfo, Stage } from './types'
-import SqlEditor from './components/SqlEditor'
-import SchemaBrowser from './components/SchemaBrowser'
-import ResultPanel from './components/ResultPanel'
-import PipelinePanel from './components/PipelinePanel'
-import StoragePanel from './components/StoragePanel'
-
-const initialSQL = 'SHOW TABLES;\n\n-- 从左侧选择表，或在这里编写 SQL。\n'
-interface RunSource {
-  line: number
-  column: number
-  original: string
-}
-interface QueryTabState {
-  id: string
-  title: string
-  sql: string
-  cursor: number
-  selection: { from: number; to: number }
-  task: QueryTask | null
-  runs: QueryTask[]
-  resultIndex: number
-  executionError: DBError | null
-}
-
-function createQueryTab(id: string, title: string, sql = initialSQL): QueryTabState {
-  return {
-    id,
-    title,
-    sql,
-    cursor: 0,
-    selection: { from: 0, to: 0 },
-    task: null,
-    runs: [],
-    resultIndex: 0,
-    executionError: null
-  }
-}
+import type { DBError, SessionInfo } from './types/common'
+import type { DatabaseFiles, DatabaseSwitch, Dialect, Metadata } from './types/catalog'
+import type { History, QueryTask, Stage } from './types/query'
 
 export default function App() {
+  // 会话与全局连接状态
   const [session, setSession] = useState<SessionInfo | null>(null)
   const [booting, setBooting] = useState(true)
   const [online, setOnline] = useState(false)
   const [metadata, setMetadata] = useState<Metadata | null>(null)
   const [dialect, setDialect] = useState<Dialect | null>(null)
   const [history, setHistory] = useState<History | null>(null)
-  const [queryTabs, setQueryTabs] = useState<QueryTabState[]>(() => [createQueryTab('query-1', '查询 1')])
-  const [activeQueryId, setActiveQueryId] = useState('query-1')
+
+  // SQL 标签与当前工作区
+  const [queryTabs, setQueryTabs] = useState<QueryTabState[]>(() => [createQueryTab(FIRST_QUERY_ID, '查询 1')])
+  const [activeQueryId, setActiveQueryId] = useState(FIRST_QUERY_ID)
   const [leftOpen, setLeftOpen] = useState(true)
-  const [workspaceMode, setWorkspaceMode] = useState<'sql' | 'storage'>('sql')
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('sql')
   const [storageVisited, setStorageVisited] = useState(false)
   const [isModePending, startModeTransition] = useTransition()
   const [selectedTableName, setSelectedTableName] = useState<string | null>(null)
   const [selectedViewName, setSelectedViewName] = useState<string | null>(null)
+
+  // 查询执行与流水线
   const [metaBusy, setMetaBusy] = useState(false)
   const [metaError, setMetaError] = useState('')
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -89,28 +47,30 @@ export default function App() {
   const [pipelineOpen, setPipelineOpen] = useState(false)
   const [pipelineWidth, setPipelineWidth] = useState(500)
   const [pipelineResizing, setPipelineResizing] = useState(false)
-  const [toast, setToast] = useState<{ message: string; error: boolean } | null>(null)
+
+  // 数据库选择器与存储页配置
+  const [toast, setToast] = useState<ToastState | null>(null)
   const [pollError, setPollError] = useState('')
   const [databaseFiles, setDatabaseFiles] = useState<DatabaseFiles | null>(null)
   const [databasePickerBusy, setDatabasePickerBusy] = useState(false)
-  const [databaseDialogMode, setDatabaseDialogMode] = useState<'open' | 'create'>('open')
+  const [databaseDialogMode, setDatabaseDialogMode] = useState<DatabaseDialogMode>('open')
   const [openDatabasePath, setOpenDatabasePath] = useState('')
   const [createDatabasePath, setCreateDatabasePath] = useState('data/new_database.db')
-  const [createDatabaseConfig, setCreateDatabaseConfig] = useState({
-    page_size: 4096,
-    buffer_pool_size: 64,
-    replacement_policy: 'lru' as 'lru' | 'fifo'
-  })
+  const [createDatabaseConfig, setCreateDatabaseConfig] = useState<DatabaseCreateConfig>(DEFAULT_DATABASE_CONFIG)
   const [storageRefreshToken, setStorageRefreshToken] = useState(0)
   const [rowLimit, setRowLimit] = useState(1000)
   const [timeout, setTimeoutValue] = useState(15)
+
+  // 非渲染资源：编辑器、弹窗、请求来源和拖拽起点
   const editor = useRef<EditorView | null>(null)
   const permissionsDialog = useRef<HTMLDialogElement>(null)
   const databaseDialog = useRef<HTMLDialogElement>(null)
   const sources = useRef(new Map<string, RunSource>())
   const pipelineResizeStart = useRef<{ x: number; width: number } | null>(null)
+
+  // 从当前标签派生的视图数据
   const activeQuery = queryTabs.find(tab => tab.id === activeQueryId) ?? queryTabs[0]
-  const sql = activeQuery?.sql ?? initialSQL
+  const sql = activeQuery?.sql ?? INITIAL_SQL
   const cursor = activeQuery?.cursor ?? 0
   const selection = activeQuery?.selection ?? { from: 0, to: 0 }
   const task = activeQuery?.task ?? null
@@ -122,6 +82,8 @@ export default function App() {
   const tables = metadata?.databases[0]?.tables ?? []
   const views = metadata?.databases[0]?.views ?? []
   const selectedTable = tables.find(table => table.name === selectedTableName) ?? null
+
+  // 标签、通知和流水线更新
   const notify = useCallback((message: string, error = false) => setToast({ message, error }), [])
   const updatePipelineStages = useCallback((stages: Stage[]) => {
     setPipelineStages(stages)
@@ -175,8 +137,8 @@ export default function App() {
     setSession(null)
     setMetadata(null)
     setHistory(null)
-    setQueryTabs([createQueryTab('query-1', '查询 1')])
-    setActiveQueryId('query-1')
+    setQueryTabs([createQueryTab(FIRST_QUERY_ID, '查询 1')])
+    setActiveQueryId(FIRST_QUERY_ID)
     setActiveId(null)
     setActiveRunTabId(null)
     setPipelineStages([])
@@ -219,6 +181,7 @@ export default function App() {
     }
   }, [notify])
 
+  // 连接恢复、元数据与提示反馈
   useEffect(() => {
     const expired = () => {
       reset()
@@ -229,7 +192,7 @@ export default function App() {
       .then(value => {
         setSession(value)
         if (value.active_task) {
-          setActiveRunTabId('query-1')
+          setActiveRunTabId(FIRST_QUERY_ID)
           setActiveId(value.active_task)
         }
       })
@@ -347,6 +310,7 @@ export default function App() {
     }
   }, [activeId, activeRunTabId, notify, refreshSession, refreshMetadata, refreshHistory])
 
+  // 查询执行与历史操作
   async function execute(all: boolean, command?: string) {
     if (running || !session) return
     const tabId = activeQueryId
@@ -482,10 +446,7 @@ export default function App() {
     if (!session || databasePickerBusy) return
     setDatabasePickerBusy(true)
     try {
-      const value = await api<DatabaseSwitch & { config: { page_size: number; buffer_pool_size: number; replacement_policy: string } }>(
-        '/api/databases/create',
-        { path, ...createDatabaseConfig }
-      )
+      const value = await api<DatabaseSwitch & { config: DatabaseCreateConfig }>('/api/databases/create', { path, ...createDatabaseConfig })
       databaseDialog.current?.close()
       reset()
       notify(`已创建 ${value.path ?? value.database}，请使用新库账号 admin / admin 登录。`)
@@ -536,6 +497,7 @@ export default function App() {
       notify(errorMessage(error), true)
     }
   }
+  // 编辑器插入、工作区切换和流水线拖拽
   function insertSQL(value: string) {
     if (running) {
       notify('执行期间编辑器已锁定。')
@@ -545,7 +507,7 @@ export default function App() {
     setActiveExecutionError(null)
     editor.current?.focus()
   }
-  function switchWorkspaceMode(mode: 'sql' | 'storage') {
+  function switchWorkspaceMode(mode: WorkspaceMode) {
     if (mode === workspaceMode || isModePending) return
     // WHY：先挂载存储页再交给 transition，避免首次进入时把数据请求和视图切换绑在同一帧。
     if (mode === 'storage') {
@@ -559,77 +521,21 @@ export default function App() {
     pipelineResizeStart.current = { x: event.clientX, width: pipelineWidth }
     setPipelineResizing(true)
   }
-  const line = sql.slice(0, cursor).split('\n').length
-  const column = [...sql.slice(0, cursor).split('\n').at(-1)!].length + 1
-
+  // 应用壳层渲染
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div className="brand">
-          <Database size={24} />
-          <strong>YourSQL</strong>
-        </div>
-        <div className="connection">
-          <span className={`status-dot ${online ? 'online' : 'offline'}`} />
-          <span title={session?.database_path ?? undefined}>
-            {online ? (session ? `已连接 · ${session.database_path ?? session.database}` : '已连接') : '服务不可用'}
-          </span>
-          {session && (
-            <button
-              className="database-switch"
-              onClick={() => void openDatabasePicker()}
-              disabled={running || databasePickerBusy}
-              title="选择或新建数据库"
-            >
-              <FolderOpen size={13} />
-              <span>数据库</span>
-            </button>
-          )}
-          <code>{window.location.host}</code>
-        </div>
-        {session && (
-          <nav className="header-workspace-nav" aria-label="工作区模式">
-            <div className="mode-switch" role="tablist" aria-label="工作区模式">
-              <button
-                role="tab"
-                aria-selected={workspaceMode === 'sql'}
-                className={workspaceMode === 'sql' ? 'active' : ''}
-                onClick={() => switchWorkspaceMode('sql')}
-                disabled={isModePending}
-              >
-                <Braces size={13} />
-                SQL 工作台
-              </button>
-              <button
-                role="tab"
-                aria-selected={workspaceMode === 'storage'}
-                className={workspaceMode === 'storage' ? 'active' : ''}
-                onClick={() => switchWorkspaceMode('storage')}
-                disabled={isModePending}
-              >
-                <HardDrive size={13} />
-                存储检查
-              </button>
-            </div>
-          </nav>
-        )}
-        <div className="header-spacer" />
-        {session && (
-          <>
-            <button className="user-button" onClick={() => permissionsDialog.current?.showModal()}>
-              <span className="avatar">
-                <UserRound size={15} />
-              </span>
-              {session.user}
-              <ShieldCheck size={13} />
-            </button>
-            <button className="subtle logout-button" onClick={logout}>
-              <LogOut size={14} />
-              退出
-            </button>
-          </>
-        )}
-      </header>
+      <AppHeader
+        session={session}
+        online={online}
+        running={running}
+        databasePickerBusy={databasePickerBusy}
+        workspaceMode={workspaceMode}
+        modePending={isModePending}
+        onOpenDatabasePicker={() => void openDatabasePicker()}
+        onSwitchWorkspaceMode={switchWorkspaceMode}
+        onOpenPermissions={() => permissionsDialog.current?.showModal()}
+        onLogout={logout}
+      />
       {!session ? (
         <Login
           booting={booting}
@@ -646,7 +552,7 @@ export default function App() {
         <>
           <main
             className={workbenchClassName({ leftOpen, storage: workspaceMode === 'storage', pipelineOpen })}
-            style={{ '--pipeline-width': `${pipelineWidth}px` } as CSSProperties}
+            style={{ '--pipeline-width': String(pipelineWidth) + 'px' } as CSSProperties}
             aria-busy={isModePending}
           >
             {leftOpen && (
@@ -673,250 +579,90 @@ export default function App() {
                 />
               </aside>
             )}
-            <div className="main-workspace">
-              {isModePending && (
-                <div className="workspace-transition-status" role="status" aria-live="polite">
-                  <RefreshCw size={13} className="spin" />
-                  正在切换工作区…
-                </div>
-              )}
-              <div className="query-tabbar">
-                <button className="icon-button" onClick={() => setLeftOpen(!leftOpen)} aria-label={leftOpen ? '折叠数据库侧栏' : '展开数据库侧栏'}>
-                  {leftOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
-                </button>
-                <div className="query-tabs" role="tablist" aria-label="SQL 查询标签">
-                  {queryTabs.map(tab => (
-                    <div
-                      key={tab.id}
-                      className={`query-tab ${tab.id === activeQueryId ? 'active' : ''} ${tab.id === activeRunTabId && activeId ? 'running' : ''}`}
-                    >
-                      <button
-                        role="tab"
-                        aria-selected={tab.id === activeQueryId}
-                        className="query-tab-select"
-                        onClick={() => {
-                          setActiveQueryId(tab.id)
-                          setWorkspaceMode('sql')
-                        }}
-                        title={`${tab.title} · 独立编辑与结果`}
-                      >
-                        <Braces size={13} />
-                        <span>{tab.title}</span>
-                        {tab.sql !== initialSQL && <span className="unsaved-dot" aria-label="有未保存编辑" />}
-                        {tab.id === activeRunTabId && activeId && <RefreshCw size={12} className="spin" />}
-                      </button>
-                      {queryTabs.length > 1 && (
-                        <button className="query-tab-close" aria-label={`关闭${tab.title}`} onClick={() => closeQuery(tab.id)}>
-                          <X size={12} />
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                  <button className="query-tab-add" onClick={createNewQuery} aria-label="新建 SQL 查询" title="新建 SQL 查询">
-                    <Plus size={15} />
-                  </button>
-                </div>
-                <span className="grow" />
-                {workspaceMode === 'sql' && runs.length > 0 && (
-                  <select
-                    aria-label="切换执行批次"
-                    className="run-select"
-                    value={task?.id ?? runs[0].id}
-                    onChange={event => inspectHistory(event.target.value)}
-                    disabled={running}
-                  >
-                    {runs.map((run, i) => (
-                      <option key={run.id} value={run.id}>
-                        {i === 0 ? '最近执行' : '执行记录'} · {new Date(run.submitted_at).toLocaleTimeString()}
-                      </option>
-                    ))}
-                    {activeId && <option value={activeId}>执行中…</option>}
-                  </select>
-                )}
-              </div>
-              <div className="workspace-pane" hidden={workspaceMode !== 'sql'}>
-                <section className="editor-section" aria-label="SQL 工作区">
-                  <div className="editor-toolbar">
-                    <button className="primary" onClick={() => execute(false)} disabled={running} aria-keyshortcuts="F5">
-                      <Play size={14} fill="currentColor" />
-                      执行当前 <kbd>F5</kbd>
-                    </button>
-                    <button onClick={() => execute(true)} disabled={running} title="Shift+F5" aria-keyshortcuts="Shift+F5">
-                      <Play size={14} />
-                      执行全部
-                    </button>
-                    <button
-                      className="subtle"
-                      onClick={() => {
-                        setActiveSQL(formatSQL(sql, dialect?.keywords ?? []))
-                        notify('已格式化 SQL，保留字符串与注释。')
+            <QueryWorkspace
+              leftOpen={leftOpen}
+              workspaceMode={workspaceMode}
+              modePending={isModePending}
+              queryTabs={queryTabs}
+              activeQueryId={activeQueryId}
+              activeRunTabId={activeRunTabId}
+              activeId={activeId}
+              running={running}
+              sql={sql}
+              task={task}
+              runs={runs}
+              resultIndex={resultIndex}
+              executionError={executionError}
+              activeTabRunning={activeTabRunning}
+              dialect={dialect}
+              tables={tables}
+              history={history}
+              pipelineStages={pipelineStages}
+              pipelineOpen={pipelineOpen}
+              pipelineWidth={pipelineWidth}
+              pipelineResizing={pipelineResizing}
+              pollError={pollError}
+              storagePane={
+                storageVisited && (
+                  <div className="workspace-pane" hidden={workspaceMode !== 'storage'}>
+                    <StoragePanel
+                      fullMode
+                      active={workspaceMode === 'storage'}
+                      refreshToken={storageRefreshToken}
+                      selectedTable={selectedTable}
+                      onSelectTable={name => {
+                        setSelectedTableName(name)
+                        setSelectedViewName(null)
                       }}
-                      disabled={running}
-                      title="格式化 SQL"
-                    >
-                      <AlignLeft size={15} />
-                      <span>格式化</span>
-                    </button>
-                    <button
-                      className="subtle"
-                      onClick={() => {
-                        setActiveSQL('')
-                        setActiveExecutionError(null)
-                      }}
-                      disabled={running}
-                      title="清空编辑器"
-                    >
-                      <Trash2 size={14} />
-                      <span>清空</span>
-                    </button>
-                    <span className="grow" />
-                    {activeTabRunning && (
-                      <button className="danger-subtle" onClick={cancel} disabled={!activeId}>
-                        <Square size={12} />
-                        取消
-                      </button>
-                    )}
-                    <button
-                      className={`pipeline-launch subtle ${pipelineOpen ? 'active' : ''}`}
-                      onClick={() => setPipelineOpen(open => !open)}
-                      aria-expanded={pipelineOpen}
-                      disabled={running || pipelineStages.length === 0}
-                      title={pipelineStages.length ? '在右侧工作区查看本次执行的阶段和算子图' : '执行 SQL 后可查看执行流水线'}
-                    >
-                      <Workflow size={14} />
-                      <span>{pipelineOpen ? '收起流水线' : '查看执行流水线'}</span>
-                    </button>
+                      onExit={() => switchWorkspaceMode('sql')}
+                    />
                   </div>
-                  <SqlEditor
-                    value={sql}
-                    onChange={value => {
-                      setActiveSQL(value)
-                      setActiveExecutionError(null)
-                    }}
-                    tables={tables}
-                    dialect={dialect}
-                    execute={execute}
-                    onCursor={setActiveCursor}
-                    onSelection={setActiveSelection}
-                    error={executionError}
-                    running={activeTabRunning}
-                    editorRef={editor}
-                  />
-                </section>
-                {pollError && (
-                  <div className="poll-error" role="alert">
-                    {pollError} 正在获取任务状态… <code>{activeId}</code>
-                  </div>
-                )}
-                <ResultPanel
-                  task={task}
-                  index={resultIndex}
-                  onIndex={setActiveResultIndex}
-                  notify={notify}
-                  history={history}
-                  onHistory={inspectHistory}
-                  onPipelineStages={updatePipelineStages}
-                />
-              </div>
-              {storageVisited && (
-                <div className="workspace-pane" hidden={workspaceMode !== 'storage'}>
-                  <StoragePanel
-                    fullMode
-                    active={workspaceMode === 'storage'}
-                    refreshToken={storageRefreshToken}
-                    selectedTable={selectedTable}
-                    onSelectTable={name => {
-                      setSelectedTableName(name)
-                      setSelectedViewName(null)
-                    }}
-                    onExit={() => switchWorkspaceMode('sql')}
-                  />
-                </div>
-              )}
-            </div>
-            {pipelineOpen && (
-              <aside className={`pipeline-workspace ${pipelineResizing ? 'is-resizing' : ''}`} aria-label="执行流水线工作区">
-                <div
-                  className="pipeline-resize-handle"
-                  role="separator"
-                  aria-label="调整执行流水线宽度"
-                  aria-orientation="vertical"
-                  aria-valuemin={320}
-                  aria-valuemax={760}
-                  aria-valuenow={pipelineWidth}
-                  onPointerDown={beginPipelineResize}
-                />
-                <div className="pipeline-workspace-inner">
-                  <header className="pipeline-workspace-header">
-                    <div>
-                      <Workflow size={16} />
-                      <div>
-                        <strong>执行流水线</strong>
-                      </div>
-                    </div>
-                    <button className="icon-button" aria-label="收起执行流水线" onClick={() => setPipelineOpen(false)}>
-                      <X size={16} />
-                    </button>
-                  </header>
-                  <div className="pipeline-workspace-body">
-                    <PipelinePanel stages={pipelineStages} />
-                  </div>
-                </div>
-              </aside>
-            )}
+                )
+              }
+              editorRef={editor}
+              onToggleSidebar={() => setLeftOpen(open => !open)}
+              onSelectQuery={id => {
+                setActiveQueryId(id)
+                setWorkspaceMode('sql')
+              }}
+              onCreateQuery={createNewQuery}
+              onCloseQuery={closeQuery}
+              onInspectHistory={inspectHistory}
+              onExecute={execute}
+              onFormatSql={() => {
+                setActiveSQL(formatSQL(sql, dialect?.keywords ?? []))
+                notify('已格式化 SQL，保留字符串与注释。')
+              }}
+              onClearSql={() => {
+                setActiveSQL('')
+                setActiveExecutionError(null)
+              }}
+              onCancel={cancel}
+              onChangeSql={value => {
+                setActiveSQL(value)
+                setActiveExecutionError(null)
+              }}
+              onCursor={setActiveCursor}
+              onSelection={setActiveSelection}
+              onResultIndex={setActiveResultIndex}
+              onPipelineStages={updatePipelineStages}
+              onTogglePipeline={() => setPipelineOpen(open => !open)}
+              onBeginPipelineResize={beginPipelineResize}
+              onClosePipeline={() => setPipelineOpen(false)}
+              notify={notify}
+            />
           </main>
-          <footer className="app-status">
-            <span className={`status-dot ${online ? 'online' : 'offline'}`} />
-            <span>{running ? '执行中' : '就绪'}</span>
-            <div className="app-status-settings">
-              <label>
-                结果上限{' '}
-                <select aria-label="结果保留行数" value={rowLimit} onChange={event => setRowLimit(Number(event.target.value))}>
-                  {[100, 1000, 5000].map(count => (
-                    <option key={count} value={count}>
-                      {count} 行
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                期限{' '}
-                <select aria-label="查询执行期限" value={timeout} onChange={event => setTimeoutValue(Number(event.target.value))}>
-                  {[5, 15, 30].map(seconds => (
-                    <option key={seconds} value={seconds}>
-                      {seconds} s
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <span className="grow" />
-            {selection.from !== selection.to ? (
-              <span>已选 {Array.from(sql.slice(selection.from, selection.to)).length} 字符</span>
-            ) : (
-              <span>
-                Ln {line}, Col {column}
-              </span>
-            )}
-          </footer>
-          <dialog ref={permissionsDialog} className="permission-dialog">
-            <div className="panel-heading">
-              <strong>
-                <ShieldCheck size={18} />
-                当前用户权限
-              </strong>
-              <button className="icon-button" aria-label="关闭权限" onClick={() => permissionsDialog.current?.close()}>
-                <X size={18} />
-              </button>
-            </div>
-            <p>
-              {session.user} · {session.roles.join(', ') || '无角色'}
-            </p>
-            <div className="privileges">
-              {session.permissions.length ? session.permissions.map(permission => <code key={permission}>{permission}</code>) : <span>暂无权限</span>}
-            </div>
-            <p className="hint">会话剩余约 {Math.ceil(session.session_expires_in / 60)} 分钟；重启服务需重新登录。</p>
-          </dialog>
+          <WorkbenchStatusBar
+            online={online}
+            running={running}
+            rowLimit={rowLimit}
+            timeout={timeout}
+            sql={sql}
+            selection={selection}
+            onRowLimitChange={setRowLimit}
+            onTimeoutChange={setTimeoutValue}
+          />
+          <PermissionDialog ref={permissionsDialog} session={session} onClose={() => permissionsDialog.current?.close()} />
         </>
       )}
       <DatabasePickerDialog
@@ -937,381 +683,7 @@ export default function App() {
         onCreate={createDatabase}
         onImport={importDatabase}
       />
-      {toast && (
-        <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>
-          {toast.error ? <CircleAlert size={17} /> : <CheckCircle2 size={17} />}
-          <span>{toast.message}</span>
-          <button aria-label="关闭消息" onClick={() => setToast(null)}>
-            <X size={14} />
-          </button>
-        </div>
-      )}
+      {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
     </div>
   )
-}
-
-function Login({
-  booting,
-  online,
-  activeDatabase,
-  databasePickerBusy,
-  onOpenDatabasePicker,
-  onLogin
-}: {
-  booting: boolean
-  online: boolean
-  activeDatabase: string | null
-  databasePickerBusy: boolean
-  onOpenDatabasePicker: () => void
-  onLogin: (value: SessionInfo) => void
-}) {
-  const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    if (databasePickerBusy) {
-      setError('请等待数据库切换完成。')
-      return
-    }
-    setBusy(true)
-    setError('')
-    try {
-      const session = await api<SessionInfo>('/api/auth/login', { username, password })
-      setPassword('')
-      onLogin(session)
-    } catch (error) {
-      setError(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-  return (
-    <main className="login-surface">
-      <div className="login-form">
-        <div className="login-icon">
-          <Database size={28} />
-        </div>
-        <h1>连接到 YourSQL</h1>
-        {booting ? (
-          <div className="empty-state">
-            <RefreshCw className="spin" />
-            正在恢复会话…
-          </div>
-        ) : (
-          <>
-            <div className="login-database-picker">
-              <div>
-                <span>目标数据库</span>
-                <strong title={activeDatabase ?? undefined}>{activeDatabase ?? '尚未选择'}</strong>
-              </div>
-              <button type="button" onClick={onOpenDatabasePicker} disabled={!online || databasePickerBusy} title="选择数据库文件">
-                <FolderOpen size={15} />
-                {databasePickerBusy ? '读取中…' : '选择'}
-              </button>
-            </div>
-            <form onSubmit={submit}>
-              <label>
-                用户名
-                <input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} maxLength={128} required />
-              </label>
-              <label>
-                密码
-                <input
-                  autoFocus
-                  type="password"
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={event => setPassword(event.target.value)}
-                  maxLength={1024}
-                  required
-                />
-              </label>
-              {error && (
-                <div className="inline-error" role="alert">
-                  {error}
-                </div>
-              )}
-              <button className="primary" type="submit" disabled={busy || databasePickerBusy}>
-                {busy ? <RefreshCw size={15} className="spin" /> : <Database size={15} />} {busy ? '正在连接…' : '连接数据库'}
-              </button>
-            </form>
-          </>
-        )}
-        {!online && <p className="error-text">后端未连接，请先启动 python -m yoursql.web。</p>}
-      </div>
-    </main>
-  )
-}
-
-interface DatabasePickerProps {
-  files: DatabaseFiles | null
-  busy: boolean
-  loggedIn: boolean
-  mode: 'open' | 'create'
-  onModeChange: (mode: 'open' | 'create') => void
-  openPath: string
-  onOpenPathChange: (path: string) => void
-  createPath: string
-  onCreatePathChange: (path: string) => void
-  createConfig: { page_size: number; buffer_pool_size: number; replacement_policy: 'lru' | 'fifo' }
-  onCreateConfigChange: (config: { page_size: number; buffer_pool_size: number; replacement_policy: 'lru' | 'fifo' }) => void
-  onClose: () => void
-  onSelect: (name: string) => void
-  onCreate: (path: string) => void
-  onImport: (file: File) => void
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
-}
-
-const DatabasePickerDialog = forwardRef<HTMLDialogElement, DatabasePickerProps>(function DatabasePickerDialog(
-  {
-    files,
-    busy,
-    loggedIn,
-    mode,
-    onModeChange,
-    openPath,
-    onOpenPathChange,
-    createPath,
-    onCreatePathChange,
-    createConfig,
-    onCreateConfigChange,
-    onClose,
-    onSelect,
-    onCreate,
-    onImport
-  },
-  ref
-) {
-  const fileInput = useRef<HTMLInputElement>(null)
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  function clearSelectedFile() {
-    setSelectedFile(null)
-    if (fileInput.current) fileInput.current.value = ''
-  }
-  function submitOpen(event: FormEvent) {
-    event.preventDefault()
-    if (selectedFile) {
-      const file = selectedFile
-      clearSelectedFile()
-      onImport(file)
-    } else if (openPath.trim()) onSelect(openPath.trim())
-  }
-  function submitCreate(event: FormEvent) {
-    event.preventDefault()
-    if (createPath.trim()) onCreate(createPath.trim())
-  }
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
-    if (file) {
-      setSelectedFile(file)
-      onOpenPathChange(file.name)
-    }
-  }
-  function handlePathChange(path: string) {
-    clearSelectedFile()
-    onOpenPathChange(path)
-  }
-  function handleExistingSelection(path: string) {
-    clearSelectedFile()
-    onOpenPathChange(path)
-  }
-  function handleModeChange(nextMode: 'open' | 'create') {
-    clearSelectedFile()
-    if (nextMode === 'open' && files) onOpenPathChange(files.active_path ?? files.active)
-    onModeChange(nextMode)
-  }
-  function handleClose() {
-    clearSelectedFile()
-    onClose()
-  }
-  const effectiveMode = loggedIn ? mode : 'open'
-  return (
-    <dialog ref={ref} className="database-dialog" aria-labelledby="database-picker-title">
-      <div className="panel-heading">
-        <strong id="database-picker-title">
-          {effectiveMode === 'open' ? (
-            <>
-              <FolderOpen size={17} />
-              选择数据库
-            </>
-          ) : (
-            <>
-              <FilePlus2 size={17} />
-              新建数据库
-            </>
-          )}
-        </strong>
-        <button className="icon-button" aria-label="关闭数据库选择" onClick={handleClose}>
-          <X size={18} />
-        </button>
-      </div>
-      {loggedIn && (
-        <div className="database-dialog-tabs" role="tablist" aria-label="数据库操作">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={effectiveMode === 'open'}
-            className={effectiveMode === 'open' ? 'active' : ''}
-            onClick={() => handleModeChange('open')}
-          >
-            <FolderOpen size={13} />
-            已有库
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={effectiveMode === 'create'}
-            className={effectiveMode === 'create' ? 'active' : ''}
-            onClick={() => handleModeChange('create')}
-          >
-            <FilePlus2 size={13} />
-            新建
-          </button>
-        </div>
-      )}
-      <div className="database-picker-body">
-        {effectiveMode === 'open' ? (
-          <>
-            <form className="database-path-form" onSubmit={submitOpen}>
-              <label htmlFor="database-path">数据库路径</label>
-              <input
-                id="database-path"
-                value={openPath}
-                onChange={event => handlePathChange(event.target.value)}
-                placeholder="例如 data/analytics.db"
-                title={loggedIn ? '支持绝对路径或相对项目目录路径' : '登录前只能选择当前服务目录中的 .db 文件'}
-                spellCheck={false}
-                maxLength={4096}
-              />
-              <label htmlFor="database-file-input">本机文件</label>
-              <input
-                ref={fileInput}
-                id="database-file-input"
-                className="database-file-input"
-                type="file"
-                accept=".db,application/octet-stream"
-                onChange={handleFileChange}
-                aria-label="选择本机数据库文件"
-              />
-              <div className="database-list-heading">
-                <span>同目录文件</span>
-              </div>
-              {!files ? (
-                <div className="empty-state">
-                  <RefreshCw size={17} className="spin" />
-                  正在读取数据库列表…
-                </div>
-              ) : files.files.length === 0 ? (
-                <div className="empty-state">
-                  <FolderOpen size={18} />
-                  <strong>没有 .db 文件</strong>
-                </div>
-              ) : (
-                <div className="database-file-list">
-                  {files.files.map((file: DatabaseFile) => (
-                    <button
-                      type="button"
-                      key={file.path ?? file.name}
-                      className={`database-file ${(file.path ?? file.name) === openPath || (file.active && !selectedFile) ? 'active' : ''}`}
-                      disabled={busy}
-                      onClick={() => handleExistingSelection(file.path ?? file.name)}
-                    >
-                      <FolderOpen size={15} />
-                      <span>
-                        <strong>{file.name}</strong>
-                        <small>{formatFileSize(file.size_bytes)}</small>
-                      </span>
-                      {file.active && <em>当前</em>}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <p className="database-picker-warning">{loggedIn ? '确认后需重新登录；执行中不可切换。' : '确认后使用目标库账号登录。'}</p>
-              <button className="primary database-confirm-submit" type="submit" disabled={busy || (!selectedFile && !openPath.trim())}>
-                {busy ? <RefreshCw size={14} className="spin" /> : <FolderOpen size={14} />} {busy ? '处理中…' : '确认'}
-              </button>
-            </form>
-          </>
-        ) : (
-          <>
-            <form className="database-create-form" onSubmit={submitCreate}>
-              <div className="database-create-default">默认账号：admin / admin</div>
-              <label htmlFor="new-database-path">
-                文件路径
-                <input
-                  id="new-database-path"
-                  value={createPath}
-                  onChange={event => onCreatePathChange(event.target.value)}
-                  placeholder="例如 data/analytics.db"
-                  title="目标文件需不存在，父目录需已存在"
-                  spellCheck={false}
-                  maxLength={4096}
-                />
-              </label>
-              <div className="database-config-grid">
-                <label>
-                  页大小
-                  <input
-                    type="number"
-                    min={512}
-                    max={65536}
-                    step={1}
-                    required
-                    value={createConfig.page_size || ''}
-                    onChange={event => onCreateConfigChange({ ...createConfig, page_size: Number(event.target.value) })}
-                    title="512–65536，必须是 2 的幂"
-                  />
-                </label>
-                <label>
-                  缓存页数
-                  <input
-                    type="number"
-                    min={1}
-                    max={4096}
-                    step={1}
-                    required
-                    value={createConfig.buffer_pool_size || ''}
-                    onChange={event => onCreateConfigChange({ ...createConfig, buffer_pool_size: Number(event.target.value) })}
-                    title="1–4096 页"
-                  />
-                </label>
-                <label>
-                  淘汰策略
-                  <select
-                    value={createConfig.replacement_policy}
-                    onChange={event =>
-                      onCreateConfigChange({
-                        ...createConfig,
-                        replacement_policy: event.target.value as 'lru' | 'fifo'
-                      })
-                    }
-                    title="当前内核支持 LRU 或 FIFO"
-                  >
-                    <option value="lru">LRU</option>
-                    <option value="fifo">FIFO</option>
-                  </select>
-                </label>
-              </div>
-              <div className="database-picker-warning">目标文件需不存在，目录需已存在。</div>
-              <button className="primary database-create-submit" type="submit" disabled={busy || !loggedIn || !createPath.trim()}>
-                {busy ? <RefreshCw size={14} className="spin" /> : <FilePlus2 size={14} />} {busy ? '正在创建…' : '创建并连接'}
-              </button>
-            </form>
-          </>
-        )}
-      </div>
-    </dialog>
-  )
-})
-
-function siblingDatabasePath(path: string): string {
-  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  return separator >= 0 ? `${path.slice(0, separator + 1)}new_database.db` : 'data/new_database.db'
 }

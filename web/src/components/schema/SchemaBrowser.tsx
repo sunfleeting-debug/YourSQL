@@ -1,9 +1,11 @@
+/** 数据库表、视图和列的目录浏览器。 */
+
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, Columns3, Database, FileCode2, KeyRound, ListTree, RefreshCw, Search, Table2 } from 'lucide-react'
-import type { TableMeta, ViewMeta } from '../types'
-import { quoteName } from '../sql'
+import type { TableMeta, ViewMeta } from '../../types/catalog'
+import { quoteName } from '../../sql'
 
-interface Props {
+export interface SchemaBrowserProps {
   database: string
   tables: TableMeta[]
   views: ViewMeta[]
@@ -11,10 +13,10 @@ interface Props {
   insertSQL: (sql: string) => void
   loading: boolean
   error: string
-  selectedTableName?: string | null
-  onSelectTable?: (tableName: string | null) => void
-  selectedViewName?: string | null
-  onSelectView?: (viewName: string) => void
+  selectedTableName: string | null
+  onSelectTable: (tableName: string | null) => void
+  selectedViewName: string | null
+  onSelectView: (viewName: string) => void
 }
 export default function SchemaBrowser({
   database,
@@ -28,7 +30,7 @@ export default function SchemaBrowser({
   onSelectTable,
   selectedViewName,
   onSelectView
-}: Props) {
+}: SchemaBrowserProps) {
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
   const keyword = search.toLowerCase()

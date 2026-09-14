@@ -1,4 +1,6 @@
 /** 编辑器语句分隔；字符串、引用名和注释规则与后端 Lexer 对齐。 */
+import type { JsonValue } from './types/common'
+
 export interface StatementRange {
   from: number
   to: number
@@ -85,8 +87,8 @@ export function positionOffset(sql: string, line = 1, column = 1): number {
   return Math.min(sql.length, prefix + [...(lines[line - 1] ?? '')].slice(0, column - 1).join('').length)
 }
 
-export function csv(columns: string[], rows: unknown[][]): string {
-  const cell = (value: unknown) => {
+export function csv(columns: string[], rows: JsonValue[][]): string {
+  const cell = (value: JsonValue) => {
     let text = value === null ? '' : String(value)
     // WHY：CSV 常被 Excel 打开，阻止数据库内容触发公式执行。
     if (/^[=+\-@\t\r]/.test(text)) text = "'" + text
