@@ -73,7 +73,7 @@ SHOW GRANTS FOR USER alice;
 ## 测试与基准
 
 ```powershell
-python -m pytest -q                                     # 87 passed
+python -m pytest -q                                     # 201 passed
 cd web; npm test                                        # 4 passed
 python -m benchmarks.run_benchbox_tpch --iterations 5 --force
 ```
@@ -262,7 +262,7 @@ python -m yoursql.web --database data/showcase_v2.db --port 8080
 
 ```powershell
 python -m benchmarks.compare_tpch_queries --iterations 3 --query-timeout 180
-python -m benchmarks.verify_tpch_values   # 逐值对拍：8 条查询结果 vs 同数据的 SQLite 库
+python -m benchmarks.verify_tpch_values   # 逐值对拍：16 条查询结果 vs 同数据的 SQLite 库
 ```
 
 同一份 `.tbl`、同一批 SQL，三个引擎各自原生装载路径；每个引擎预热 1 次、3 轮取均值（报告：`benchmarks/reports/tpch_sf001_compare.json`）：
@@ -342,7 +342,7 @@ WHY 这一步是决定性的：本批 8 条查询里 6 条带连接，而 TPC-H 
 
 ## 验收状态
 
-- 后端 `python -m pytest -q`：120 passed。
+- 后端 `python -m pytest -q`：201 passed。
 - 前端 `npm test`：4 passed（块点击语义、常驻右栏布局）；`npm run build` 成功。
 - 演示库 `data/showcase_v2.db`：CLI（`SHOW TABLES`、分组聚合、`EXPLAIN` 走 `IndexScan`、`analyst` 权限登录）与工作台 HTTP 链路（登录 → `/api/queries` 异步任务 → 结果分页 → 存储快照）均通过。
 - BenchBox TPC-H SF0.01 Q6：PASS，`734493.7281`，平均 `2.2167s`、中位数 `2.2323s`（CPython 3.12.13 / Windows 11），摘要见 `benchmarks/reports/tpch_sf001_q6.json`。

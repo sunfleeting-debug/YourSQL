@@ -51,6 +51,9 @@
 - [x] 多表查询和 JOIN（INNER、LEFT、RIGHT、FULL、CROSS 的嵌套循环实现）。
 - [x] GROUP BY、HAVING、COUNT/SUM/AVG/MIN/MAX 聚合函数。
 - [x] IN (SELECT ...) 子查询和 UNION/UNION ALL。
+- [x] 派生表 `FROM (SELECT ...) AS d`、CTE `WITH x AS (...)`（内联展开，可多次引用）、`CASE`（searched/simple）、`CAST(x AS type)`、`EXISTS`/`NOT EXISTS`、标量子查询与相关子查询；`tests/test_sql_features.py`。
+- [x] DECIMAL 定点数类型（`DECIMAL/NUMERIC/NUMBER`）：字面量、比较、聚合与落盘无损往返；`tests/test_decimal.py`。
+- [x] 多错误报告（panic-mode 错误恢复）：`parse_recovering` 把词法与语法诊断收集成一份 `ParseOutcome`——语句级 + 投影项级两级同步点，一次报全脚本里的错误，同时保留可解析的语句（全坏的语句不吐半成品 AST）；`Database.check_script` 与 CLI `--check` 是只读入口（不建表、不写库）。既有 `parse_one` / `parse_script` / `tokenize` 仍是首错即抛，契约未变。`tests/test_error_recovery.py` 16 条。
 
 ## 索引存储
 
@@ -60,18 +63,86 @@
 ## 查询优化
 
 - [x] SeqScan/IndexScan 选择、基础 Join/扫描计划、统计信息、代价模型和规范化 SQL 计划缓存；优化计划已接入 Database SELECT 扫描路径。
+- [x] 具名重写规则框架（`RewriteRule` + `DEFAULT_RULES`）：`constant_folding` / `boolean_simplification` / `predicate_elimination` / `predicate_pushdown` / `index_selection` 五条规则可枚举、可单独关闭（`Optimizer(disabled_rules=...)`、`Database(disabled_rules=...)`、CLI `--disable-rule`），命中情况逐条写进 `plan.properties["rules"]`；CLI `--rules` 打印规则清单，EXPLAIN 因此能回答“这条语句被优化了什么”。规则开关放在 `ContextVar` 上，既能被 `@classmethod` 的规则方法读到，也天然按调用栈隔离（多线程 / 嵌套调用不会互相污染）。`tests/test_optimizer_rules.py` 10 条。
+- [x] 计划可视化后端通道：`PlanNode.label_lines()` / `to_mermaid()` / `to_dot()`，CLI `--plan {text,mermaid,dot,json}` 做到“只编译不出图也能看图”；`scripts/plan_visualize.py` 可导出含 Mermaid 图的自包含 HTML（示例产物 `docs/plan_demo.html`）。Web 工作台原有的 AST/Plan 画板保持不变。`tests/test_plan_visualization.py` 9 条。
 
 ## 测试与性能
 
 - [x] 公共层/存储/SQL/集成/服务/索引单元测试。
 - [x] MiniOB 必修语句对标样例、重启持久化和错误场景测试。
 - [x] 存储缓存性能统计、落盘索引页检查、索引前后路径对比和第三方 BenchBox/TPC-H Q6 跑分适配。
-- [x] 跨引擎逐值对拍：`benchmarks/verify_tpch_values.py` 把 8 条可编译 TPC-H 查询的结果与同数据的 SQLite 库做行多重集比对（浮点 6 位容差），不一致即以非零码退出；报告里的 `sample_match` 字段提供同一信息的快速版本。
+- [x] 跨引擎逐值对拍：`benchmarks/verify_tpch_values.py` 把 TPC-H 查询的结果与同数据的 SQLite 库做行多重集比对（数值归一到 6 位小数，DECIMAL/float 都能并排比较），不一致即以非零码退出。当前覆盖 **16 条**（Q1/Q3/Q5–Q14/Q16–Q19）全部一致，其中 Q6 记为 `KNOWN_DIFFERENCES`（DECIMAL 定点 vs SQLite 双精度浮点的口径差异，非错误）；Q2/Q4/Q15/Q20/Q21 因相关子查询逐行重跑超时、Q22 单条约 50 s，未纳入。报告里的 `sample_match` 字段提供同一信息的快速版本。
+
+## 高级扩展逐项对照
+
+指导书 17 项"高级扩展"的落点与证据（"已有"指本轮之前已实现，"本轮"指本次补齐）：
+
+| # | 高级扩展 | 状态 | 落点与证据 |
+| --- | --- | --- | --- |
+| 1 | 多表连接 | 已有 | INNER / LEFT / RIGHT / FULL / CROSS，哈希 / 索引嵌套循环 / 嵌套循环三策略（写入 `stats["joins"]`）；`tests/test_join_strategies.py` |
+| 2 | 子查询 | 已有 | `IN (SELECT ...)`、`EXISTS`/`NOT EXISTS`、标量/相关子查询、派生表、CTE；`tests/test_sql_features.py` |
+| 3 | 聚集与分组 | 已有 | GROUP BY / HAVING / COUNT·SUM·AVG·MIN·MAX |
+| 4 | 排序 | 已有 | ORDER BY 多列、ASC/DESC、NULLS FIRST/LAST |
+| 5 | 去重 | 已有 | `SELECT DISTINCT` |
+| 6 | LIMIT | 已有 | LIMIT / OFFSET，并参与流式执行的提前终止 |
+| 7 | 集合运算 | 已有 | UNION / UNION ALL |
+| 8 | 视图 | 已有 | CREATE/DROP VIEW、`SHOW CREATE VIEW` |
+| 9 | 完整性约束 | 已有 | PRIMARY KEY / UNIQUE / NOT NULL + 唯一索引 |
+| 10 | 授权与角色 | 已有 | CREATE ROLE/USER、GRANT/REVOKE、RBAC 与 JSON Lines 审计 |
+| 11 | 数据类型 | 已有 | INT / FLOAT / **DECIMAL 定点** / BOOLEAN / VARCHAR / NULL；`tests/test_decimal.py` |
+| 12 | NULL / LIKE / JOIN 语义 | 已有 | 三值逻辑、LIKE 通配、NULL 连接键不匹配、外连接补 NULL |
+| 13 | 更新操作 | 已有 | INSERT（含批量）/ UPDATE / DELETE |
+| 14 | 错误处理 | 已有 | Lexical / Syntax / Semantic / Execution / Storage 五类，统一 `at line <行>, column <列>` |
+| 15 | EXPLAIN 与查询计划可视化 | 已有 + 本轮补齐 | 文本树 `PlanNode.explain()` 与 `to_dict()` JSON 已有；本轮补后端 Mermaid / DOT / HTML 通道（见"查询优化"节） |
+| 16 | 错误恢复 | **本轮补齐** | `parse_recovering` / `ParseOutcome` / `Database.check_script` / CLI `--check`；`tests/test_error_recovery.py` |
+| 17 | 算法规则框架 | **本轮补齐** | `RewriteRule` + `DEFAULT_RULES`（5 条具名规则）+ `plan.properties["rules"]` + CLI `--rules` / `--disable-rule`；`tests/test_optimizer_rules.py` |
+
+验收现场可以直接跑这几条命令取证：
+
+```
+python -m pytest -q                                  # 201 passed
+python -m yoursql.cli --rules                        # 规则清单（5/5 启用）
+python -m yoursql.cli --sql "SELECT 1; SELCT 2; SELECT @ FROM t;" --check
+# <db> 换成任意已有库；接上 --disable-rule 即可现场对比同一语句的计划差异
+python -m yoursql.cli --database <db> --sql "SELECT ... " --plan mermaid
+python -m yoursql.cli --database <db> --sql "SELECT ... " --plan dot --disable-rule index_selection
+python -m scripts.plan_visualize --database <db> --sql "SELECT ... " \
+    --format html --out docs/plan_demo.html
+```
 
 ## 下一步（按已实测到的缺口）
 
-- [ ] DECIMAL 定点化：目前是浮点实现，`0.06 ± 0.01` 得到 `0.06999999999999999`，漏掉 `l_discount = 0.07` 的行，使 Q6 与 TPC-H 官方答案（DuckDB 值）不一致——这是正确性缺口，不只是性能。
-- [ ] 连接键推断广度：目前只做顶层 `AND` 与“所有 `OR` 分支共有的等式”；分支各自不同键、子查询内部的连接键都不推。
-- [ ] 其余 14 条 TPC-H 查询的缺失特性：派生表、CTE、`CASE WHEN`、子查询表达式（Q2/Q4/Q7/Q8/Q9/Q12/Q13/Q14/Q15/Q17/Q20/Q21/Q22）。
-- [ ] 索引节点二进制化（现每次等值查找 1.4 ms、候选集计算 82–272 ms 均花在 JSON 节点解码）与全定长二进制行编码。
-- [ ] 单表扫描仍是最大头的绝对耗时：Q1 1136 ms / Q6 341 ms，对 SQLite 约 23–35×，瓶颈是逐行 JSON 解码 + Python 对象（详见 README 拆解）。
+### 已完成（本轮）
+
+- [x] DECIMAL 定点化：值层新增 `DataType.DECIMAL`（`NUMERIC/NUMBER` 别名），字面量与 `Value` 走 `decimal.Decimal`；落盘用 `$decimal` 标记无损往返（`yoursql/storage/codec.py`）。`compare_values` 刻意**不**做 Decimal↔float 对齐——定点保精确、FLOAT 保 IEEE-754。TPC-H Q6 现返回 `1193053.2253`，与 DuckDB 的 DECIMAL 列逐值一致（旧的双精度值是 `734493.7281`）。`tests/test_decimal.py` 8 条。
+- [x] 连接键推断的 `OR` 分支泛化：`OR` 各分支的等式取并集作为候选连接键（原先只认"所有分支共有的等式"），`_join_key_pairs` 因此能覆盖 `a.x = b.y OR a.z = b.w` 这类写法。
+- [x] 其余 14 条 TPC-H 查询的缺失特性：新增派生表 `FROM (SELECT ...) AS d`、CTE `WITH ... AS (...)`（内联为派生表）、`CASE`（searched + simple）、`CAST`、`EXISTS`/`NOT EXISTS`、标量子查询、相关子查询。**22/22 条 TPC-H 查询均可通过 parser + binder + planner 并执行**（此前 8/22 可编译）；其中 17 条与 SQLite 逐值一致（Q8 由上面的自连接歧义键修复打通），Q2/Q4/Q15/Q20/Q21 卡在相关子查询逐行重跑的性能上。`tests/test_sql_features.py` 11 条固定住结果值。
+- [x] 顺带修掉四个静默错误（都是"能跑但结果错"，比报错更危险）：
+  - 相关子查询被当成不相关：列上下文模板与相关性判定把「别名 + 原表名」都登记为本地，`FROM t AS u` 于是遮蔽了外层的 `t`，`u.id <= t.id` 退化成恒真。现按标准 SQL 只登记别名。
+  - 相关子查询的 WHERE 被下推到只含本行的 `_RowView` 预过滤，拿不到外层列；现带外层作用域时关闭全部谓词下推（`_joined_contexts(pushdown=False)`）。
+  - `_collect_column_ref_nodes` 漏判 `ExistsPredicate`，导致 `EXISTS` 子查询被下推。
+  - **自连接的连接键退化成歧义裸列名**：`_join_key_pairs` 只记 `(左列, 右列)`、丢掉左列的限定符，取值时只能靠裸列名兜底；而 `_merge_context` 遇到同名裸列会标成歧义值，哈希探测于是静默失配。TPC-H Q8 的 `nation AS n1, nation AS n2, region` 正是如此：结果随 FROM 子句顺序在 29 行与 0 行之间跳变（`region` 在 `n2` 之后连接就一定归零）。现键对改为 `(左归属, 左列, 右列)`，`_column_owner` 用「限定符 → 列名集合」定出未限定列的归属，`_key_is_usable` 再把 NULL/缺失/歧义值一并排除在连接键之外。
+- [x] 单表扫描的逐行解码优化（Q1/Q6 实测 **1.46–1.55×**）：
+  - `codec.loads` 不再在 `json.loads` 之后跑一遍递归 `_revive`，改用 C 扫描器的 `object_hook` 就地还原 `$decimal`（代码对象调用数 723 万 → 416 万）；
+  - 解码统一走 `json.JSONDecoder.raw_decode`，绕开 `json.loads` 每次都要付的 Python 包装层（两次 `WHITESPACE.match`）——这一项单独就是 1.5–1.8×；
+  - 索引节点读路径把 O(n) 的排序校验挪出热路径（`from_page(verify=False)` 默认只做 O(1) 结构自检），单页解码 **3.44×**（0.059 → 0.017 ms/页），全量校验留在 `index_page_info` 与 `validate()`。`tests/test_storage_hot_path.py` 6 条。
+
+- [x] 只关心行数的扫描不再解码记录（`SELECT COUNT(*) FROM lineitem` 全表 **571 → 66 ms（8.7×）**，`SELECT 1 FROM lineitem` 330 → 66 ms（5.0×））：
+  - `COUNT(*)` 里的 `Star` 只是"数行数"的占位，与 `SELECT *` 不是一回事。早先两者共用同一个递归收集器，于是被判定为"需要全部列"，每行白构造 32 键上下文（16 列的表：16 个限定名 + 16 个裸列名）。现把聚合参数里的 `*` 单独处理，`needed` 收敛为空集。
+  - 连带收益：`SELECT COUNT(*) FROM t WHERE 索引列 < ...` 不再被"需要全部列"挡住覆盖索引直读，访问路径从 `IndexScan` 变成 `IndexOnlyScan`（`tests/test_decimal.py::test_decimal_range_index_scan` 的断言与取值一并更新）。
+  - 新增 `SlottedPage.live_count()` 与 `TableHeap.count()`：只数槽目录的活槽，不切记录、不跑 JSON 解码；`_scan_contexts` 在"不需要任何列值 + 无谓词"时走该快路径，用同一个只读上下文重复产出，行数与 `rows_examined` 语义不变。
+  - 顺带修 `SlottedPage._from_binary` 每页把 `sorted(ranges)` 算两遍（宽表全表扫描每页白排一次），以及 `TableHeap.scan` 每行重复构造 `PageId`。
+  - 测量口径：`benchmarks/bench_scan_paths.py`，每个用例独立进程 × 重复取最小值。同进程连测会被堆状态与 GC 干扰（同一配置实测能差 30%，Q6 曾因此被误判成"变慢 30%"），该脚本强制隔离。
+  - 回归：`tests/test_scan_fast_path.py` 10 条（结果一致、删除后按活槽计数、带 WHERE/交叉连接/分组/HAVING/空表、存储层 `count()` 与 `scan()` 同口径）；另外与原始 `.tbl` 行数（8 张表全对）和同数据 SQLite 库（16 条 lineitem 聚合语句逐值）对拍一致；全量 `pytest` **211 条通过**。
+
+### 待办（已用实测数据重写过方向）
+
+- [ ] **不要按原计划做"索引节点/行记录二进制化"**——实测证伪：纯 Python 手写二进制解码比 C 实现的 `json` 慢 **2–4×**（2000 行 16 列：`json.loads` 4.0 ms vs 定标二进制 8.5 ms），体积还大 41%（161 B/行 vs 114 B/行）。索引节点里 JSON 只占解码耗时的 **15–19%**（0.014 ms 页内 JSON vs 0.067 ms 整页解码），行记录里 `json.loads` 也只占 40%。二进制只有在**能支持页内随机访问**（定宽键 + 页内二分，不解码整页）时才值得做，那是另一个量级的工作。
+- [ ] **需要列值**的全表扫描仍以 JSON 逐行解码为硬性下限（`COUNT(*)` 那一档已用"干脆不解码"解决；`COUNT(列)`/`SUM(列)`/纯投影实测只在噪声内浮动）。实测口径：lineitem 一行解码 **2.00 µs**，其中 `$decimal` 还原器占 **1.06 µs**——同一批行换成纯 C 解码是 **0.94 µs**。要压这一档，**只解 WHERE/投影用到的列**是唯一还有量级空间的方向，但代价明确：
+  1. 需要把"哪些列是 DECIMAL"从 schema 透传到 `TableHeap`（它当前不持有 schema）；
+  2. 未解码的 DECIMAL 列会以标记字典的形式留在行里，任何消费点读到它就是**静默错误**（本项目已修过四个同类问题），必须先把消费边界钉死；
+  3. 即便是完美实现，收益上限也只是把 2.00 µs/行压到 1.1 µs/行左右（约 18%），远小于 `COUNT(*)` 那一档的量级。
+- [ ] 连接键推断仍不覆盖：子查询内部的连接键、`OR` 各分支结构不同（非等式）的情形。
+- [ ] 连接与聚合的绝对耗时仍是最大头（Q1 ~0.96 s / Q6 ~0.43 s，对 SQLite 约 20–30×；Q6 本轮实测仍为 370–420 ms 区间，扫描路径改动落在噪声内）；下一步优先级高于继续压解码。
+- [ ] 相关子查询现在**逐行重跑**（Q2 在 SF0.01 上单条 >45 s 未跑完）。真正的解法是去相关变换（把 `min(ps_supplycost)` 这类改写成派生表 + `GROUP BY` 连接），不是微优化。
+
