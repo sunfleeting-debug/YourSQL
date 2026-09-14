@@ -126,6 +126,7 @@ def _run_yoursql(benchmark: TPCH, data_dir: Path, iterations: int, settle_second
         load_seconds = time.perf_counter() - started
 
         def execute(statement: str) -> list[tuple[Any, ...]]:
+            """执行底层数据库语句。"""
             return list(database.execute(statement).rows)
 
         execution = _timed_query(execute, benchmark.get_query(QUERY_ID, dialect="sqlite"), iterations, settle_seconds)
@@ -184,6 +185,7 @@ def _run_sqlite(benchmark: TPCH, data_dir: Path, iterations: int, *, in_memory: 
         load_seconds = time.perf_counter() - started
 
         def execute(statement: str) -> list[tuple[Any, ...]]:
+            """执行底层数据库语句。"""
             cursor = connection.execute(statement)
             try:
                 return list(cursor.fetchall())
@@ -227,6 +229,7 @@ def _run_duckdb(benchmark: TPCH, data_dir: Path, iterations: int, *, decimal: bo
         query = _duckdb_query(benchmark.get_query(QUERY_ID, dialect="sqlite"), double_semantics=not decimal)
 
         def execute(statement: str) -> list[tuple[Any, ...]]:
+            """执行底层数据库语句。"""
             return list(connection.execute(statement).fetchall())
 
         execution = _timed_query(execute, query, iterations, settle_seconds)

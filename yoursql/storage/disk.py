@@ -104,6 +104,8 @@ class DiskManager:
         if exists:
             self._load_superblock()
         else:
+            # WHY：第 0 页是固定的启动入口，先写满一个空页建立文件边界，再写入完整
+            # superblock，确保后续按固定页大小读取时不会把文件头当成普通数据。
             self._write_raw(Page.empty(0, page_size, PageType.SUPERBLOCK))
             self._write_superblock()
             self.sync()
@@ -134,6 +136,7 @@ class DiskManager:
 
     def _load_superblock(self) -> None:
         """读取并校验数据库文件的 superblock。"""
+        # WHY：superblock 的页号固定为 0，打开数据库时无需依赖其他页的目录信息即可启动。
         raw = self._read_raw(0)
         page = Page.from_bytes(raw, page_size=self.page_size)
         if page.page_type is not PageType.SUPERBLOCK:
@@ -189,6 +192,7 @@ class DiskManager:
         trace = current_trace.get()
         if trace is not None:
             trace.event("disk_read", page_id)
+        # WHY：固定页大小使页号可以直接换算为文件偏移，避免扫描前置页并保持随机访问边界稳定。
         self._file.seek(page_id * self.page_size)
         raw = self._file.read(self.page_size)
         if len(raw) != self.page_size:
@@ -201,6 +205,7 @@ class DiskManager:
         trace = current_trace.get()
         if trace is not None:
             trace.event("disk_write", page.page_id)
+        # WHY：始终写入 Page.to_bytes() 生成的完整固定长度页，避免短写导致后续页边界错位。
         self._file.seek(page.page_id * self.page_size)
         self._file.write(page.to_bytes())
 
@@ -230,13 +235,17 @@ class DiskManager:
         with self._lock:
             self._ensure_open()
             if self._free_pages:
+                # WHY：优先复用已释放页可以避免文件无意义增长；取最小页号也让分配结果稳定可复现。
                 page_id = min(self._free_pages)
                 self._free_pages.remove(page_id)
             else:
+                # WHY：next_page_id 单调推进，保证新页不会覆盖已有页；文件只扩展、不收缩。
                 page_id = self._next_page_id
                 self._next_page_id += 1
             page = Page(page_id, self.page_size, page_type, payload)
             self._write_raw(page)
+            # WHY：先写出实际页，再发布分配元数据，避免 superblock 先指向尚未物化的页；
+            # 两次写入尚非原子操作，崩溃恢复机制列入 TODO。
             self._write_superblock()
             return page
 
@@ -247,10 +256,12 @@ class DiskManager:
             self._check_page_id(page_id)
             if page_id == 0:
                 raise StorageError("不能释放 superblock")
+            # WHY：先将物理页重置为 FREE，再把页号发布到空闲集合，避免元数据已复用而页头仍残留旧类型。
             self._write_raw(Page.empty(page_id, self.page_size, PageType.FREE))
             self._free_pages.add(int(page_id))
             for key, value in tuple(self._named_pages.items()):
                 if value == page_id:
+                    # WHY：释放页后清除命名指针，避免 named_pages 指向已回收页。
                     del self._named_pages[key]
             self._write_superblock()
 
@@ -272,6 +283,7 @@ class DiskManager:
         """将页对象写回数据库文件。"""
         with self._lock:
             self._ensure_open()
+            # WHY：页大小不一致会让当前文件的固定偏移模型失效，必须在写入前拒绝。
             if page.page_size != self.page_size:
                 raise StorageError("页大小与文件不一致")
             self._check_page_id(page.page_id)
@@ -311,6 +323,8 @@ class DiskManager:
         """将文件缓冲区同步到持久化介质。"""
         with self._lock:
             self._ensure_open()
+            # WHY：write/flush 只把内容推进到文件或 OS 缓冲区，只有 flush + fsync 才完成
+            # 当前持久化边界；调用频率由上层事务/语句边界统一控制以减少同步开销。
             self._file.flush()
             os.fsync(self._file.fileno())
 
@@ -318,6 +332,7 @@ class DiskManager:
         """关闭资源并释放关联状态。"""
         with self._lock:
             if not self._closed:
+                # WHY：关闭前必须完成最后一次同步，避免仍在缓存中的脏数据随文件句柄关闭而丢失。
                 self.sync()
                 self._file.close()
                 self._closed = True

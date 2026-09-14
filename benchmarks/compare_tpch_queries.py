@@ -322,6 +322,7 @@ def main() -> None:
     print(f"{'查询':<6}{'YourSQL':>26}{'SQLite':>22}{'DuckDB':>22}")
     for entry in measurements:
         def render(item: dict[str, Any] | None) -> str:
+            """渲染基准报告中的结果表。"""
             if not item:
                 return "-"
             if item.get("status") != "OK":
