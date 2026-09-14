@@ -8,6 +8,7 @@ from pathlib import Path
 from time import perf_counter
 
 from yoursql.common import DatabaseConfig
+from yoursql.common.codec import PayloadCodecName, validate_payload_codec
 from yoursql.engine.runtime.database import Database
 
 
@@ -333,7 +334,12 @@ def _remove_database(path: Path) -> None:
         resolved.unlink()
 
 
-def build(path: Path, *, force: bool = False) -> dict[str, object]:
+def build(
+    path: Path,
+    *,
+    force: bool = False,
+    payload_codec: PayloadCodecName = "json",
+) -> dict[str, object]:
     """生成数据库并返回便于 README 引用的统计摘要。"""
 
     if path.exists():
@@ -343,7 +349,11 @@ def build(path: Path, *, force: bool = False) -> dict[str, object]:
 
     started = perf_counter()
     # 保留教学默认页大小，便于工作台观察更多 HEAP 和 INDEX 页面。
-    config = DatabaseConfig(page_size=4096, buffer_pool_size=128)
+    config = DatabaseConfig(
+        page_size=4096,
+        buffer_pool_size=128,
+        payload_codec=validate_payload_codec(payload_codec),
+    )
     with Database(path, config=config) as db:
         print(f"创建演示数据库: {path}")
         _schema(db)
@@ -438,9 +448,19 @@ def main() -> None:
     """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
-    parser.add_argument("--force", action="store_true", help="重建默认 data/showcase_v2.db")
+    parser.add_argument("--force", action="store_true", help="重建允许的演示库文件")
+    parser.add_argument(
+        "--payload-codec",
+        choices=("json", "manual"),
+        default="json",
+        help="页内 payload 编码；manual 使用 YSPL 手写编解码",
+    )
     args = parser.parse_args()
-    build(args.database.resolve(), force=args.force)
+    build(
+        args.database.resolve(),
+        force=args.force,
+        payload_codec=args.payload_codec,
+    )
 
 
 if __name__ == "__main__":

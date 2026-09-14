@@ -18,6 +18,7 @@ build/
 # WHY：data/ 下是运行时数据库；用 data/* 而非 data/，否则被排除的目录内的演示库无法用 ! 重新纳入。
 data/*
 !data/showcase_v2.db
+!data/showcase_v3.db
 
 # ---------- 依赖锁与前端构建产物 ----------
 *.lock
