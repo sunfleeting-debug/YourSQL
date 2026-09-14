@@ -7,6 +7,7 @@ import type { DatabaseCreateConfig, DatabaseDialogMode, QueryTabState, RunSource
 import Login from './components/auth/Login'
 import { AppHeader, PermissionDialog, Toast } from './components/layout'
 import DatabasePickerDialog from './components/database/DatabasePickerDialog'
+import DatabaseSettingsDialog from './components/database/DatabaseSettingsDialog'
 import { siblingDatabasePath } from './components/database/utils'
 import { QueryWorkspace } from './components/query'
 import { SchemaBrowser } from './components/schema'
@@ -59,6 +60,7 @@ export default function App() {
   const [createDatabasePath, setCreateDatabasePath] = useState('data/new_database.db')
   const [createDatabaseConfig, setCreateDatabaseConfig] = useState<DatabaseCreateConfig>(DEFAULT_DATABASE_CONFIG)
   const [storageRefreshToken, setStorageRefreshToken] = useState(0)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [rowLimit, setRowLimit] = useState(1000)
   const [timeout, setTimeoutValue] = useState(15)
 
@@ -66,6 +68,7 @@ export default function App() {
   const editor = useRef<EditorView | null>(null)
   const permissionsDialog = useRef<HTMLDialogElement>(null)
   const databaseDialog = useRef<HTMLDialogElement>(null)
+  const settingsDialog = useRef<HTMLDialogElement>(null)
   const sources = useRef(new Map<string, RunSource>())
   const pipelineResizeStart = useRef<{ x: number; width: number } | null>(null)
 
@@ -153,6 +156,8 @@ export default function App() {
     setDatabasePickerBusy(false)
     setStorageRefreshToken(0)
     databaseDialog.current?.close()
+    settingsDialog.current?.close()
+    setSettingsOpen(false)
     sources.current.clear()
   }, [])
 
@@ -407,6 +412,15 @@ export default function App() {
       setDatabasePickerBusy(false)
     }
   }
+  function openSettings() {
+    if (running) return
+    setSettingsOpen(true)
+    if (!settingsDialog.current?.open) settingsDialog.current?.showModal()
+  }
+  function closeSettings() {
+    setSettingsOpen(false)
+    settingsDialog.current?.close()
+  }
   async function selectDatabase(path: string) {
     if (databasePickerBusy) return
     if (path === (databaseFiles?.active_path ?? databaseFiles?.active ?? session?.database)) {
@@ -535,6 +549,7 @@ export default function App() {
         workspaceMode={workspaceMode}
         modePending={isModePending}
         onOpenDatabasePicker={() => void openDatabasePicker()}
+        onOpenSettings={openSettings}
         onSwitchWorkspaceMode={switchWorkspaceMode}
         onOpenPermissions={() => permissionsDialog.current?.showModal()}
         onLogout={logout}
@@ -671,6 +686,15 @@ export default function App() {
             onTimeoutChange={setTimeoutValue}
           />
           <PermissionDialog ref={permissionsDialog} session={session} onClose={() => permissionsDialog.current?.close()} />
+          <DatabaseSettingsDialog
+            ref={settingsDialog}
+            database={session.database}
+            databasePath={session.database_path}
+            payloadCodec={dialect?.payload_codec ?? null}
+            visible={settingsOpen}
+            onChanged={() => setStorageRefreshToken(token => token + 1)}
+            onClose={closeSettings}
+          />
         </>
       )}
       <DatabasePickerDialog

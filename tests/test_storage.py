@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from yoursql.common import RowId
+from yoursql.common import RowId, StorageError
 from yoursql.storage import BufferPool, DiskManager, Page, PageType, SlottedPage, TableHeap
 
 
@@ -72,6 +72,50 @@ def test_buffer_snapshot_exposes_eviction_order_for_lru_and_fifo(tmp_path: Path)
 
         fifo.get_page(page_ids[1])
         assert page_ids[1] not in fifo.snapshot()["eviction_order"]
+
+
+def test_buffer_pool_can_resize_without_resetting_hot_pages(tmp_path: Path) -> None:
+    path = tmp_path / "resize.db"
+    with DiskManager(path) as disk:
+        pages = [disk.allocate(PageType.CATALOG, str(index).encode()) for index in range(3)]
+        page_ids = [page.page_id for page in pages]
+        buffer = BufferPool(disk, capacity=3)
+        for page_id in page_ids:
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+        buffer.get_page(page_ids[0])
+        buffer.unpin(page_ids[0])
+
+        before = buffer.stats()
+        assert buffer.resize(2) == 1
+        assert buffer.capacity == 2
+        assert buffer.stats().hits == before.hits
+        assert page_ids[1] not in buffer
+        assert buffer.events()[-1]["reason"] == "resize"
+
+        assert buffer.resize(5) == 0
+        assert buffer.capacity == 5
+        assert buffer.stats().size == 2
+
+        dirty = BufferPool(disk, capacity=2)
+        dirty.get_page(page_ids[1])
+        dirty.unpin(page_ids[1])
+        dirty.put_page(Page(page_ids[1], 4096, PageType.CATALOG, b"updated"))
+        dirty.get_page(page_ids[0])
+        dirty.unpin(page_ids[0])
+        assert dirty.resize(1) == 1
+        assert disk.read(page_ids[1]).payload == b"updated"
+        assert dirty.events()[-1]["writeback"] is True
+
+        pinned = BufferPool(disk, capacity=2)
+        pinned.get_page(page_ids[0])
+        pinned.get_page(page_ids[1])
+        with pytest.raises(StorageError):
+            pinned.resize(1)
+        assert pinned.capacity == 2
+        assert pinned.stats().size == 2
+        pinned.unpin(page_ids[0])
+        pinned.unpin(page_ids[1])
 
 
 def test_table_heap_reuses_slots_and_persists(tmp_path: Path) -> None:

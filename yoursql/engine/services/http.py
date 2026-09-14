@@ -446,6 +446,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             elif post and route == "/api/storage/cache/policy":
                 replacement_policy = self._string(body, "replacement_policy", 16)
                 data = workbench.set_storage_policy(session, replacement_policy)
+            elif post and route == "/api/storage/cache/resize":
+                capacity = self._integer(body.get("buffer_pool_size"), 0, 1, 4096)
+                data = workbench.resize_storage(session, capacity)
             elif not post and route in {"/api/databases", "/api/tables"}:
                 data = workbench.metadata(session)
                 for database in data["databases"]:

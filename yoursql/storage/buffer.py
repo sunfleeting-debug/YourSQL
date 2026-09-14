@@ -187,6 +187,32 @@ class BufferPool:
             self.replacement_policy = policy
             return changed
 
+    def resize(self, capacity: int) -> int:
+        """在线调整缓存容量，并返回因缩容淘汰的页数。
+
+        WHY：扩容只改变上限并保留当前热页；缩容必须先确认有足够的未 pin 页，
+        再按当前淘汰策略回收，避免热更新把正在使用的页强行移出缓存。
+        """
+
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise ValueError("缓存容量必须是整数")
+        if capacity < 1:
+            raise ValueError("缓存容量必须为正数")
+        with self._lock:
+            required = max(0, len(self._frames) - capacity)
+            available = sum(frame.pin_count == 0 for frame in self._frames.values())
+            if required > available:
+                raise StorageError(
+                    "目标缓存容量小于当前 pin 页数量", reason="pinned"
+                )
+            if required == 0:
+                self.capacity = capacity
+                return 0
+            for _ in range(required):
+                self._evict_one(reason="resize")
+            self.capacity = capacity
+            return required
+
     def _touch(self, frame: BufferFrame) -> None:
         """更新缓存页的访问顺序和相关统计。"""
         self._clock += 1
@@ -225,7 +251,7 @@ class BufferPool:
             candidates.sort(key=lambda item: (item[1].last_used, item[0]))
         return [page_id for page_id, _ in candidates]
 
-    def _evict_one(self) -> None:
+    def _evict_one(self, *, reason: str = "capacity") -> None:
         """淘汰队首第一个未 pin 的页。
 
         WHY：原实现每次淘汰都构建候选列表并取 min，复杂度 O(容量)；全表扫描时几乎每页
@@ -252,7 +278,7 @@ class BufferPool:
             dirty=writeback,
             writeback=writeback,
             policy=self.replacement_policy,
-            reason="capacity",
+            reason=reason,
         )
 
     def get_page(self, page_id: int, pin: bool = True) -> Page:

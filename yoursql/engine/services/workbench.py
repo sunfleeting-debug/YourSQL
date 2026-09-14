@@ -22,6 +22,7 @@ from yoursql.common import (
     JsonObject,
     YourSQLError,
     RuntimeConfig,
+    StorageError,
     validate_payload_codec,
 )
 from yoursql.common.trace import ExecutionTrace, current_trace
@@ -630,6 +631,49 @@ class Workbench:
                     "replacement_policy": policy,
                     "buffer_pool": buffer_pool.to_dict(),
                     "note": "策略仅影响当前服务进程；现有缓存帧和累计统计保持不变，下一次淘汰开始采用新策略。",
+                }
+
+    def resize_storage(
+        self, session: WebSession, capacity: int
+    ) -> JsonObject:
+        """【前端特供】在线调整缓存页数，保持可用帧和统计连续。"""
+
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise YourSQLError("缓存页数必须是整数", "BAD_REQUEST")
+        if not 1 <= capacity <= 4096:
+            raise YourSQLError("缓存页数范围应为 1–4096", "BAD_REQUEST")
+        with self._switch_lock:
+            with self.connection(session):
+                session.connection.authorize("SECURITY")
+                with self._lock:
+                    if any(
+                        task.state in {"queued", "running"}
+                        for task in self._tasks.values()
+                    ):
+                        raise YourSQLError(
+                            "当前仍有 SQL 任务执行，请等待完成后再调整缓存容量",
+                            "SERVICE_BUSY",
+                        )
+                previous = self.database.buffer_pool.capacity
+                try:
+                    evicted = self.database.resize_buffer_pool(capacity)
+                except StorageError as exc:
+                    if exc.details.get("reason") != "pinned":
+                        raise
+                    raise YourSQLError(
+                        "目标缓存容量小于当前正在使用的 pin 页数量",
+                        "SERVICE_BUSY",
+                    ) from exc
+                changed = previous != capacity
+                buffer_pool = self.database.buffer_pool.snapshot(0, 100)
+                return {
+                    "snapshot_at": now(),
+                    "changed": changed,
+                    "previous_capacity": previous,
+                    "capacity": capacity,
+                    "evicted_pages": evicted,
+                    "buffer_pool": buffer_pool.to_dict(),
+                    "note": "容量调整仅影响当前服务进程；扩容保留已有缓存帧，缩容按当前策略淘汰未 pin 页并写回脏页。",
                 }
 
     def dialect(self) -> JsonObject:

@@ -171,6 +171,16 @@ export interface StoragePolicyChange {
   note: string
 }
 
+export interface StorageResizeChange {
+  snapshot_at: string
+  changed: boolean
+  previous_capacity: number
+  capacity: number
+  evicted_pages: number
+  buffer_pool: BufferPoolSnapshot
+  note: string
+}
+
 export interface StorageIndexSnapshot {
   snapshot_at: string
   readonly: boolean

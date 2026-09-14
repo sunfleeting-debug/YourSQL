@@ -563,6 +563,47 @@ def test_storage_replacement_policy_can_be_switched_without_resetting_cache(serv
     assert client.request("/api/storage/cache/policy", {"replacement_policy": "random"})[0] == 400
 
 
+def test_storage_cache_capacity_can_be_resized_online(service) -> None:
+    database, _, client = service
+    client.login()
+    before = database.buffer_pool.snapshot()
+    previous_capacity = before.stats.capacity
+    expanded_capacity = previous_capacity + 2
+    database.optimizer.cache.put("SELECT 1", object())
+    assert len(database.optimizer.cache) == 1
+
+    status, response = client.request(
+        "/api/storage/cache/resize", {"buffer_pool_size": expanded_capacity}
+    )
+    assert status == 200
+    data = response["data"]
+    assert data["changed"]
+    assert data["previous_capacity"] == previous_capacity
+    assert data["capacity"] == expanded_capacity
+    assert data["evicted_pages"] == 0
+    assert database.buffer_pool.capacity == expanded_capacity
+    assert database.config.buffer_pool_size == expanded_capacity
+    assert database.optimizer.buffer_pool_pages == expanded_capacity
+    assert len(database.optimizer.cache) == 0
+    assert data["buffer_pool"]["frames"] == before["frames"]
+    assert data["buffer_pool"]["stats"]["hits"] == before["stats"]["hits"]
+    assert data["buffer_pool"]["stats"]["misses"] == before["stats"]["misses"]
+
+    status, response = client.request(
+        "/api/storage/cache/resize", {"buffer_pool_size": 2}
+    )
+    assert status == 200
+    data = response["data"]
+    assert data["capacity"] == 2
+    assert data["evicted_pages"] >= 0
+    assert data["buffer_pool"]["stats"]["size"] <= 2
+    assert database.optimizer.buffer_pool_pages == 2
+
+    assert client.request(
+        "/api/storage/cache/resize", {"buffer_pool_size": 4097}
+    )[0] == 400
+
+
 @pytest.mark.parametrize("route,body", [
     ("/api/queries", {"sql": []}), ("/api/queries", {"sql": "SELECT 1", "row_limit": True}),
     ("/api/queries", {"sql": "SELECT 1", "timeout_seconds": 31}),

@@ -1,6 +1,6 @@
 /** 应用页头：连接状态、工作区模式和当前用户操作。 */
 
-import { Activity, Braces, Database, FolderOpen, HardDrive, LogOut, ShieldCheck, UserRound } from 'lucide-react'
+import { Activity, Braces, Database, FolderOpen, HardDrive, LogOut, Settings2, ShieldCheck, UserRound } from 'lucide-react'
 import type { PayloadCodecName, SessionInfo } from '../../types/common'
 import type { WorkspaceMode } from '../../app/types'
 import { statusDotClassName } from '../../view-classes'
@@ -14,6 +14,7 @@ export interface AppHeaderProps {
   workspaceMode: WorkspaceMode
   modePending: boolean
   onOpenDatabasePicker: () => void
+  onOpenSettings: () => void
   onSwitchWorkspaceMode: (mode: WorkspaceMode) => void
   onOpenPermissions: () => void
   onLogout: () => void
@@ -28,6 +29,7 @@ export default function AppHeader({
   workspaceMode,
   modePending,
   onOpenDatabasePicker,
+  onOpenSettings,
   onSwitchWorkspaceMode,
   onOpenPermissions,
   onLogout
@@ -47,10 +49,16 @@ export default function AppHeader({
           <code title="该数据库的 payload 编码记录在 superblock 中">payload:{payloadCodec === 'manual' ? '手写' : 'JSON'}</code>
         )}
         {session && (
-          <button className="database-switch" onClick={onOpenDatabasePicker} disabled={running || databasePickerBusy} title="选择或新建数据库">
-            <FolderOpen size={13} />
-            <span>数据库</span>
-          </button>
+          <>
+            <button className="database-switch" onClick={onOpenDatabasePicker} disabled={running || databasePickerBusy} title="选择或新建数据库">
+              <FolderOpen size={13} />
+              <span>数据库</span>
+            </button>
+            <button className="database-settings-button" onClick={onOpenSettings} disabled={running} title="设置当前数据库参数">
+              <Settings2 size={13} />
+              <span>设置</span>
+            </button>
+          </>
         )}
         <code>{window.location.host}</code>
       </div>

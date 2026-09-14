@@ -17,6 +17,7 @@ import type {
   StoragePageChanges,
   StoragePageDetail,
   StoragePolicyChange,
+  StorageResizeChange,
   StorageSlot,
   StorageSnapshot
 } from '../../types/storage'
@@ -727,6 +728,9 @@ export default function StoragePanel({
   const [policyBusy, setPolicyBusy] = useState(false)
   const [policyDraft, setPolicyDraft] = useState<ReplacementPolicy | null>(null)
   const [policyNotice, setPolicyNotice] = useState('')
+  const [capacityBusy, setCapacityBusy] = useState(false)
+  const [capacityDraft, setCapacityDraft] = useState<string | null>(null)
+  const [capacityNotice, setCapacityNotice] = useState('')
   const [incrementalBusy, setIncrementalBusy] = useState(false)
   const [pageRefreshBusy, setPageRefreshBusy] = useState(false)
   const [detailBusy, setDetailBusy] = useState(false)
@@ -762,7 +766,7 @@ export default function StoragePanel({
   const detailRequestRef = useRef(0)
   const slotDetailRequestRef = useRef(0)
   const { tooltip, tooltipProps } = useStorageTooltip()
-  const busy = snapshotBusy || cacheBusy || policyBusy || incrementalBusy || pageRefreshBusy || detailBusy
+  const busy = snapshotBusy || cacheBusy || policyBusy || capacityBusy || incrementalBusy || pageRefreshBusy || detailBusy
   const refreshSnapshot = useCallback(async () => {
     const requestId = ++snapshotRequestRef.current
     setSnapshotBusy(true)
@@ -838,6 +842,36 @@ export default function StoragePanel({
       }
     },
     [busy, policyBusy]
+  )
+  const changeCapacity = useCallback(
+    async (capacity: number) => {
+      if (capacityBusy || busy) return
+      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 4096) {
+        setCapacityNotice('缓存页数范围应为 1–4096。')
+        return
+      }
+      setCapacityBusy(true)
+      setError('')
+      setDenied(false)
+      setCapacityNotice('')
+      try {
+        const value = await api<StorageResizeChange>('/api/storage/cache/resize', {
+          buffer_pool_size: capacity
+        })
+        setCapacityDraft(null)
+        setCapacityNotice(
+          value.changed ? `已调整为 ${value.capacity} 页；本次缩容淘汰 ${value.evicted_pages} 页。` : `当前已使用 ${value.capacity} 页。`
+        )
+        setCacheSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+        setSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+      } catch (error) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      } finally {
+        setCapacityBusy(false)
+      }
+    },
+    [busy, capacityBusy]
   )
   const refreshIndexCatalog = useCallback(async () => {
     const requestId = ++indexRequestRef.current
@@ -1078,6 +1112,12 @@ export default function StoragePanel({
   const raw = pageDetail ? rawValue(pageDetail.raw_payload) : null
   const jsonDetail = detail ? jsonDetailValue(detail, pageDetail !== null) : null
   const currentCache = cacheSnapshot?.buffer_pool ?? snapshot?.buffer_pool
+  const currentCapacity = currentCache?.stats.capacity ?? 64
+  const pendingCapacity = capacityDraft === null ? currentCapacity : Number(capacityDraft)
+  const capacityValid = Number.isInteger(pendingCapacity) && pendingCapacity >= 1 && pendingCapacity <= 4096
+  const displayedCapacity = capacityValid ? pendingCapacity : currentCapacity
+  const cacheBytes = displayedCapacity * (snapshot?.page_size ?? 4096)
+  const cacheSizeLabel = cacheBytes >= 1024 * 1024 ? `${(cacheBytes / (1024 * 1024)).toFixed(1)} MiB` : `${Math.round(cacheBytes / 1024)} KiB`
   const evictionOrder = currentCache?.eviction_order ?? []
   const evictionRankByPageId = new Map(evictionOrder.map((pageId, index) => [pageId, index + 1] as const))
   const cacheFrameByPageId = new Map(currentCache?.frames.map(frame => [frame.page_id, frame] as const) ?? [])
@@ -1486,6 +1526,38 @@ export default function StoragePanel({
                           换入 {currentCache.stats.misses} · 淘汰 {currentCache.stats.evictions}
                         </span>
                       </div>
+                      <div className="storage-policy-control storage-capacity-control">
+                        <div className="storage-policy-label">
+                          <HardDrive size={13} />
+                          <label htmlFor="storage-buffer-capacity">缓存页数</label>
+                        </div>
+                        <input
+                          id="storage-buffer-capacity"
+                          type="number"
+                          min={1}
+                          max={4096}
+                          step={1}
+                          value={capacityDraft ?? String(currentCapacity)}
+                          onChange={event => setCapacityDraft(event.target.value)}
+                          disabled={busy}
+                          title="在线调整当前服务进程的缓存容量；缩容只淘汰未 pin 页"
+                        />
+                        <span className="storage-capacity-size">约 {cacheSizeLabel}</span>
+                        <button
+                          type="button"
+                          className="subtle"
+                          onClick={() => void changeCapacity(pendingCapacity)}
+                          disabled={busy || !capacityValid || pendingCapacity === currentCapacity}
+                        >
+                          {capacityBusy ? <RefreshCw size={12} className="spin" /> : '应用'}
+                        </button>
+                        <small>在线调整 · 当前服务进程</small>
+                      </div>
+                      {capacityNotice && (
+                        <div className="storage-policy-notice" role="status">
+                          {capacityNotice}
+                        </div>
+                      )}
                       <div className="storage-policy-control">
                         <div className="storage-policy-label">
                           <Settings2 size={13} />

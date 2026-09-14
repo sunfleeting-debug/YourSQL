@@ -694,6 +694,20 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             "plan_cache": len(self.optimizer.cache),
         }
 
+    def resize_buffer_pool(self, capacity: int) -> int:
+        """在线调整缓存页数并同步优化器的缓存成本参数。"""
+
+        with self._lock:
+            previous_capacity = self.buffer_pool.capacity
+            evicted = self.buffer_pool.resize(capacity)
+            self.config = replace(self.config, buffer_pool_size=capacity)
+            # WHY：优化器用缓存页数估算随机回表成本；只调整 BufferPool 会让计划估算继续使用旧容量。
+            self.optimizer.buffer_pool_pages = capacity
+            if previous_capacity != capacity:
+                # WHY：已有物理计划可能按旧缓存容量选择了 IndexScan/SeqScan，热更新后必须重新规划。
+                self.optimizer.cache.invalidate()
+            return evicted
+
     # HOW: 正常关闭保存权限状态并关闭缓存和文件；不等于具备断电恢复能力。
     def close(self) -> None:
         """关闭资源并释放关联状态。"""

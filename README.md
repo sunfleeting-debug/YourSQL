@@ -227,9 +227,9 @@ superblock 会记录 `payload_codec`，已有数据库打开时以文件记录�
 - SQL：`POST /api/validate`、`POST /api/queries`、`GET /api/queries/{id}`、`GET /api/queries/{id}/results/{index}`、`POST /api/queries/{id}/cancel`
 - 历史：`GET /api/history`
 - 性能监控：`GET /api/monitor/summary`、`GET /api/monitor/queries`、`GET /api/monitor/queries/{query_id}`
-- 存储：`GET /api/storage`、`GET /api/storage/changes`、`GET /api/storage/pages/{page_id}`、`GET /api/storage/cache`、`POST /api/storage/cache/policy`、`GET /api/storage/indexes`、`GET /api/storage/indexes/{name}`
+- 存储：`GET /api/storage`、`GET /api/storage/changes`、`GET /api/storage/pages/{page_id}`、`GET /api/storage/cache`、`POST /api/storage/cache/policy`、`POST /api/storage/cache/resize`、`GET /api/storage/indexes`、`GET /api/storage/indexes/{name}`
 
-切换与新建库用 `path` 字段（新建还可传 `page_size`、`buffer_pool_size`、`replacement_policy`）；导入用二进制 `.db` 文件体加 `X-YourSQL-File-Name` 文件名头。缓存响应的 `buffer_pool.eviction_order` 是当前策略下的升序淘汰队列，Pin 中的页不进入队列；拥有 `SECURITY` 权限时可在线切换 LRU/FIFO，切换不清空已有缓存帧，从下一次淘汰开始生效。
+切换与新建库用 `path` 字段（新建还可传 `page_size`、`buffer_pool_size`、`replacement_policy`）；导入用二进制 `.db` 文件体加 `X-YourSQL-File-Name` 文件名头。缓存响应的 `buffer_pool.eviction_order` 是当前策略下的升序淘汰队列，Pin 中的页不进入队列；拥有 `SECURITY` 权限时可在线切换 LRU/FIFO，切换不清空已有缓存帧，从下一次淘汰开始生效。`POST /api/storage/cache/resize` 接收 `{"buffer_pool_size": 1024}`，可在当前服务进程内热调整缓存页数：扩容保留现有缓存帧，缩容按当前策略淘汰未 pin 页并写回脏页，累计命中/未命中统计保持连续；有 SQL 任务执行时拒绝调整，容量范围为 1–4096 页。登录后页眉的“设置”入口集中展示当前数据库参数，并提供缓存页数和淘汰策略的在线调整；页大小与 Payload 编码属于数据库格式参数，只读展示。
 
 ## 索引与 Q6 实测
 

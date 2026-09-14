@@ -2491,6 +2491,18 @@
   background: #e8f4f2;
   border-color: #b8d8d3;
 }
+.database-settings-button {
+  padding: 5px 8px;
+  border-color: #d9e6e7;
+  background: #fff;
+  color: #627c84;
+  font-size: 10px;
+}
+.database-settings-button:hover {
+  background: #f4f8f8;
+  border-color: #b8d8d3;
+  color: #34756f;
+}
 .database-dialog {
   width: 460px;
   max-width: calc(100vw - 24px);
@@ -2581,6 +2593,158 @@
   color: #9aa7b0;
   font-size: 10px;
 }
+.database-settings-dialog {
+  width: 560px;
+}
+.database-settings-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #edf1f3;
+}
+.database-settings-meta > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #4c8881;
+}
+.database-settings-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #476775;
+  font-size: 12px;
+  font-weight: 600;
+}
+.database-settings-meta code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8a9ba4;
+  font-size: 9px;
+}
+.database-settings-loading,
+.database-settings-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 16px 0 4px;
+  color: #728792;
+  font-size: 10px;
+}
+.database-settings-error {
+  color: #b85d5d;
+}
+.database-settings-body {
+  padding-top: 13px;
+}
+.database-settings-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 12px;
+}
+.database-settings-facts > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #e6edef;
+  border-radius: 4px;
+  background: #fbfdfd;
+}
+.database-settings-facts span {
+  color: #889aa3;
+  font-size: 9px;
+}
+.database-settings-facts strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #52737b;
+  font-size: 11px;
+  font-weight: 600;
+}
+.database-settings-facts small,
+.database-setting-label small {
+  color: #9aaab2;
+  font-size: 9px;
+  line-height: 1.45;
+}
+.database-setting-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0;
+  border-top: 1px solid #edf1f3;
+}
+.database-setting-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+  color: #4d8d85;
+}
+.database-setting-label > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.database-setting-label strong {
+  color: #58727d;
+  font-size: 11px;
+}
+.database-setting-editor {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.database-setting-editor input,
+.database-setting-editor select {
+  min-width: 88px;
+  padding: 5px 7px;
+  border: 1px solid #d8e4e7;
+  border-radius: 3px;
+  background: #fff;
+  color: #54717a;
+  font-size: 10px;
+}
+.database-setting-editor select {
+  min-width: 210px;
+}
+.database-setting-editor > span {
+  min-width: 58px;
+  color: #81969c;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  text-align: right;
+  white-space: nowrap;
+}
+.database-setting-editor button {
+  padding: 5px 10px;
+  font-size: 10px;
+}
+.database-settings-note,
+.database-settings-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 11px 0 0;
+  color: #8a9ba3;
+  font-size: 9px;
+  line-height: 1.6;
+}
+.database-settings-notice {
+  margin-top: 6px;
+  color: #398176;
+}
 @media (max-width: 700px) {
   .database-switch {
     padding: 5px;
@@ -2588,8 +2752,30 @@
   .database-switch > span {
     display: none;
   }
+  .database-settings-button {
+    padding: 5px;
+  }
+  .database-settings-button > span {
+    display: none;
+  }
   .database-dialog {
     padding: 12px 14px;
+  }
+  .database-settings-facts {
+    grid-template-columns: 1fr;
+  }
+  .database-setting-control {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .database-setting-editor {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .database-setting-editor select {
+    min-width: 0;
+    flex: 1;
   }
 }
 
@@ -7099,6 +7285,21 @@
   color: #54717a;
   font-size: 10px;
 }
+.storage-policy-control input[type='number'] {
+  width: 88px;
+  padding: 5px 7px;
+  border: 1px solid #d8e4e7;
+  border-radius: 3px;
+  background: #fff;
+  color: #54717a;
+  font-size: 10px;
+}
+.storage-capacity-size {
+  color: #7b9298;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  white-space: nowrap;
+}
 .storage-policy-control button {
   display: inline-flex;
   align-items: center;
@@ -7124,6 +7325,10 @@
   .storage-policy-control select {
     min-width: 0;
     flex: 1;
+  }
+  .storage-capacity-control input[type='number'] {
+    flex: 1;
+    min-width: 72px;
   }
 }
 
