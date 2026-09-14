@@ -20,6 +20,7 @@ from ...common import (
     YourSQLError,
     StorageError,
 )
+from ...common.config import default_audit_path
 from ...common.codec import PayloadCodecError, decode_payload
 from ...common.types import PageId, RowId
 from ...sql.ast import Explain, Select, Statement
@@ -196,7 +197,11 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             self.system_catalog.persist_rbac(self.rbac)
         else:
             self.rbac = internal_rbac
-        self.audit = AuditLog(audit_path)
+        # HOW：默认按启动日期分文件；显式路径用于测试、嵌入式调用或独立审计目录。
+        selected_audit_path = (
+            default_audit_path() if audit_path is None else audit_path
+        )
+        self.audit = AuditLog(selected_audit_path)
         self.session = Session(self.rbac.authenticate(user, password), self.rbac)
         self.optimizer = Optimizer(
             StatisticsStore(), buffer_pool_pages=self.config.buffer_pool_size

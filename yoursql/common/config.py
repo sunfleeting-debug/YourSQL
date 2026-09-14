@@ -6,13 +6,21 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from .codec import PayloadCodecName, validate_payload_codec
 
 # HOW：命令行和 Web 工作台共用这个相对项目目录的默认文件位置，避免把运行数据散落在仓库根目录。
 DEFAULT_DATABASE_PATH = Path("data") / "workbench.db"
+DEFAULT_AUDIT_LOG_DIR = Path("logs")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def default_audit_path(current_date: date | None = None) -> Path:
+    """返回按日期分文件的默认安全审计日志路径。"""
+    log_date = date.today() if current_date is None else current_date
+    return DEFAULT_AUDIT_LOG_DIR / f"audit-{log_date.isoformat()}.jsonl"
 
 
 def load_dotenv(path: str | Path = ".env") -> Path | None:

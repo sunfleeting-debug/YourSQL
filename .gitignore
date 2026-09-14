@@ -38,6 +38,7 @@ tmp/
 .benchmarks/
 benchmarks/results/
 benchmarks/third_party/
+logs/
 .idea/
 .vscode/
 *.tmp

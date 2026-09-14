@@ -184,6 +184,8 @@ python -c "from yoursql.engine.runtime.database import Database; from yoursql.en
 
 SSH 场景执行 `python -m yoursql.cli --database demo.db --stdio`，由 OpenSSH 强制命令转发逐行 SQL。
 
+审计日志默认写入当前工作目录的 `logs/audit-YYYY-MM-DD.jsonl`，按日期分文件；目录会在首次写入时自动创建。通过 `Database(..., audit_path=...)` 可覆盖默认路径。标准日志配置仍可通过 `configure_logging(..., log_file=...)` 单独指定文件。
+
 ## Web 数据库工作台
 
 构建后的前端由同一个标准库进程托管，原有 `/health`、`/metrics`、`/sql` 保持不变。
