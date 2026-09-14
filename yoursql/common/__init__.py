@@ -23,7 +23,10 @@ from .types import (
     TableStats,
     Value,
     compare_values,
+    decimal_to_json,
+    json_safe,
     sql_truth,
+    to_decimal,
 )
 
 __all__ = [
@@ -53,6 +56,9 @@ __all__ = [
     "Value",
     "compare_values",
     "configure_logging",
+    "decimal_to_json",
+    "json_safe",
     "load_dotenv",
     "sql_truth",
+    "to_decimal",
 ]

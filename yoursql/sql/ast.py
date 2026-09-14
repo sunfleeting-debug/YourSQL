@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from ..common.types import DataType
+from ..common.types import DataType, json_safe
 
 
 def _as_dict(value: object) -> object:
@@ -15,7 +15,10 @@ def _as_dict(value: object) -> object:
         return [_as_dict(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _as_dict(item) for key, item in value.items()}
-    return value
+    if isinstance(value, DataType):
+        return value.value
+    # HOW：字面量里可能是 Decimal（词法阶段的定点数），AST/计划 JSON 必须能序列化。
+    return json_safe(value)
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,35 @@ class BetweenPredicate(Expr):
 
 
 @dataclass(frozen=True)
+class CaseExpression(Expr):
+    """CASE 表达式，同时覆盖 searched 与 simple 两种写法。
+
+    HOW：``branches`` 是 (WHEN 条件, THEN 结果) 的序列；``operand`` 不为空时
+    表示 simple CASE（``CASE x WHEN 1 THEN ...``），此时条件与 operand 做等值比较。
+    """
+
+    branches: tuple[tuple[Expr, Expr], ...] = ()
+    operand: Expr | None = None
+    otherwise: Expr | None = None
+
+
+@dataclass(frozen=True)
+class ExistsPredicate(Expr):
+    """EXISTS / NOT EXISTS 子查询谓词。"""
+
+    query: "Select"
+    negated: bool = False
+
+
+@dataclass(frozen=True)
+class CastExpression(Expr):
+    """CAST(expr AS type) 与 ``expr::type`` 两种写法的统一节点。"""
+
+    expression: Expr
+    data_type: DataType
+
+
+@dataclass(frozen=True)
 class ColumnDefinition(Node):
     name: str
     data_type: DataType
@@ -228,8 +260,16 @@ class SelectItem(Node):
 
 @dataclass(frozen=True)
 class TableRef(Node):
+    """FROM/JOIN 的一个数据源：具名表、视图，或派生表（``query`` 不为空）。"""
+
     name: str
     alias: str | None = None
+    # HOW：派生表（FROM (SELECT ...) AS d）复用同一节点：name 为空串，query 承载子查询。
+    query: "Select | None" = None
+
+    @property
+    def is_derived(self) -> bool:
+        return self.query is not None
 
     @property
     def effective_name(self) -> str:
@@ -320,6 +360,8 @@ class ShowGrants(Statement):
 __all__ = [
     "BetweenPredicate",
     "BinaryOp",
+    "CaseExpression",
+    "CastExpression",
     "ColumnDefinition",
     "ColumnRef",
     "CreateRole",
@@ -331,6 +373,7 @@ __all__ = [
     "DropIndex",
     "DropTable",
     "DropView",
+    "ExistsPredicate",
     "Explain",
     "Expr",
     "FunctionCall",

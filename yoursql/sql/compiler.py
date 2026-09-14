@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .ast import Statement
 from .binder import Binder, BoundStatement, CatalogProtocol
 from .lexer import Token, tokenize
 from .parser import Parser
-from ..planner.logical import LogicalPlanNode, plan_from_statement
-from ..planner.physical import PhysicalPlanNode
+
+# WHY：planner 侧的导入必须留到函数内部执行。`planner.logical` 会反向导入
+# `..sql.ast`，而后者会先把 `yoursql.sql` 这个包跑完；如果这里在模块顶层导入
+# planner，就会出现 "yoursql.sql → compiler → planner.logical(未完成)" 的循环，
+# 失败与否取决于调用方先 import 哪个包——这种隐式顺序依赖非常难查。
+if TYPE_CHECKING:  # pragma: no cover - 仅用于类型检查
+    from ..planner.logical import LogicalPlanNode
+    from ..planner.physical import PhysicalPlanNode
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,8 @@ class Compiler:
     def compile(
         self, sql: str, catalog: CatalogProtocol | None = None
     ) -> CompilationResult:
+        from ..planner.logical import plan_from_statement
+
         tokens = tuple(tokenize(sql))
         statement = Parser(tokens).parse_one()
         bound = Binder(catalog).bind(statement)
@@ -54,6 +63,8 @@ class Compiler:
     def compile_script(
         self, sql: str, catalog: CatalogProtocol | None = None
     ) -> tuple[CompilationResult, ...]:
+        from ..planner.logical import plan_from_statement
+
         tokens = tuple(tokenize(sql))
         statements = Parser(tokens).parse_script()
         return tuple(
