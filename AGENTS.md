@@ -6,6 +6,16 @@
 - 前端（`web/`）代码提交前跑 `npm run format`，保持 `npm run format:check` 通过；Prettier 配置见 `web/.prettierrc.json`。
 - 不把长逻辑链压进一行：单行超过 150 字符（模板字符串、className 拼接除外）应考虑拆分；`className` 这类条件拼接请用 `web/src/view-classes.ts` 的纯函数。
 
+## 后端代码归属
+- `yoursql/sql/` 只放 SQL 语言前端：词法、语法、AST、绑定和编译入口；不要放代价模型、存储访问或执行算子。
+- `yoursql/sql/` 是语言前端目录，不要整体改名为 `compiler/`；`compiler.py` 只是其中一个“AST/绑定到逻辑计划”的入口文件。
+- `yoursql/planner/` 放逻辑计划、物理计划、优化规则、统计信息、计划缓存和代价估算。
+- 优化器接收 AST/逻辑计划，不负责解析原始 SQL 文本；原始 SQL 的规范化只允许出现在计划缓存的键生成处。
+- `yoursql/execution/` 放 Volcano 执行器、表达式求值以及 SELECT 查询执行适配；`executor.py` 保持通用算子，不直接依赖 SQL AST，SQL 查询编排放在 `evaluator.py` / `query.py`。需要读写表、索引或页时通过运行时实例提供的接口访问。
+- `yoursql/engine/runtime/` 只负责 Database 生命周期、事务边界以及编译器、计划器、执行器、存储和安全模块的协调；SQL 命令处理放在 `runtime/commands.py`，不要把新的表达式、连接、扫描或投影逻辑堆回 `database.py`。
+- `yoursql/engine/catalog.py` 放目录元数据；`yoursql/storage/` 放页、堆表、缓存、磁盘和 B+Tree 实现；`yoursql/engine/services/` 放 HTTP、SSH、Workbench 等协议适配。
+- 新增后端文件必须放入上述职责目录，不要把业务实现重新堆回 `yoursql/engine/` 根目录；跨层依赖只能从上游语言/计划层指向下游执行/存储层，禁止 `sql` 反向依赖 `engine` 或 `storage`。
+
 ## 注释规范
 - 使用中文本土化注释
 - 使用必要的简短的头docsting

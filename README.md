@@ -24,7 +24,7 @@ SELECT id, name FROM student WHERE age > 18;
 也可以走 Python API：
 
 ```python
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 with Database("demo.db") as db:
     db.execute("CREATE TABLE t(id INT, value VARCHAR);")
@@ -179,7 +179,7 @@ python -m benchmarks.compare_tpch_q6 --iterations 5
 标准库 HTTP 服务提供 `GET /health`、`GET /metrics` 与 `POST /sql`（JSON body 为 `{"sql": "..."}`）：
 
 ```powershell
-python -c "from yoursql.engine.database import Database; from yoursql.engine.http import serve_http; serve_http(Database('demo.db'))"
+python -c "from yoursql.engine.runtime.database import Database; from yoursql.engine.services.http import serve_http; serve_http(Database('demo.db'))"
 ```
 
 SSH 场景执行 `python -m yoursql.cli --database demo.db --stdio`，由 OpenSSH 强制命令转发逐行 SQL。
