@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 import re
 from typing import Iterator
 
 from ..common.contracts import SqlValue
 from ..common.errors import LexerError
+from ..common.types import json_safe
+from .diagnostics import Diagnostic
 
 
 class TokenKind(str, Enum):
@@ -90,6 +93,15 @@ class TokenKind(str, Enum):
     UNION = "UNION"
     ALL = "ALL"
 
+    # 条件表达式、CTE 与派生表
+    CASE = "CASE"
+    WHEN = "WHEN"
+    THEN = "THEN"
+    ELSE = "ELSE"
+    END = "END"
+    WITH = "WITH"
+    CAST = "CAST"
+
     # 索引、执行计划与约束
     INDEX = "INDEX"
     EXPLAIN = "EXPLAIN"
@@ -144,6 +156,7 @@ _KEYWORD_NAMES = (
     " SELECT FROM WHERE DELETE UPDATE SET ORDER BY ASC DESC DESCRIBE LIMIT OFFSET DISTINCT AS AND OR NOT IS LIKE IN"
     " BETWEEN JOIN INNER LEFT RIGHT FULL OUTER ON GROUP HAVING UNION ALL INDEX INDEXES EXPLAIN IF EXISTS PRIMARY KEY"
     " UNIQUE DEFAULT CONSTRAINT NULLS FIRST LAST SHOW TABLES COLUMNS FIELDS"
+    " CASE WHEN THEN ELSE END WITH CAST"
 ).split()
 KEYWORDS = {name: getattr(TokenKind, name) for name in _KEYWORD_NAMES}
 _NUMBER_RE = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
@@ -215,7 +228,8 @@ class Token:
             TokenKind.NULL,
             TokenKind.QUOTED_IDENTIFIER,
         }:
-            data["value"] = self.literal
+            # HOW：FLOAT 的 literal 是 Decimal，JSON 边界统一转成可序列化形式。
+            data["value"] = json_safe(self.literal)
         return data
 
 
@@ -259,6 +273,27 @@ class Lexer:
         return iter(self.tokenize())
 
     def tokenize(self, source: str | None = None) -> list[Token]:
+        return self._scan(source, diagnostics=None)
+
+    def tokenize_recovering(
+        self, source: str | None = None
+    ) -> tuple[list[Token], list[Diagnostic]]:
+        """扫描全部 token，词法错误不中断，逐条收集成诊断。
+
+        HOW：非法字符 / 未闭合字符串等按"跳过问题片段、保证指针前进"的方式恢复，
+        因此一次调用能把整个脚本里的词法错误都报出来。
+        """
+
+        diagnostics: list[Diagnostic] = []
+        tokens = self._scan(source, diagnostics=diagnostics)
+        return tokens, diagnostics
+
+    def _scan(
+        self,
+        source: str | None,
+        *,
+        diagnostics: list[Diagnostic] | None,
+    ) -> list[Token]:
         if source is not None:
             if not isinstance(source, str):
                 raise TypeError("SQL 源码必须是字符串")
@@ -266,47 +301,58 @@ class Lexer:
         self._index, self._line, self._column = 0, 1, 1
         result: list[Token] = []
         while self._index < len(self.source):
-            char = self._peek()
-            if char in " \t\f\v":
-                self._advance()
+            start_index = self._index
+            try:
+                token = self._next_token()
+            except LexerError as error:
+                if diagnostics is None:
+                    raise
+                diagnostics.append(Diagnostic.from_error("lexer", error))
+                # WHY：跳过出问题的片段并强制推进至少一个字符，否则会死循环。
+                while self._index == start_index:
+                    self._advance()
                 continue
-            if char in "\r\n":
-                self._newline()
-                continue
-            if char == "-" and self._peek(1) == "-":
-                self._line_comment()
-                continue
-            if char == "/" and self._peek(1) == "*":
-                self._block_comment()
-                continue
-            line, column = self._line, self._column
-            if char == "'":
-                result.append(self._string(line, column))
-                continue
-            if char in {'"', "`"}:
-                result.append(self._quoted_identifier(char, line, column))
-                continue
-            if char.isdigit() or (char == "." and self._peek(1).isdigit()):
-                result.append(self._number(line, column))
-                continue
-            match = _IDENTIFIER_RE.match(self.source, self._index)
-            if match:
-                result.append(self._identifier(match.group(0), line, column))
-                continue
-            two = self.source[self._index : self._index + 2]
-            if two in self._TWO_CHAR:
-                self._advance(2)
-                result.append(Token(self._TWO_CHAR[two], two, line, column))
-                continue
-            if char in self._ONE_CHAR:
-                self._advance()
-                result.append(Token(self._ONE_CHAR[char], char, line, column))
-                continue
-            raise LexerError(
-                f"非法字符 {char!r}", line=line, column=column, character=char
-            )
+            if token is not None:
+                result.append(token)
         result.append(Token(TokenKind.EOF, "", self._line, self._column))
         return result
+
+    def _next_token(self) -> Token | None:
+        """扫描一个 token；空白与注释返回 None。"""
+
+        char = self._peek()
+        if char in " \t\f\v":
+            self._advance()
+            return None
+        if char in "\r\n":
+            self._newline()
+            return None
+        if char == "-" and self._peek(1) == "-":
+            self._line_comment()
+            return None
+        if char == "/" and self._peek(1) == "*":
+            self._block_comment()
+            return None
+        line, column = self._line, self._column
+        if char == "'":
+            return self._string(line, column)
+        if char in {'"', "`"}:
+            return self._quoted_identifier(char, line, column)
+        if char.isdigit() or (char == "." and self._peek(1).isdigit()):
+            return self._number(line, column)
+        match = _IDENTIFIER_RE.match(self.source, self._index)
+        if match:
+            return self._identifier(match.group(0), line, column)
+        two = self.source[self._index : self._index + 2]
+        if two in self._TWO_CHAR:
+            self._advance(2)
+            return Token(self._TWO_CHAR[two], two, line, column)
+        if char in self._ONE_CHAR:
+            self._advance()
+            return Token(self._ONE_CHAR[char], char, line, column)
+        raise LexerError(
+            f"非法字符 {char!r}", line=line, column=column, character=char
+        )
 
     lex = tokenize
     scan = tokenize
@@ -381,7 +427,15 @@ class Lexer:
         if self._peek() == "." and self._peek(1) in {".", ""} | set("0123456789"):
             raise LexerError("数字小数点过多", line=line, column=column)
         if any(marker in spelling for marker in ".eE"):
-            return Token(TokenKind.FLOAT, spelling, line, column, float(spelling))
+            # WHY：带小数点的字面量必须用 Decimal 保留字面精度；float 会在词法阶段
+            # 就把 0.07 变成 0.070000000000000006938893903907228377647697925567626953125。
+            try:
+                literal = Decimal(spelling)
+            except InvalidOperation as exc:
+                raise LexerError(
+                    f"数字 {spelling!r} 超出可表示范围", line=line, column=column
+                ) from exc
+            return Token(TokenKind.FLOAT, spelling, line, column, literal)
         return Token(TokenKind.INTEGER, spelling, line, column, int(spelling))
 
     def _string(self, line: int, column: int) -> Token:

@@ -40,8 +40,9 @@ from .ast import (
 )
 from .binder import Binder, BoundStatement, CatalogProtocol, TableProtocol
 from .compiler import CompilationResult, Compiler, compile_sql
+from .diagnostics import Diagnostic, ParseOutcome
 from .lexer import KEYWORDS, Lexer, Token, TokenKind, TokenType, lex, tokenize
-from .parser import Parser, parse_one, parse_script
+from .parser import Parser, parse_one, parse_recovering, parse_script
 
 __all__ = [
     "BetweenPredicate",
@@ -60,6 +61,7 @@ __all__ = [
     "CreateUser",
     "CreateView",
     "Delete",
+    "Diagnostic",
     "DropIndex",
     "DropTable",
     "DropView",
@@ -78,6 +80,7 @@ __all__ = [
     "Parser",
     "OrderItem",
     "Parameter",
+    "ParseOutcome",
     "Revoke",
     "Select",
     "SelectItem",
@@ -95,6 +98,7 @@ __all__ = [
     "compile_sql",
     "lex",
     "parse_one",
+    "parse_recovering",
     "parse_script",
     "tokenize",
 ]
