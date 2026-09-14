@@ -12,6 +12,7 @@ import platform
 import sqlite3
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Callable
@@ -24,7 +25,6 @@ from benchmarks.run_benchbox_tpch import (
     ROOT,
     _create_lineitem,
     _load_lineitem,
-    _remove_database,
     _read_rows,
     _typed_value,
 )
@@ -85,6 +85,22 @@ def _duckdb_query(sqlite_query: str, *, double_semantics: bool = True) -> str:
     return translated
 
 
+def _fresh_path(path: Path) -> Path:
+    """返回一个当前不存在的库路径。
+
+    WHY：不删除任何已有文件。受限环境会拦截 unlink（安全删除策略），删除失败会让
+    整轮基准跑不完；改用带序号的新库名既保证“每次都是干净库”，也不会动到别人的数据。
+    """
+
+    if not path.exists():
+        return path
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"{path} 附近找不到可用的空库文件名")
+
+
 def _timed_query(execute: Callable[[str], list[tuple[Any, ...]]], query: str, iterations: int, settle_seconds: float) -> dict[str, Any]:
     """预热一次、静置一段时间后计时；返回每次耗时与最后结果。
 
@@ -115,8 +131,7 @@ def _timed_query(execute: Callable[[str], list[tuple[Any, ...]]], query: str, it
 
 
 def _run_yoursql(benchmark: TPCH, data_dir: Path, iterations: int, settle_seconds: float) -> dict[str, Any]:
-    db_path = DEFAULT_RESULT_DIR / "tpch_sf001_yoursql.db"
-    _remove_database(db_path)
+    db_path = _fresh_path(DEFAULT_RESULT_DIR / "tpch_sf001_yoursql.db")
     started = time.perf_counter()
     with Database(db_path, config=BENCHMARK_DATABASE_CONFIG) as database:
         _create_lineitem(database, benchmark)
@@ -130,8 +145,11 @@ def _run_yoursql(benchmark: TPCH, data_dir: Path, iterations: int, settle_second
     return {
         "engine": "YourSQL",
         "version": "0.1.0",
-        "semantics": "double",
+        # HOW：DECIMAL 定点化之后，YourSQL 的折扣谓词与 DuckDB 的 DECIMAL 语义同组；
+        # 标成 decimal 后参与「定点语义组」的互相校验，而不是与 double 组比。
+        "semantics": "decimal",
         "storage": "行存 · 4096B 页 · B+Tree（本查询无可用索引）",
+        "database": str(db_path),
         "query_sql": benchmark.get_query(QUERY_ID, dialect="sqlite"),
         "rows_loaded": rows_loaded,
         "load_seconds": load_seconds,
@@ -160,9 +178,21 @@ def _load_sqlite(connection: sqlite3.Connection, benchmark: TPCH, data_dir: Path
     create_columns = ", ".join(f'"{column["name"]}" {_sqlite_type(str(column["type"]))}' for column in columns)
     connection.execute(f"CREATE TABLE lineitem ({create_columns})")
     placeholders = ", ".join("?" for _ in columns)
+
+    def sqlite_value(value: object) -> object:
+        # HOW：sqlite3 不认识 Decimal，而 SQLite 本身也没有定点类型；这里按 REAL 落库，
+        # 与 _sqlite_type 把 DECIMAL 映射成 REAL 保持一致。
+        return float(value) if isinstance(value, Decimal) else value
+
     payload = [
-        tuple(_typed_value(value, type_name) for value, type_name in zip(row, column_types, strict=True))
-        for row in _read_rows(data_dir / "lineitem.tbl", column_types)
+        tuple(sqlite_value(value) for value in typed)
+        for typed in (
+            tuple(
+                _typed_value(value, type_name)
+                for value, type_name in zip(row, column_types, strict=True)
+            )
+            for row in _read_rows(data_dir / "lineitem.tbl", column_types)
+        )
     ]
     connection.executemany(f"INSERT INTO lineitem VALUES ({placeholders})", payload)
     connection.commit()
@@ -170,9 +200,9 @@ def _load_sqlite(connection: sqlite3.Connection, benchmark: TPCH, data_dir: Path
 
 
 def _run_sqlite(benchmark: TPCH, data_dir: Path, iterations: int, *, in_memory: bool, settle_seconds: float) -> dict[str, Any]:
-    db_path = ":memory:" if in_memory else str(DEFAULT_RESULT_DIR / "tpch_sf001_sqlite.db")
-    if not in_memory:
-        Path(db_path).unlink(missing_ok=True)
+    db_path = ":memory:" if in_memory else str(
+        _fresh_path(DEFAULT_RESULT_DIR / "tpch_sf001_sqlite.db")
+    )
     started = time.perf_counter()
     connection = sqlite3.connect(db_path)
     try:
@@ -203,8 +233,7 @@ def _run_sqlite(benchmark: TPCH, data_dir: Path, iterations: int, *, in_memory: 
 
 def _run_duckdb(benchmark: TPCH, data_dir: Path, iterations: int, *, decimal: bool, settle_seconds: float) -> dict[str, Any]:
     suffix = "decimal" if decimal else "double"
-    db_path = DEFAULT_RESULT_DIR / f"tpch_sf001_duckdb_{suffix}.db"
-    db_path.unlink(missing_ok=True)
+    db_path = _fresh_path(DEFAULT_RESULT_DIR / f"tpch_sf001_duckdb_{suffix}.db")
     data_path = (data_dir / "lineitem.tbl").as_posix()
     started = time.perf_counter()
     connection = duckdb.connect(str(db_path))
@@ -245,19 +274,27 @@ def _run_duckdb(benchmark: TPCH, data_dir: Path, iterations: int, *, decimal: bo
 
 
 def _check_results(results: list[dict[str, Any]]) -> None:
-    """同谓词语义的引擎（double）结果必须一致；DECIMAL 变体单独作参考，不参与校验。"""
+    """按谓词语义分组校验：同组结果必须一致。
 
-    comparable = [item for item in results if item.get("semantics", "double") == "double"]
-    values = [item["result"][0][0] for item in comparable]
-    reference = values[0]
-    for item, value in zip(comparable, values, strict=True):
-        if abs(value - reference) > max(1e-6, abs(reference) * 1e-9):
-            raise SystemExit(f"{item['engine']} 的结果 {value} 与参照 {reference} 不一致")
-    decimal_variants = [item for item in results if item.get("semantics") == "decimal"]
-    for item in decimal_variants:
-        print(
-            f"参考（不同谓词语义，不计入对比）: {item['engine']} = {item['result'][0][0]:.4f}"
-        )
+    HOW：double 组（SQLite ×2 + DuckDB DOUBLE）与 decimal 组（YourSQL + DuckDB DECIMAL）
+    各自内部必须相等。decimal 组的一致性正是「定点实现与 DuckDB 逐值相同」的证据。
+    """
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in results:
+        groups.setdefault(item.get("semantics", "double"), []).append(item)
+    for semantics, members in groups.items():
+        reference = members[0]["result"][0][0]
+        for item in members[1:]:
+            value = item["result"][0][0]
+            if abs(value - reference) > max(1e-6, abs(reference) * 1e-9):
+                raise SystemExit(
+                    f"[{semantics}] {item['engine']} 的结果 {value} 与参照 "
+                    f"{members[0]['engine']} 的 {reference} 不一致"
+                )
+    for semantics, members in groups.items():
+        values = ", ".join(f"{item['engine']}={item['result'][0][0]:.4f}" for item in members)
+        print(f"[{semantics}] 组内一致: {values}")
 
 
 def _print_table(results: list[dict[str, Any]]) -> None:
@@ -311,8 +348,9 @@ def main() -> None:
         "method": "各引擎装载同一份 lineitem.tbl，预热 1 次、静置后计时；仅统计查询耗时，装载单独记录",
         "semantics_note": (
             "TPC-H Q6 折扣谓词在两套数值语义下命中行数不同：DuckDB 默认把字面量 `0.06 ± 0.01` 精确折叠为 "
-            "DECIMAL 0.05/0.07，多命中 l_discount = 0.07 的 391 行；SQLite/YourSQL 用 IEEE double 得到 "
-            "0.06999999999999999 会排除这些行。同语义组已给 DuckDB 加显式 DOUBLE 转换，DECIMAL 变体仅作参考。"
+            "DECIMAL 0.05/0.07，多命中 l_discount = 0.07 的 391 行；SQLite 用 IEEE double 得到 "
+            "0.06999999999999999 会排除这些行。YourSQL 完成 DECIMAL 定点化后已归入 DECIMAL 语义组，"
+            "与 DuckDB（DECIMAL 列）逐值一致；double 组保留 SQLite ×2 与 DuckDB DOUBLE 变体作为对照。"
         ),
         "engines": results,
         "environment": {

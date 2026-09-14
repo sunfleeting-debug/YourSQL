@@ -7,6 +7,7 @@ import json
 import platform
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Iterable
@@ -14,7 +15,7 @@ from typing import Any, Iterable
 from benchbox import TPCH
 from benchbox.platforms.sqlite import SQLiteAdapter
 
-from yoursql.common import DatabaseConfig
+from yoursql.common import DatabaseConfig, json_safe
 from yoursql.engine.runtime.database import Database
 
 
@@ -64,12 +65,16 @@ def _base_type(type_name: str) -> str:
 
 
 def _yoursql_type(type_name: str) -> str:
-    """将 TPC-H schema 类型映射到 YourSQL 当前支持的存储类型。"""
+    """将 TPC-H schema 类型映射到 YourSQL 支持的类型。"""
 
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return "INT"
-    if base in {"DECIMAL", "NUMERIC", "REAL", "DOUBLE", "FLOAT"}:
+    # HOW：TPC-H 的金额/折扣/税都是 DECIMAL，必须映射到定点类型；映射成 FLOAT
+    # 会让 Q6 的 0.06 ± 0.01 变成浮点近似，从而漏掉 l_discount = 0.07 的行。
+    if base in {"DECIMAL", "NUMERIC"}:
+        return "DECIMAL"
+    if base in {"REAL", "DOUBLE", "FLOAT"}:
         return "FLOAT"
     return "VARCHAR"
 
@@ -84,7 +89,10 @@ def _typed_value(value: str, type_name: str) -> Any:
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return int(value)
-    if base in {"DECIMAL", "NUMERIC", "REAL", "DOUBLE", "FLOAT"}:
+    if base in {"DECIMAL", "NUMERIC"}:
+        # HOW：.tbl 里的定点字段是文本，直接进 Decimal 才能保住标度。
+        return Decimal(value)
+    if base in {"REAL", "DOUBLE", "FLOAT"}:
         return float(value)
     return value
 
@@ -112,13 +120,28 @@ def _load_lineitem(database: Database, benchmark: TPCH, data_dir: Path) -> int:
     return database.insert_rows("lineitem", typed_rows).affected_rows
 
 
-def _remove_database(path: Path) -> None:
+def _remove_database(path: Path) -> Path:
+    """清理同名旧基准库；返回本次实际可用的库路径。
+
+    WHY：受限环境（安全删除策略、只读缓存目录）不允许 unlink 已存在的库文件，
+    直接失败会让整轮基准跑不完。这里退回到带序号的新文件名，保证仍可复现地跑完。
+    """
+
     allowed_root = (ROOT / "benchmarks" / "results").resolve()
     resolved = path.resolve()
     if allowed_root not in resolved.parents:
         raise ValueError(f"--force 只允许清理 {allowed_root} 下的 benchmark 数据库")
-    if resolved.exists():
+    if not resolved.exists():
+        return resolved
+    try:
         resolved.unlink()
+        return resolved
+    except OSError:
+        for index in range(1, 100):
+            candidate = resolved.with_name(f"{resolved.stem}-{index}{resolved.suffix}")
+            if not candidate.exists():
+                return candidate
+        raise
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -129,7 +152,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     if args.force:
-        _remove_database(db_path)
+        db_path = _remove_database(db_path)
 
     benchmark = TPCH(scale_factor=SCALE_FACTOR, output_dir=data_dir)
     generated_files = benchmark.generate_data()
@@ -191,8 +214,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "environment": {"python": sys.version, "platform": platform.platform()},
         "scope_note": "这是 BenchBox/TPC-H Q6 的可复现实验，不宣称完整 TPC-H QphH@Size 官方成绩。",
     }
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    report_path.write_text(
+        json.dumps(json_safe(report), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(json_safe(report), ensure_ascii=False, indent=2))
     return report
 
 

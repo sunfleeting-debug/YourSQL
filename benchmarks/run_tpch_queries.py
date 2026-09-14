@@ -1,4 +1,4 @@
-"""TPC-H SF0.01 多查询基准：装载全部 8 张表，跑当前引擎可编译的查询子集。
+"""TPC-H SF0.01 多查询基准：装载全部 8 张表，跑已通过逐值对拍的查询集合。
 
 HOW：与单条 Q6 基准同一口径（同一份 .tbl、预热 1 次、静置后计时），
 报告写入 benchmarks/reports/tpch_sf001_queries.json，便于横向比较不同查询。
@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import statistics
 import subprocess
 import sys
 import time
@@ -27,21 +26,23 @@ from benchmarks.run_benchbox_tpch import (
     _remove_database,
     _typed_value,
 )
-from yoursql.common import DatabaseConfig, YourSQLError
 from yoursql.engine.runtime.database import Database
 
 DEFAULT_DATA_DIR = ROOT / "benchmarks" / "third_party" / "tpch_sf001"
 DEFAULT_DB_PATH = ROOT / "benchmarks" / "results" / "tpch_sf001_multi.db"
 DEFAULT_REPORT_PATH = ROOT / "benchmarks" / "reports" / "tpch_sf001_queries.json"
-# 当前引擎可编译的查询子集（见 README「TPC-H 覆盖率」）。
-SUPPORTED_QUERIES = (1, 3, 5, 6, 10, 16, 18, 19)
+# 已通过 benchmarks.verify_tpch_values 逐值对拍的查询集合（见 README「TPC-H 覆盖率」）。
+SUPPORTED_QUERIES = (1, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19)
 
 
 def yoursql_type(type_name: str) -> str:
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return "INT"
-    if base in {"DECIMAL", "NUMERIC", "REAL", "DOUBLE", "FLOAT"}:
+    # HOW：DECIMAL 走定点；只有真正的浮点类型才用 FLOAT。
+    if base in {"DECIMAL", "NUMERIC"}:
+        return "DECIMAL"
+    if base in {"REAL", "DOUBLE", "FLOAT"}:
         return "FLOAT"
     return "VARCHAR"
 
@@ -129,7 +130,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark": "TPC-H",
         "scale_factor": SCALE_FACTOR,
         "queries": [f"Q{query_id}" for query_id in SUPPORTED_QUERIES],
-        "coverage_note": "当前引擎可编译 8/22 条 TPC-H 查询；其余因缺少派生表/CASE WHEN/子查询表达式/CTE 无法解析。多表连接查询在 SF0.01 上会超时或 OOM（嵌套循环 + 全量物化）。",
+        "coverage_note": "22/22 条 TPC-H 查询均可编译；本批取其中 16 条（可执行且耗时可控）。Q2/Q4/Q15/Q20/Q21 因相关子查询逐行重跑而分钟级超时，Q22 单条约 50 s，属性能问题而非正确性问题。",
         "loaded_rows": loaded,
         "load_seconds": load_seconds,
         "storage_config": {

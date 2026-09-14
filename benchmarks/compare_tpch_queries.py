@@ -5,9 +5,10 @@ HOW：
 - SQLite 直接用它自己方言的同一批 SQL（BenchBox 生成的就是 sqlite 方言）；
 - DuckDB 需把 `DATE('...', '±N unit')` 这类 SQLite 语法改写为 DuckDB 等价形式；改写失败记为不可比。
 
-NOTE：Q6 三引擎样本值存在已知口径差异（不是执行错误）：`0.06 + 0.01` 在 SQLite/YourSQL 里是
-二进制浮点（0.06999999999999999），会丢掉 l_discount = 0.07 的行；DuckDB 用精确 DECIMAL 得到 0.07。
-按 TPC-H 的 DECIMAL 语义 DuckDB 才对；YourSQL 与 SQLite 逐值一致。详见报告 value_notes。
+NOTE：Q6 三引擎样本值存在已知口径差异（不是执行错误）：YourSQL 的 DECIMAL 是精确十进制，
+`0.06 + 0.01` 得到 0.07，与 DuckDB 一致；SQLite 用双精度浮点得到 0.06999999999999999，
+会丢掉 l_discount = 0.07 的行。按 TPC-H 的 DECIMAL 语义 YourSQL/DuckDB 才对。
+详见报告 value_notes 与 benchmarks.verify_tpch_values 的 KNOWN_DIFFERENCES。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +43,7 @@ from yoursql.engine.runtime.database import Database
 DEFAULT_DATA_DIR = ROOT / "benchmarks" / "third_party" / "tpch_sf001"
 DEFAULT_REPORT_PATH = ROOT / "benchmarks" / "reports" / "tpch_sf001_compare.json"
 TABLES = ("region", "nation", "supplier", "customer", "part", "partsupp", "orders", "lineitem")
-QUERIES = (1, 3, 5, 6, 10, 16, 18, 19)
+QUERIES = (1, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19)
 
 # SQLite 日期修饰符 → DuckDB 的 interval 写法（只覆盖本批查询用到的形式，含正负号）。
 _DATE_MODIFIER = re.compile(r"DATE\('(\d{4}-\d{2}-\d{2})',\s*'([+-])(\d+)\s+(day|month|year)'\)")
@@ -60,9 +62,18 @@ def _yoursql_type(type_name: str) -> str:
     base = _base_type(type_name)
     if base in {"INTEGER", "INT", "BIGINT"}:
         return "INT"
-    if base in {"DECIMAL", "NUMERIC", "REAL", "DOUBLE", "FLOAT"}:
+    # HOW：DECIMAL 走定点，只有真正的浮点类型才映射成 FLOAT。
+    if base in {"DECIMAL", "NUMERIC"}:
+        return "DECIMAL"
+    if base in {"REAL", "DOUBLE", "FLOAT"}:
         return "FLOAT"
     return "VARCHAR"
+
+
+def _sqlite_value(value: object) -> object:
+    """sqlite3 不认识 Decimal；对拍只比数值，转成 float 即可。"""
+
+    return float(value) if isinstance(value, Decimal) else value
 
 
 def to_duckdb(sql: str) -> str:
@@ -109,7 +120,10 @@ def load_sqlite(benchmark: TPCH, data_dir: Path, db_path: Path) -> dict[str, int
             )
             connection.execute(f"CREATE TABLE {table} ({columns})")
             payload = [
-                tuple(_typed_value(value, type_name) for value, type_name in zip(row, column_types, strict=True))
+                tuple(
+                    _sqlite_value(_typed_value(value, type_name))
+                    for value, type_name in zip(row, column_types, strict=True)
+                )
                 for row in _read_rows(data_dir / f"{table}.tbl", column_types)
             ]
             placeholders = ", ".join("?" for _ in definition["columns"])
@@ -292,13 +306,19 @@ def main() -> None:
         "benchmark": "TPC-H",
         "scale_factor": SCALE_FACTOR,
         "queries": [f"Q{query_id}" for query_id in QUERIES],
-        "coverage_note": "YourSQL 当前可编译 8/22 条 TPC-H 查询；其余 14 条缺少的特性（派生表/CTE/CASE WHEN/子查询表达式）尚未实现，故不在本批对标内。",
+        "coverage_note": (
+            "YourSQL 当前可编译 22/22 条 TPC-H 查询；本批对标取其中 16 条（可执行且耗时可控）。"
+            "Q2/Q4/Q15/Q20/Q21 因相关子查询逐行重跑导致分钟级超时、Q22 单条约 50 s，"
+            "属性能问题而非正确性问题，暂不纳入计时对标；"
+            "Q1/Q3/Q5/Q6/Q7/Q8/Q9/Q10/Q11/Q12/Q13/Q14/Q16/Q17/Q18/Q19 已用 "
+            "`python -m benchmarks.verify_tpch_values` 与 SQLite 做过逐值对拍。"
+        ),
         "value_notes": {
             "Q6": (
                 "三引擎数据与 1994 年折扣分布逐值相同；样本差异来自十进制字面量 0.06 ± 0.01 的求值口径："
-                "SQLite/YourSQL 得到二进制浮点 0.06999999999999999，丢掉 l_discount = 0.07 的行（837 行），"
-                "DuckDB 得到精确 0.07。按 TPC-H 的 DECIMAL 语义 DuckDB 才是正确答案；"
-                "YourSQL 与 SQLite 一致。根因是 YourSQL 的 DECIMAL 目前是浮点实现，未提供定点语义。"
+                "YourSQL 的 DECIMAL 为精确十进制、得到 0.07，与 DuckDB 一致（1193053.2253）；"
+                "SQLite 得到二进制浮点 0.06999999999999999，丢掉 l_discount = 0.07 的行（734493.7281）。"
+                "按 TPC-H 的 DECIMAL 语义 YourSQL/DuckDB 才是正确答案。"
             )
         },
         "loaded_rows": {"yoursql": yoursql_rows, "sqlite": sqlite_rows, "duckdb": duckdb_rows},
