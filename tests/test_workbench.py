@@ -432,6 +432,10 @@ def test_storage_is_bounded_readonly_and_admin_can_inspect_internal_catalog(serv
     assert database.rbac.users["admin"].password_hash not in json.dumps(catalog)
     assert "raw_page" in catalog["data"]
     assert any(table["name"] == "_sys_privileges" for table in catalog["data"]["catalog"]["system_tables"])
+    catalog_content = catalog["data"]["catalog_content"]
+    assert any(table["name"] == "student" for table in catalog_content["tables"])
+    assert any(index["name"] == "idx_id" for index in catalog_content["indexes"])
+    assert "views" in catalog_content
     index = client.request("/api/storage/indexes/idx_id?limit=1")[1]["data"]
     assert index["representation"] == "ordered_leaf_array" and index["entries"][0]["key"] == [1]
     assert set(index["all_page_ids"]) == expected_index_page_ids

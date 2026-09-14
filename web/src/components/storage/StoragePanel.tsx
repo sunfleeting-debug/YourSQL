@@ -331,15 +331,25 @@ function PagePayloadWorkbench({ detail, jsonDetail, raw }: { detail: StoragePage
           <JsonTree key={`page-${detail.page_id}`} value={jsonDetail} />
         </details>
       )}
-      {raw && <RawPreview payload={raw} title="Payload" pageWide />}
-      {detail.raw_page && <RawPreview payload={detail.raw_page} title="整页字节" pageWide />}
+      {raw && <RawPreview payload={raw} title={detail.type === 'catalog' ? '目录链 Payload' : 'Payload'} pageWide pageType={detail.type} />}
+      {detail.raw_page && <RawPreview payload={detail.raw_page} title="整页字节" pageWide pageType={detail.type} />}
       {detail.note && <p className="hint">{detail.note}</p>}
     </section>
   )
 }
 
-function RawPreview({ payload, title = '原始 payload 预览', pageWide = false }: { payload: RawPayload; title?: string; pageWide?: boolean }) {
-  const inspection = inspectStoragePayload(decodeRawPayloadBytes(payload))
+function RawPreview({
+  payload,
+  title = '原始 payload 预览',
+  pageWide = false,
+  pageType
+}: {
+  payload: RawPayload
+  title?: string
+  pageWide?: boolean
+  pageType?: string
+}) {
+  const inspection = inspectStoragePayload(decodeRawPayloadBytes(payload), false, pageType)
   return (
     <details className={`raw-preview ${pageWide ? 'page-wide-preview' : ''}`}>
       <summary>

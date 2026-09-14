@@ -6,8 +6,8 @@ export interface RawByteField {
   value: string
 }
 
-export interface YsplInspection {
-  kind: 'yspl' | 'index'
+export interface PayloadInspection {
+  kind: 'yspl' | 'index' | 'catalog'
   title: string
   summary: string
   fields: RawByteField[]
@@ -15,6 +15,8 @@ export interface YsplInspection {
 
 const YSPL_MAGIC = [0x59, 0x53, 0x50, 0x4c]
 const INDEX_MAGIC = [0x4d, 0x42, 0x49, 0x58]
+const CATALOG_MAGIC = [0x4d, 0x43, 0x41, 0x54, 0x32]
+const CATALOG_CHAIN_HEADER_SIZE = CATALOG_MAGIC.length + 8
 
 function formatHex(bytes: number[]): string {
   return bytes.map(value => value.toString(16).padStart(2, '0')).join(' ')
@@ -52,6 +54,14 @@ function littleEndianUint32(bytes: number[]): number {
   return bytes[0] + (bytes[1] << 8) + (bytes[2] << 16) + ((bytes[3] << 24) >>> 0)
 }
 
+function littleEndianUint64(bytes: number[]): bigint {
+  let value = 0n
+  for (let index = 0; index < Math.min(8, bytes.length); index += 1) {
+    value |= BigInt(bytes[index]) << BigInt(index * 8)
+  }
+  return value
+}
+
 function isObject(value: JsonValue): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -63,6 +73,101 @@ function formatJson(value: JsonValue | undefined): string {
 
 function indexField(label: string, value: JsonValue | undefined): RawByteField {
   return { label, value: formatJson(value) }
+}
+
+function catalogEncoding(bytes: number[]): string {
+  if (YSPL_MAGIC.every((value, index) => bytes[index] === value)) return 'YSPL 手写 payload'
+  const text = decodeUtf8(bytes)
+  if (text !== null && text.trim().length > 0) return 'JSON payload'
+  return '未识别'
+}
+
+function catalogChainTarget(bytes: number[]): string {
+  const nextPageId = littleEndianUint64(bytes)
+  return nextPageId === 0n ? '链尾（0）' : `#${nextPageId.toString()}`
+}
+
+function catalogValueSummary(value: JsonValue): string {
+  if (!isObject(value)) return formatJson(value)
+  const tableCount = Array.isArray(value.tables) ? value.tables.length : 0
+  const viewCount = Array.isArray(value.views) ? value.views.length : 0
+  const indexCount = Array.isArray(value.indexes) ? value.indexes.length : 0
+  const version = typeof value.version === 'number' ? `v${value.version}` : '未知版本'
+  return `${version} · 表 ${tableCount} · 视图 ${viewCount} · 索引 ${indexCount}`
+}
+
+function decodeCatalogBody(bytes: number[]): { encoding: string; value?: JsonValue } {
+  const encoding = catalogEncoding(bytes)
+  if (encoding === 'YSPL 手写 payload') {
+    try {
+      return { encoding, value: decodeManualPayload(new Uint8Array(bytes)) }
+    } catch {
+      return { encoding }
+    }
+  }
+  if (encoding !== 'JSON payload') return { encoding }
+  try {
+    return { encoding, value: JSON.parse(decodeUtf8(bytes) ?? '') as JsonValue }
+  } catch {
+    return { encoding }
+  }
+}
+
+/** 解析 MCAT2 目录页链，展示链指针与编码状态，而不是把跨页片段当作普通原始 payload。 */
+export function inspectCatalogPayload(bytes: number[], masked = false, allowLegacy = false): PayloadInspection | null {
+  if (masked) return null
+  const hasCatalogMagic = bytes.length >= CATALOG_MAGIC.length && CATALOG_MAGIC.every((value, index) => bytes[index] === value)
+  if (!hasCatalogMagic) {
+    if (!allowLegacy) return null
+    const decoded = decodeCatalogBody(bytes)
+    if (decoded.value === undefined) return null
+    return {
+      kind: 'catalog',
+      title: '目录页 payload（兼容格式）',
+      summary: `旧版裸 payload · ${decoded.encoding}`,
+      fields: [
+        { label: '编码', value: decoded.encoding },
+        { label: '当前片段', value: `${bytes.length} B` },
+        { label: '目录摘要', value: catalogValueSummary(decoded.value) }
+      ]
+    }
+  }
+
+  const fields: RawByteField[] = [{ label: '魔数', value: `${formatHex(CATALOG_MAGIC)} · MCAT2` }]
+  if (bytes.length < CATALOG_CHAIN_HEADER_SIZE) {
+    return {
+      kind: 'catalog',
+      title: 'MCAT2 目录链页',
+      summary: '已识别目录页魔数，但链头不完整',
+      fields: [...fields, { label: '链头', value: `${bytes.length} / ${CATALOG_CHAIN_HEADER_SIZE} B` }]
+    }
+  }
+
+  const nextPageBytes = bytes.slice(CATALOG_MAGIC.length, CATALOG_CHAIN_HEADER_SIZE)
+  const body = bytes.slice(CATALOG_CHAIN_HEADER_SIZE)
+  const decoded = decodeCatalogBody(body)
+  fields.push(
+    { label: '链头', value: `${CATALOG_CHAIN_HEADER_SIZE} B · MCAT2 + uint64 小端页号` },
+    { label: '下一页', value: catalogChainTarget(nextPageBytes) },
+    { label: '编码', value: decoded.encoding },
+    { label: '当前片段', value: `${body.length} B` }
+  )
+
+  if (decoded.value !== undefined) {
+    fields.push({ label: '目录摘要', value: catalogValueSummary(decoded.value) })
+  } else if (body.length === 0) {
+    fields.push({ label: '解析状态', value: '当前页没有目录片段' })
+  } else {
+    fields.push({ label: '解析状态', value: '目录 payload 跨页分片，当前页片段不足以独立解码' })
+  }
+
+  const hasNextPage = catalogChainTarget(nextPageBytes) !== '链尾（0）'
+  return {
+    kind: 'catalog',
+    title: 'MCAT2 目录链页',
+    summary: hasNextPage ? '目录元数据跨页保存 · 当前页仍有后续片段' : '目录元数据链尾页 · 当前片段已到末端',
+    fields
+  }
 }
 
 function decodeIndexPayload(bytes: number[]): { value: JsonObject; encoding: string } | null {
@@ -83,7 +188,7 @@ function decodeIndexPayload(bytes: number[]): { value: JsonObject; encoding: str
 }
 
 /** 解析 MBIX 索引页载荷，展示节点结构而不是只把索引页当作二进制块。 */
-export function inspectIndexPayload(bytes: number[], masked = false): YsplInspection | null {
+export function inspectIndexPayload(bytes: number[], masked = false): PayloadInspection | null {
   if (masked || bytes.length < INDEX_MAGIC.length || !INDEX_MAGIC.every((value, index) => bytes[index] === value)) return null
 
   const decoded = decodeIndexPayload(bytes)
@@ -133,7 +238,7 @@ export function inspectIndexPayload(bytes: number[], masked = false): YsplInspec
 }
 
 /** 识别 YSPL 的长度帧与当前手写 TLV，避免把魔数后的内容笼统显示为乱码。 */
-export function inspectYsplPayload(bytes: number[], masked = false): YsplInspection | null {
+export function inspectYsplPayload(bytes: number[], masked = false): PayloadInspection | null {
   if (masked || bytes.length < YSPL_MAGIC.length || !YSPL_MAGIC.every((value, index) => bytes[index] === value)) return null
 
   const rest = bytes.slice(YSPL_MAGIC.length)
@@ -172,7 +277,7 @@ export function inspectYsplPayload(bytes: number[], masked = false): YsplInspect
   }
 }
 
-/** 统一识别存储页中的索引 MBIX 与普通 YSPL payload。 */
-export function inspectStoragePayload(bytes: number[], masked = false): YsplInspection | null {
-  return inspectIndexPayload(bytes, masked) ?? inspectYsplPayload(bytes, masked)
+/** 统一识别存储页中的 MCAT2 目录链、MBIX 索引与普通 YSPL payload。 */
+export function inspectStoragePayload(bytes: number[], masked = false, pageType?: string): PayloadInspection | null {
+  return inspectCatalogPayload(bytes, masked, pageType === 'catalog') ?? inspectIndexPayload(bytes, masked) ?? inspectYsplPayload(bytes, masked)
 }

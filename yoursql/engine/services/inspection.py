@@ -100,6 +100,36 @@ def _display_row(raw: bytes | None, masked: bool) -> list[object] | None:
     return ["MASKED"] * len(row) if masked else row
 
 
+def _catalog_content(database: Database, admin: bool) -> JsonObject:
+    """【前端特供】返回目录页对应的完整结构化内容，供工作台展开查看。"""
+
+    tables = database.catalog.tables()
+    table_by_id = {
+        int(table.table_id): table
+        for table in database.catalog.tables(include_system=True)
+    }
+    views = tuple(view for view in database.catalog.views() if admin or not view.system)
+    indexes = tuple(
+        index
+        for index in database.catalog.indexes()
+        if admin
+        or not (
+            table_by_id.get(int(index.table_id))
+            and table_by_id[int(index.table_id)].system
+        )
+    )
+    return {
+        "version": database.catalog.VERSION,
+        "tables": [table.to_dict() for table in tables],
+        "views": [view.to_dict() for view in views],
+        "indexes": [index.to_dict() for index in indexes],
+        "system_tables": [table.to_dict() for table in database.catalog.system_tables()]
+        if admin
+        else "MASKED",
+        "permission_storage": "internal_tables" if admin else "MASKED",
+    }
+
+
 def page_header(
     page: Page,
     database: Database | None = None,
@@ -468,6 +498,7 @@ def inspect_page(
             else "MASKED",
             "permission_storage": "internal_tables" if admin else "MASKED",
         }
+        result["catalog_content"] = _catalog_content(database, admin)
     elif page.page_type == PageType.SUPERBLOCK:
         result["metadata"] = database.disk.metadata().to_dict()
     elif page.page_type == PageType.INDEX:

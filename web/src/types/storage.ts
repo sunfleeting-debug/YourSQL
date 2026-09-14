@@ -95,6 +95,7 @@ export interface StoragePageDetail extends PageHeader {
   layout?: string
   physical_layout?: StorageLayout
   catalog?: JsonValue
+  catalog_content?: JsonObject
   metadata?: JsonValue
   index_node?: JsonObject
   note?: string

@@ -6,6 +6,7 @@ import { Grid3X3 } from 'lucide-react'
 import type { JsonObject, JsonValue } from '../../types/common'
 import type { RawPayload, StorageLayout, StoragePageDetail, StorageRegion, StorageSlot } from '../../types/storage'
 import { pageCellClassName, pageCellSegmentClassName } from '../../view-classes'
+import JsonTree from '../query/JsonTree'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
 import { inspectStoragePayload } from './raw-bytes'
 
@@ -877,6 +878,48 @@ function PayloadSelectionInfo({ inspection }: { inspection: NonNullable<PageGrid
   )
 }
 
+function CatalogPageInfo({ detail }: { detail: StoragePageDetail }) {
+  if (detail.catalog === undefined) return null
+  const catalog = recordValue(detail.catalog)
+  const tables = Array.isArray(catalog.tables) ? catalog.tables : []
+  const systemTables = catalog.system_tables
+  const systemTableText = Array.isArray(systemTables) ? `${systemTables.length} 项` : textValue(systemTables)
+  return (
+    <section className="selected-payload-special" aria-label="目录页结构摘要">
+      <div className="selected-payload-special-heading">
+        <strong>目录页数据</strong>
+        <span>目录元数据摘要</span>
+      </div>
+      <dl>
+        <div>
+          <dt>当前页表项</dt>
+          <dd>
+            <code>{tables.length} 项</code>
+          </dd>
+        </div>
+        <div>
+          <dt>系统表</dt>
+          <dd>
+            <code>{systemTableText}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>权限存储</dt>
+          <dd>
+            <code>{textValue(catalog.permission_storage)}</code>
+          </dd>
+        </div>
+      </dl>
+      {detail.catalog_content && (
+        <details className="storage-json-details catalog-content-details" open>
+          <summary>目录实际内容</summary>
+          <JsonTree key={`catalog-content-${detail.page_id}`} value={detail.catalog_content} defaultExpandedDepth={2} />
+        </details>
+      )}
+    </section>
+  )
+}
+
 export function PageGridSelectionDetail({ selection, detail }: { selection: PageGridSelection; detail?: StoragePageDetail }) {
   const rawDetailsOpen = useSyncExternalStore(subscribeRawByteDetails, getRawByteDetailsOpen, getRawByteDetailsOpen)
   const showRawDetails = selection.kind !== 'header' && selection.kind !== 'inner-header'
@@ -887,6 +930,7 @@ export function PageGridSelectionDetail({ selection, detail }: { selection: Page
   return (
     <div className={`page-cell-detail ${selection.grouped ? 'group-detail' : ''}`} data-selection-scope={selection.grouped ? 'region' : 'cell'}>
       {detail && <PageStructureSummary detail={detail} selection={selection} />}
+      {detail?.type === 'catalog' && <CatalogPageInfo detail={detail} />}
       <div className="page-cell-detail-heading">
         <strong>{selection.heading}</strong>
         <em>{scopeLabel}</em>
@@ -990,6 +1034,7 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
   const slots = detail.slots ?? []
   const layout = detail.physical_layout
   const binaryLayout = layout?.physical === true && layout.format === 'double_ended_v2'
+  const payloadLabel = detail.type === 'catalog' ? '目录链 Payload' : 'Payload'
   const viewport = useRef<HTMLDivElement>(null)
   const pan = useRef({ active: false, x: 0, y: 0, left: 0, top: 0 })
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -1115,7 +1160,7 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
     : [
         { key: 'header', label: '页头', kind: 'header' as CellKind },
         { key: 'legacy-slot', label: '旧槽位', kind: 'legacy-slot' as CellKind },
-        { key: 'payload', label: 'Payload', kind: 'payload' as CellKind },
+        { key: 'payload', label: payloadLabel, kind: 'payload' as CellKind },
         { key: 'free', label: '尾部填充', kind: 'free' as CellKind }
       ]
   const regions = regionDefinitions.map(region => ({ ...region, group: groups.get(regionGroupKey(region.kind)) })).filter(region => region.group)
@@ -1156,7 +1201,7 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
     : rangeText(selected.offset, selected.offset + selected.bytes.length - 1)
   const completeHex = completeMasked ? 'MASKED' : hex(completeBytes)
   const completeAscii = completeMasked ? 'MASKED' : ascii(completeBytes)
-  const payloadInspection = inspectStoragePayload(completeBytes, completeMasked)
+  const payloadInspection = inspectStoragePayload(completeBytes, completeMasked, detail.type)
   const layoutSlotDetails = new Map(
     (layout?.slots ?? []).map(slot => [
       slot.slot_id,
@@ -1316,7 +1361,7 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
             </span>
             <span>
               <i className="page-key payload" />
-              Payload
+              {payloadLabel}
             </span>
             <span>
               <i className="page-key free" />
