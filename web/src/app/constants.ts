@@ -8,7 +8,8 @@ export const FIRST_QUERY_ID = 'query-1'
 export const DEFAULT_DATABASE_CONFIG: DatabaseCreateConfig = {
   page_size: 4096,
   buffer_pool_size: 64,
-  replacement_policy: 'lru'
+  replacement_policy: 'lru',
+  payload_codec: 'json'
 }
 
 export function createQueryTab(id: string, title: string, sql = INITIAL_SQL): QueryTabState {

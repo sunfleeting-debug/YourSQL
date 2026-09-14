@@ -1,6 +1,18 @@
 """跨层共享的类型、配置和异常。"""
 
 from .config import DatabaseConfig, RuntimeConfig, configure_logging, load_dotenv
+from .codec import (
+    MANUAL_CONTENT_TYPE,
+    MANUAL_PAYLOAD_MAGIC,
+    JsonPayloadCodec,
+    ManualPayloadCodec,
+    PayloadCodec,
+    PayloadCodecError,
+    PayloadCodecName,
+    decode_payload,
+    payload_codec,
+    validate_payload_codec,
+)
 from .contracts import JsonObject, JsonPrimitive, JsonValue, SqlRow, SqlValue
 from .errors import (
     AuthorizationError,
@@ -33,16 +45,23 @@ __all__ = [
     "Column",
     "DataType",
     "DatabaseConfig",
+    "MANUAL_CONTENT_TYPE",
+    "MANUAL_PAYLOAD_MAGIC",
     "RuntimeConfig",
     "ExecutionError",
     "ExecutionResult",
     "JsonObject",
     "JsonPrimitive",
     "JsonValue",
+    "JsonPayloadCodec",
     "LexerError",
+    "ManualPayloadCodec",
     "YourSQLError",
     "PageId",
     "ParserError",
+    "PayloadCodec",
+    "PayloadCodecError",
+    "PayloadCodecName",
     "RowId",
     "Schema",
     "SqlRow",
@@ -53,6 +72,9 @@ __all__ = [
     "Value",
     "compare_values",
     "configure_logging",
+    "decode_payload",
     "load_dotenv",
+    "payload_codec",
     "sql_truth",
+    "validate_payload_codec",
 ]

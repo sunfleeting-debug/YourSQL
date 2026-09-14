@@ -22,6 +22,7 @@ from ...common import (
     JsonObject,
     YourSQLError,
     RuntimeConfig,
+    validate_payload_codec,
 )
 from ...common.trace import ExecutionTrace, current_trace
 from ...sql.ast import Explain, Select, Show
@@ -352,11 +353,19 @@ class Workbench:
         policy = options.get("replacement_policy", defaults.replacement_policy)
         if not isinstance(policy, str) or policy.lower() not in {"lru", "fifo"}:
             raise YourSQLError("replacement_policy 只能是 lru 或 fifo", "BAD_REQUEST")
+        raw_codec = options.get("payload_codec", defaults.payload_codec)
+        if not isinstance(raw_codec, str):
+            raise YourSQLError("payload_codec 必须是 json 或 manual", "BAD_REQUEST")
+        try:
+            selected_codec = validate_payload_codec(raw_codec)
+        except ValueError as exc:
+            raise YourSQLError(str(exc), "BAD_REQUEST") from exc
         return DatabaseConfig(
             page_size=page_size,
             buffer_pool_size=buffer_pool_size,
             replacement_policy=policy.lower(),
             max_varchar_length=defaults.max_varchar_length,
+            payload_codec=selected_codec,
         )
 
     @staticmethod
@@ -367,6 +376,7 @@ class Workbench:
             "page_size": config.page_size,
             "buffer_pool_size": config.buffer_pool_size,
             "replacement_policy": config.replacement_policy,
+            "payload_codec": config.payload_codec,
         }
 
     def _replace_database(self, replacement: Database) -> tuple[str, str]:
@@ -603,6 +613,7 @@ class Workbench:
     def dialect(self) -> JsonObject:
         """返回工作台支持的 SQL 方言信息。"""
         return {
+            "payload_codec": self.database.payload_codec.name,
             "keywords": sorted(set(KEYWORDS) | {"NULL", "TRUE", "FALSE"}),
             "types": [
                 "INT",

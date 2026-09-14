@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import struct
 import tempfile
@@ -21,6 +20,7 @@ from ...common import (
     YourSQLError,
     StorageError,
 )
+from ...common.codec import PayloadCodecError, decode_payload
 from ...common.types import PageId, RowId
 from ...sql.ast import Explain, Select, Statement
 from ...sql.binder import Binder
@@ -116,13 +116,18 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 page = Page.from_bytes(raw, page_size=probe_size)
                 if page.page_type is not PageType.SUPERBLOCK:
                     continue
-                payload = (
-                    json.loads(page.payload.decode("utf-8")) if page.payload else {}
-                )
+                payload = decode_payload(page.payload)[0] if page.payload else {}
                 stored_size = int(payload.get("page_size", 0))
                 if stored_size >= HEADER_SIZE and stored_size & (stored_size - 1) == 0:
                     return stored_size
-            except (OSError, StorageError, UnicodeDecodeError, ValueError, TypeError):
+            except (
+                OSError,
+                StorageError,
+                PayloadCodecError,
+                UnicodeDecodeError,
+                ValueError,
+                TypeError,
+            ):
                 continue
         return None
 
@@ -152,7 +157,15 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             self.path = Path(path)
             # HOW：默认数据库位于 ./data；首次启动时自动准备父目录，CLI、Web 和直接 API 行为保持一致。
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.disk = DiskManager(self.path, page_size=self.config.page_size)
+        self.disk = DiskManager(
+            self.path,
+            page_size=self.config.page_size,
+            payload_codec=self.config.payload_codec,
+        )
+        # WHY：旧 JSON 库可能在配置中请求 manual，但实际格式由 superblock 决定；
+        # 后续所有页必须跟随打开文件的实际编码，避免同库混写。
+        self.config = replace(self.config, payload_codec=self.disk.payload_codec.name)
+        self.payload_codec = self.disk.payload_codec
         self.buffer_pool = BufferPool(
             self.disk, self.config.buffer_pool_size, self.config.replacement_policy
         )
@@ -223,19 +236,16 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 break
             current_page_id = decoded.next_page_id or None
         try:
-            data = json.loads(b"".join(chunks).decode("utf-8")) if chunks else {}
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise CatalogError("catalog 页链 JSON 损坏") from exc
+            data = decode_payload(b"".join(chunks), self.payload_codec)[0] if chunks else {}
+        except (PayloadCodecError, UnicodeDecodeError, ValueError) as exc:
+            raise CatalogError("catalog 页链 payload 损坏") from exc
         if not isinstance(data, dict):
             raise CatalogError("catalog 页不是对象")
         return Catalog.from_dict(data)
 
-    @staticmethod
-    def _catalog_payload(catalog: Catalog) -> bytes:
+    def _catalog_payload(self, catalog: Catalog) -> bytes:
         """将 Catalog 编码为目录页链使用的字节载荷。"""
-        return json.dumps(
-            catalog.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
+        return self.payload_codec.encode(catalog.to_dict())
 
     @staticmethod
     def _catalog_page_payload(chunk: bytes, next_page_id: int) -> bytes:

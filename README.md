@@ -197,6 +197,14 @@ python -m yoursql.web --database data/showcase_v2.db --port 8080
 
 不传 `--database` 时默认 `./data/workbench.db`；`npm run build` 输出到 `yoursql/workbench_static`。改前端源码时用 `npm run dev`（5173），另一个终端给后端加 `--allow-origin http://127.0.0.1:5173`。前端格式化用 `npm run format`，校验用 `npm run format:check`（Prettier 配置在 `web/.prettierrc.json`）。
 
+### Payload 编码开关
+
+通过 `YOURSQL_PAYLOAD_CODEC=json|manual` 选择新数据库的内部 payload 编码，默认仍为 `json`。
+`manual` 使用手写 `YSPL` TLV 编解码，不依赖 JSON 读写 HEAP 行、INDEX 节点和 CATALOG 内容；
+superblock 会记录 `payload_codec`，已有数据库打开时以文件记录为准，不能在运行时直接切换。
+旧 JSON 数据库仍可兼容读取。HTTP 工作台通过 `Accept: application/x-yoursql; version=1`
+协商 manual 响应，前端新建数据库对话框也提供 `JSON 兼容` / `手写二进制` 选项。
+
 配置优先级为命令行参数 > 系统环境变量 > 根目录 `.env` > 程序默认值；边界参数统一 `YOURSQL_*` 前缀，模板见 [`.env.example`](.env.example)（其中 `YOURSQL_TRACE_MAX_STEPS` 留空表示不限流水线步数）。
 
 **工作区**：可折叠数据库对象栏（表 / 用户视图 / 系统视图分组）、CodeMirror SQL 编辑器、当前语句与全部语句执行、结果分页与 CSV/JSON 导出、查询历史、权限查看、错误行列定位。结果区“流水线”页签显示后端 Token 表；AST、逻辑计划、优化计划与物理阶段提供可缩放算子图和 JSON/文本视图。物理阶段仍复用 PlanNode，但优化出的 SeqScan/IndexScan 会进入实际扫描路径。

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,8 @@ from threading import RLock
 from typing import Iterator
 from typing import Mapping
 
+from ..common.codec import PayloadCodec, PayloadCodecName, decode_payload
+from ..common.codec import payload_codec as get_payload_codec
 from ..common.errors import StorageError
 from ..common.trace import current_trace
 from .page import Page, PageType
@@ -79,10 +80,17 @@ class DiskManager:
 
     FORMAT_VERSION = 1
 
-    def __init__(self, path: str | os.PathLike[str], *, page_size: int = 4096) -> None:
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        page_size: int = 4096,
+        payload_codec: PayloadCodecName = "json",
+    ) -> None:
         """初始化实例所需的状态和依赖。"""
         self.path = Path(path)
         self.page_size = page_size
+        self.payload_codec: PayloadCodec = get_payload_codec(payload_codec)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self._closed = False
@@ -131,9 +139,16 @@ class DiskManager:
         if page.page_type is not PageType.SUPERBLOCK:
             raise StorageError("第 0 页不是 superblock")
         try:
-            data = json.loads(page.payload.decode("utf-8")) if page.payload else {}
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise StorageError("superblock JSON 损坏") from exc
+            data, selected_codec = (
+                decode_payload(page.payload, self.payload_codec)
+                if page.payload
+                else ({}, self.payload_codec)
+            )
+            self.payload_codec = selected_codec
+        except (TypeError, ValueError) as exc:
+            raise StorageError("superblock payload 损坏") from exc
+        if not isinstance(data, Mapping):
+            raise StorageError("superblock payload 不是对象")
         if data.get("magic") != "YOURSQLMS":
             raise StorageError("数据库文件魔数错误")
         if int(data.get("version", 0)) > self.FORMAT_VERSION:
@@ -143,6 +158,9 @@ class DiskManager:
             raise StorageError(
                 f"页大小不匹配，文件为 {stored_size}，配置为 {self.page_size}"
             )
+        stored_codec = data.get("payload_codec", self.payload_codec.name)
+        if stored_codec != self.payload_codec.name:
+            raise StorageError("superblock payload 编码字段与实际编码不一致")
         self._next_page_id = max(1, int(data.get("next_page_id", 1)))
         self._free_pages = {int(value) for value in data.get("free_pages", [])}
         raw_named = data.get("named_pages", {})
@@ -161,8 +179,9 @@ class DiskManager:
             "next_page_id": self._next_page_id,
             "free_pages": sorted(self._free_pages),
             "named_pages": self._named_pages,
+            "payload_codec": self.payload_codec.name,
         }
-        return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return self.payload_codec.encode(data)
 
     def _read_raw(self, page_id: int) -> bytes:
         """从数据库文件读取原始页字节。"""

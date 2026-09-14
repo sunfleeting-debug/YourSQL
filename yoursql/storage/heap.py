@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
+from ..common.codec import PayloadCodec, PayloadCodecError, decode_payload
+from ..common.codec import payload_codec as get_payload_codec
 from ..common.errors import StorageError
 from ..common.types import PageId, RowId
 from .buffer import BufferPool
@@ -49,22 +50,31 @@ class TableHeap:
         return self.buffer_pool.disk.page_size
 
     @staticmethod
-    def _encode(row: tuple[object, ...]) -> bytes:
+    def _encode(
+        row: tuple[object, ...], codec: PayloadCodec | str = "json"
+    ) -> bytes:
         """将内部数据编码为存储字节串。"""
-        return json.dumps(list(row), ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        selected = codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
+        return selected.encode(list(row))
 
     @staticmethod
-    def _decode(raw: bytes) -> tuple[object, ...]:
+    def _decode(
+        raw: bytes, codec: PayloadCodec | str | None = None
+    ) -> tuple[object, ...]:
         """将存储字节串解码为内部数据。"""
         try:
-            value = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise StorageError("记录 JSON 损坏") from exc
+            value, _selected = decode_payload(raw, codec)
+        except (PayloadCodecError, TypeError, ValueError) as exc:
+            raise StorageError("记录 payload 损坏") from exc
         if not isinstance(value, list):
             raise StorageError("记录不是数组")
         return tuple(value)
+
+    @property
+    def payload_codec(self) -> PayloadCodec:
+        """返回当前数据库文件选择的 payload 编解码器。"""
+
+        return self.buffer_pool.disk.payload_codec
 
     def _read_slotted(self, page_id: int) -> SlottedPage:
         """读取页并解析为槽式页。"""
@@ -82,7 +92,7 @@ class TableHeap:
 
     def insert(self, row: tuple[object, ...]) -> RowId:
         """向堆表写入一行并返回其 RowId。"""
-        encoded = self._encode(row)
+        encoded = self._encode(row, self.payload_codec)
         # WHY：TableHeap 只负责选择页、写入记录并分配 RowId；索引需要表结构和索引元数据，
         # 因此由 runtime/commands.py 在此方法返回后统一建立索引入口。
         # HOW：新记录优先尝试尾页，避免大表插入时逐行扫描所有已满页。
@@ -145,7 +155,7 @@ class TableHeap:
             used = SLOTTED_HEADER_SIZE
 
         for row in rows:
-            encoded = self._encode(row)
+            encoded = self._encode(row, self.payload_codec)
             entry = len(encoded) + SLOT_ENTRY_SIZE
             if page_id is None or used + entry > capacity:
                 flush()
@@ -170,7 +180,7 @@ class TableHeap:
             return None
         slotted = self._read_slotted(page_id)
         raw = slotted.get(row_id.slot_id)
-        return None if raw is None else self._decode(raw)
+        return None if raw is None else self._decode(raw, self.payload_codec)
 
     def update(self, row_id: RowId, row: tuple[object, ...]) -> None:
         """更新堆表中指定 RowId 的行。"""
@@ -180,7 +190,7 @@ class TableHeap:
         # WHY：堆表只更新物理记录；若更新了索引列，调用方必须先删除旧索引入口，
         # 再按新行值插入入口，避免索引继续指向旧键或旧的覆盖索引 payload。
         slotted = self._read_slotted(page_id)
-        slotted.update(row_id.slot_id, self._encode(row))
+        slotted.update(row_id.slot_id, self._encode(row, self.payload_codec))
         self._write_slotted(slotted)
 
     def delete(self, row_id: RowId) -> bool:
@@ -202,7 +212,7 @@ class TableHeap:
             for live_slot in slotted.live_slots():
                 yield HeapRecord(
                     RowId(PageId(page_id), live_slot.slot_id),
-                    self._decode(live_slot.raw),
+                    self._decode(live_slot.raw, self.payload_codec),
                 )
 
     def count(self) -> int:
