@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from threading import RLock
+from typing import Iterator
 
 from ..common.errors import StorageError
 from ..common.trace import current_trace
@@ -19,6 +20,114 @@ class BufferFrame:
     dirty: bool = False
     loaded_order: int = 0
     last_used: int = 0
+
+
+@dataclass(frozen=True)
+class BufferPoolStats:
+    """BufferPool 的累计命中统计。"""
+
+    capacity: int
+    size: int
+    hits: int
+    misses: int
+    evictions: int
+    hit_rate: float
+
+    def __getitem__(self, key: str) -> int | float:
+        """兼容旧的调试调用方；新代码优先使用属性。"""
+
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        """返回对象的迭代器。"""
+        return iter(("capacity", "size", "hits", "misses", "evictions", "hit_rate"))
+
+    def to_dict(self) -> dict[str, int | float]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "capacity": self.capacity,
+            "size": self.size,
+            "hits": self.hits,
+            "misses": self.misses,
+            "evictions": self.evictions,
+            "hit_rate": self.hit_rate,
+        }
+
+
+@dataclass(frozen=True)
+class BufferFrameSnapshot:
+    """缓存帧的只读检查摘要。"""
+
+    page_id: int
+    page_type: str
+    pin_count: int
+    dirty: bool
+    loaded_order: int
+    last_used: int
+
+    def to_dict(self) -> dict[str, int | str | bool]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "page_id": self.page_id,
+            "type": self.page_type,
+            "pin_count": self.pin_count,
+            "dirty": self.dirty,
+            "loaded_order": self.loaded_order,
+            "last_used": self.last_used,
+        }
+
+
+@dataclass(frozen=True)
+class BufferPoolSnapshot:
+    """BufferPool 检查快照；不包含页 payload。"""
+
+    stats: BufferPoolStats
+    policy: str
+    frames: tuple[BufferFrameSnapshot, ...]
+    eviction_order: tuple[int, ...]
+    total: int
+    offset: int
+    limit: int
+    revision: int
+
+    def __getitem__(self, key: str) -> object:
+        """兼容 HTTP 适配层迁移期间的映射式读取。"""
+
+        return self.to_dict()[key]
+
+    def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "stats": self.stats.to_dict(),
+            "policy": self.policy,
+            "frames": [frame.to_dict() for frame in self.frames],
+            "eviction_order": list(self.eviction_order),
+            "total": self.total,
+            "offset": self.offset,
+            "limit": self.limit,
+            "revision": self.revision,
+        }
+
+
+@dataclass(frozen=True)
+class ChangeSet:
+    """BufferPool 页内容变更游标的结果。"""
+
+    revision: int
+    changed_page_ids: tuple[int, ...]
+    truncated: bool
+
+    def __getitem__(self, key: str) -> object:
+        """按键或下标读取对象中的元素。"""
+        return self.to_dict()[key]
+
+    def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "revision": self.revision,
+            "changed_page_ids": list(self.changed_page_ids),
+            "truncated": self.truncated,
+        }
 
 
 class BufferPool:
@@ -51,17 +160,17 @@ class BufferPool:
         """返回对象占用或包含的大小。"""
         return len(self._frames)
 
-    def stats(self) -> dict[str, int | float]:
+    def stats(self) -> BufferPoolStats:
         """返回对象的统计信息。"""
         total = self._hits + self._misses
-        return {
-            "capacity": self.capacity,
-            "size": len(self._frames),
-            "hits": self._hits,
-            "misses": self._misses,
-            "evictions": self._evictions,
-            "hit_rate": self._hits / total if total else 0.0,
-        }
+        return BufferPoolStats(
+            capacity=self.capacity,
+            size=len(self._frames),
+            hits=self._hits,
+            misses=self._misses,
+            evictions=self._evictions,
+            hit_rate=self._hits / total if total else 0.0,
+        )
 
     statistics = stats
 
@@ -230,44 +339,40 @@ class BufferPool:
         self.flush_all()
         self._frames.clear()
 
-    def snapshot(self, offset: int = 0, limit: int = 100) -> dict[str, object]:
+    def snapshot(self, offset: int = 0, limit: int = 100) -> BufferPoolSnapshot:
         """只复制有限帧头，不 pin、不淘汰、不刷新或推进替换时钟。"""
         from itertools import islice
 
         with self._lock:
-            return {
-                "stats": self.stats(),
-                "policy": self.replacement_policy,
-                "frames": [
-                    {
-                        "page_id": page_id,
-                        "type": frame.page.page_type.value,
-                        "pin_count": frame.pin_count,
-                        "dirty": frame.dirty,
-                        "loaded_order": frame.loaded_order,
-                        "last_used": frame.last_used,
-                    }
+            return BufferPoolSnapshot(
+                stats=self.stats(),
+                policy=self.replacement_policy,
+                frames=tuple(
+                    BufferFrameSnapshot(
+                        page_id=page_id,
+                        page_type=frame.page.page_type.value,
+                        pin_count=frame.pin_count,
+                        dirty=frame.dirty,
+                        loaded_order=frame.loaded_order,
+                        last_used=frame.last_used,
+                    )
                     for page_id, frame in islice(
                         self._frames.items(), offset, offset + limit
                     )
-                ],
-                "eviction_order": self._eviction_order_locked(),
-                "total": len(self._frames),
-                "offset": offset,
-                "limit": limit,
-                "revision": self._revision,
-            }
+                ),
+                eviction_order=tuple(self._eviction_order_locked()),
+                total=len(self._frames),
+                offset=offset,
+                limit=limit,
+                revision=self._revision,
+            )
 
-    def changes_since(self, revision: int) -> dict[str, object]:
+    def changes_since(self, revision: int) -> ChangeSet:
         """返回指定游标之后发生变化的页号，不读取磁盘也不触碰替换状态。"""
 
         with self._lock:
             if revision >= self._revision:
-                return {
-                    "revision": self._revision,
-                    "changed_page_ids": [],
-                    "truncated": False,
-                }
+                return ChangeSet(self._revision, (), False)
             first_revision = (
                 self._change_log[0][0] if self._change_log else self._revision + 1
             )
@@ -279,11 +384,7 @@ class BufferPool:
                     if item_revision > revision
                 )
             )
-            return {
-                "revision": self._revision,
-                "changed_page_ids": page_ids,
-                "truncated": truncated,
-            }
+            return ChangeSet(self._revision, tuple(page_ids), truncated)
 
     def peek_page(self, page_id: int) -> Page:
         """复制缓存最新页或只读磁盘页，保持缓存与 I/O 指标不变。"""

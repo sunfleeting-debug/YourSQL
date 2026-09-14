@@ -6,7 +6,7 @@ import json
 import os
 import struct
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from types import TracebackType
@@ -32,7 +32,15 @@ from ...planner.optimizer import CostEstimate, Optimizer, StatisticsStore
 from ...planner.physical import PhysicalPlanNode, PlanNode
 from ...execution.evaluator import ExpressionEvaluator
 from ...execution.query import QueryExecutionMixin, _RowContextTemplate
-from ...storage import BufferPool, DiskManager, IndexManager, Page, PageType, TableHeap
+from ...storage import (
+    BufferPool,
+    DiskManager,
+    IndexManager,
+    IndexPayloadEntry,
+    Page,
+    PageType,
+    TableHeap,
+)
 from ...storage.page import HEADER_SIZE
 from ..security.audit import AuditLog
 from ..security.auth import RBAC
@@ -47,6 +55,14 @@ _INSERT_BATCH_ROWS = 4096
 
 _CATALOG_CHAIN_MAGIC = b"MCAT2"
 _CATALOG_CHAIN_HEADER = struct.Struct("<5sQ")
+
+
+@dataclass(frozen=True)
+class _CatalogPageChunk:
+    """目录页链解码结果。"""
+
+    next_page_id: int | None
+    chunk: bytes
 
 
 def _with_location(
@@ -201,11 +217,11 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             page = self.disk.read(current_page_id)
             if page.page_type is not PageType.CATALOG:
                 raise CatalogError("命名 catalog 页类型错误")
-            next_page_id, chunk = self._decode_catalog_page(page.payload)
-            chunks.append(chunk)
-            if next_page_id is None:
+            decoded = self._decode_catalog_page(page.payload)
+            chunks.append(decoded.chunk)
+            if decoded.next_page_id is None:
                 break
-            current_page_id = next_page_id or None
+            current_page_id = decoded.next_page_id or None
         try:
             data = json.loads(b"".join(chunks).decode("utf-8")) if chunks else {}
         except (UnicodeDecodeError, ValueError) as exc:
@@ -230,11 +246,11 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         )
 
     @staticmethod
-    def _decode_catalog_page(payload: bytes) -> tuple[int | None, bytes]:
+    def _decode_catalog_page(payload: bytes) -> _CatalogPageChunk:
         """读取链式 Catalog 页，兼容旧版裸 JSON 页。"""
 
         if not payload.startswith(_CATALOG_CHAIN_MAGIC):
-            return None, payload
+            return _CatalogPageChunk(None, payload)
         if len(payload) < _CATALOG_CHAIN_HEADER.size:
             raise CatalogError("catalog 页链头部不完整")
         magic, next_page_id = _CATALOG_CHAIN_HEADER.unpack(
@@ -242,7 +258,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         )
         if magic != _CATALOG_CHAIN_MAGIC:
             raise CatalogError("catalog 页链魔数错误")
-        return int(next_page_id), payload[_CATALOG_CHAIN_HEADER.size :]
+        return _CatalogPageChunk(
+            int(next_page_id), payload[_CATALOG_CHAIN_HEADER.size :]
+        )
 
     def _catalog_page_ids(self, first_page_id: int) -> list[int]:
         """返回当前 Catalog 页链，供扩容和缩容时复用物理页。"""
@@ -262,8 +280,12 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
             if page.page_type is not PageType.CATALOG:
                 raise CatalogError("catalog 页链包含非 CATALOG 页")
-            next_page_id, _chunk = self._decode_catalog_page(page.payload)
-            current_page_id = None if next_page_id in {None, 0} else next_page_id
+            decoded = self._decode_catalog_page(page.payload)
+            current_page_id = (
+                None
+                if decoded.next_page_id in {None, 0}
+                else decoded.next_page_id
+            )
         return page_ids
 
     def _persist_catalog(self) -> None:
@@ -314,6 +336,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         for metadata in self.catalog.indexes():
 
             def update_root(page_id: int, metadata: IndexMetadata = metadata) -> None:
+                """更新索引根页等关联状态。"""
                 nonlocal metadata_changed
                 selected = PageId(page_id)
                 if metadata.root_page_id != selected:
@@ -399,7 +422,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             ]
             unique_seen: dict[int, set[object]] = {}
             if unique_positions:
-                existing_rows = [row for _row_id, row in heap.scan()]
+                existing_rows = [record.row for record in heap.scan()]
                 for position in unique_positions:
                     unique_seen[position] = {
                         row[position]
@@ -414,9 +437,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 if not self.index_manager.get(metadata.name).has_entries()
             ]
             deferred = bool(indexes) and len(fresh_indexes) == len(indexes)
-            pending_entries: dict[
-                str, list[tuple[object, RowId, tuple[object, ...]]]
-            ] = {metadata.name: [] for metadata in fresh_indexes}
+            pending_entries: dict[str, list[IndexPayloadEntry]] = {
+                metadata.name: [] for metadata in fresh_indexes
+            }
             written_row_ids: list[RowId] = []
             inserted = 0
             buffer: list[tuple[object, ...]] = []
@@ -632,7 +655,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         """返回当前运行指标。"""
         return {
             "health": self.health(),
-            "buffer_pool": self.buffer_pool.stats(),
+            "buffer_pool": self.buffer_pool.stats().to_dict(),
             "catalog": {
                 "tables": len(self.catalog),
                 "indexes": len(self.catalog.indexes()),

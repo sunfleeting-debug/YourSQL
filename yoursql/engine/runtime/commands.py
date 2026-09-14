@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from typing import Callable, Iterable
 
 from ...common import (
@@ -59,8 +59,33 @@ from ...sql.ast import (
 from ...sql.binder import BoundStatement
 from ...sql.lexer import KEYWORDS
 from ...sql.parser import Parser
-from ...storage import TableHeap
+from ...storage import IndexPayloadEntry, TableHeap
 from ..catalog import IndexMetadata, TableMetadata, ViewMetadata
+
+
+@dataclass(frozen=True)
+class _UpdateTarget:
+    """UPDATE 先收集的行位置、旧值和新值。"""
+
+    row_id: RowId
+    old_row: tuple[object, ...]
+    new_row: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _DeleteTarget:
+    """DELETE 先收集的行位置和原始行值。"""
+
+    row_id: RowId
+    row: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _IndexedRow:
+    """批量维护索引时已写入堆表的行。"""
+
+    row: tuple[object, ...]
+    row_id: RowId
 
 
 def _with_location(
@@ -886,6 +911,7 @@ class DatabaseCommandMixin:
                 raise _with_location(exc, row_location) from exc
             self._check_constraints(table, row, None, location=row_location)
             row_id = heap.insert(row)
+            # WHY：只有堆表写入后才能得到最终页号和槽号；索引条目必须指向这个稳定的 RowId。
             self._update_indexes(table, row, row_id, insert=True)
             table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
             table.first_page_id = table.page_ids[0] if table.page_ids else None
@@ -897,14 +923,16 @@ class DatabaseCommandMixin:
         """执行更新操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
-        targets: list[tuple[RowId, tuple[object, ...], tuple[object, ...]]] = []
-        for row_id, row in heap.scan():
-            context = self._table_context(TableRef(table.name), row, row_id, table)
+        targets: list[_UpdateTarget] = []
+        for record in heap.scan():
+            context = self._table_context(
+                TableRef(table.name), record.row, record.row_id, table
+            )
             if statement.where is not None and not sql_truth(
                 self._eval_expr(statement.where, context)
             ):
                 continue
-            values = list(row)
+            values = list(record.row)
             for column_name, expression in statement.assignments:
                 values[table.schema.index(column_name)] = self._eval_expr(
                     expression, context
@@ -915,17 +943,23 @@ class DatabaseCommandMixin:
             except YourSQLError as exc:
                 raise _with_location(exc, assignment_location) from exc
             self._check_constraints(
-                table, new_row, row_id, location=assignment_location
+                table, new_row, record.row_id, location=assignment_location
             )
-            targets.append((row_id, row, new_row))
-        for row_id, old_row, new_row in targets:
-            self._update_indexes(table, old_row, row_id, insert=False)
-            heap.update(row_id, new_row)
+            targets.append(_UpdateTarget(record.row_id, record.row, new_row))
+        for target in targets:
+            # WHY：更新可能改变索引键或覆盖索引携带的列值，因此先移除旧入口，
+            # 堆表更新成功后再按新行值建立入口；失败时下面的异常分支恢复两者。
+            self._update_indexes(table, target.old_row, target.row_id, insert=False)
+            heap.update(target.row_id, target.new_row)
             try:
-                self._update_indexes(table, new_row, row_id, insert=True)
+                self._update_indexes(
+                    table, target.new_row, target.row_id, insert=True
+                )
             except Exception:
-                heap.update(row_id, old_row)
-                self._update_indexes(table, old_row, row_id, insert=True)
+                heap.update(target.row_id, target.old_row)
+                self._update_indexes(
+                    table, target.old_row, target.row_id, insert=True
+                )
                 raise
         return ExecutionResult(
             affected_rows=len(targets), message=f"UPDATE {len(targets)}"
@@ -935,16 +969,18 @@ class DatabaseCommandMixin:
         """执行删除操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
-        targets: list[tuple[RowId, tuple[object, ...]]] = []
-        for row_id, row in heap.scan():
-            context = self._table_context(TableRef(table.name), row, row_id, table)
+        targets: list[_DeleteTarget] = []
+        for record in heap.scan():
+            context = self._table_context(
+                TableRef(table.name), record.row, record.row_id, table
+            )
             if statement.where is None or sql_truth(
                 self._eval_expr(statement.where, context)
             ):
-                targets.append((row_id, row))
-        for row_id, row in targets:
-            self._update_indexes(table, row, row_id, insert=False)
-            heap.delete(row_id)
+                targets.append(_DeleteTarget(record.row_id, record.row))
+        for target in targets:
+            self._update_indexes(table, target.row, target.row_id, insert=False)
+            heap.delete(target.row_id)
             table.row_count = max(0, table.row_count - 1)
         return ExecutionResult(
             affected_rows=len(targets), message=f"DELETE {len(targets)}"
@@ -955,7 +991,7 @@ class DatabaseCommandMixin:
         table: TableMetadata,
         heap: TableHeap,
         rows: list[tuple[object, ...]],
-        pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]]
+        pending_entries: dict[str, list[IndexPayloadEntry]]
         | None = None,
         written_row_ids: list[RowId] | None = None,
     ) -> int:
@@ -977,10 +1013,10 @@ class DatabaseCommandMixin:
                 ):
                     continue
                 pending_entries[metadata.name].extend(
-                    (
+                    IndexPayloadEntry(
                         self._index_key(table, metadata, row),
                         row_id,
-                        self._index_payload(table, metadata, row),
+                        list(self._index_payload(table, metadata, row)),
                     )
                     for row, row_id in zip(rows, row_ids, strict=True)
                     if not (
@@ -992,14 +1028,19 @@ class DatabaseCommandMixin:
                     )
                 )
             return len(row_ids)
-        indexed: list[tuple[tuple[object, ...], RowId]] = []
+        indexed: list[_IndexedRow] = []
         try:
             for row, row_id in zip(rows, row_ids, strict=True):
                 self._update_indexes(table, row, row_id, insert=True)
-                indexed.append((row, row_id))
+                indexed.append(_IndexedRow(row, row_id))
         except Exception:
-            for row, row_id in indexed:
-                self._update_indexes(table, row, row_id, insert=False)
+            for indexed_row in indexed:
+                self._update_indexes(
+                    table,
+                    indexed_row.row,
+                    indexed_row.row_id,
+                    insert=False,
+                )
             for row_id in row_ids:
                 heap.delete(row_id)
             raise
@@ -1010,7 +1051,7 @@ class DatabaseCommandMixin:
         table: TableMetadata,
         heap: TableHeap,
         fresh_indexes: list[IndexMetadata],
-        pending_entries: dict[str, list[tuple[object, RowId, tuple[object, ...]]]],
+        pending_entries: dict[str, list[IndexPayloadEntry]],
         written_row_ids: list[RowId],
     ) -> None:
         """把装载期间登记的索引入口一次性建树；失败时回滚本次写入的堆行。"""
@@ -1155,9 +1196,13 @@ class DatabaseCommandMixin:
         )
         try:
             tree.bulk_load(
-                (key, row_id, self._index_payload(table, metadata, row))
-                for row_id, row in self._heap(table).scan()
-                for key in (self._index_key(table, metadata, row),)
+                (
+                    key,
+                    record.row_id,
+                    self._index_payload(table, metadata, record.row),
+                )
+                for record in self._heap(table).scan()
+                for key in (self._index_key(table, metadata, record.row),)
                 if not (metadata.unique and any(value is None for value in key))
             )
             self.catalog.create_index(metadata)

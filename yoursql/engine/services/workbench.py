@@ -596,7 +596,7 @@ class Workbench:
                     "changed": changed,
                     "previous_policy": previous,
                     "replacement_policy": policy,
-                    "buffer_pool": buffer_pool,
+                    "buffer_pool": buffer_pool.to_dict(),
                     "note": "策略仅影响当前服务进程；现有缓存帧和累计统计保持不变，下一次淘汰开始采用新策略。",
                 }
 

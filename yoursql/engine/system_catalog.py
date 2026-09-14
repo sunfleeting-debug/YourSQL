@@ -229,7 +229,7 @@ class SystemCatalog:
     def _rows(self, name: str, width: int) -> tuple[tuple[object, ...], ...]:
         """读取指定系统表的当前行。"""
         rows = tuple(
-            row for _row_id, row in self.database._heap(self._table(name)).scan()
+            record.row for record in self.database._heap(self._table(name)).scan()
         )
         for row in rows:
             if len(row) != width:
@@ -381,8 +381,8 @@ class SystemCatalog:
         for spec in SYSTEM_TABLE_SPECS:
             table = self._table(spec.name)
             heap = self.database._heap(table)
-            for row_id, _row in tuple(heap.scan()):
-                heap.delete(row_id)
+            for record in tuple(heap.scan()):
+                heap.delete(record.row_id)
             for row in rows_by_table[spec.name]:
                 heap.insert(row)
             table.page_ids = [PageId(page_id) for page_id in heap.page_ids]

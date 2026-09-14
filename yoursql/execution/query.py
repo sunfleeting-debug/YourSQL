@@ -17,7 +17,7 @@ from ..common import (
     sql_truth,
 )
 from ..common.types import PageId, RowId
-from .evaluator import _AMBIGUOUS, _MISSING, constant_value
+from .evaluator import ConstantValue, _AMBIGUOUS, _MISSING, constant_value
 from ..sql.ast import (
     BetweenPredicate,
     BinaryOp,
@@ -52,6 +52,10 @@ class _RowLookup(Protocol):
     def get(self, key: str, default: object = None) -> object:
         """按名称或键获取对象；找不到时遵循调用方约定返回默认值。"""
         ...
+
+
+class _RowContext(dict[str, object]):
+    """查询执行中的动态行上下文；列值与行元数据共享一个命名容器。"""
 
 
 class _PlanNodeLike(Protocol):
@@ -97,6 +101,89 @@ class _RowView:
         """按名称或键获取对象；找不到时遵循调用方约定返回默认值。"""
         index = self._lookup.get(key)
         return default if index is None else self._row[index]
+
+
+@dataclass(frozen=True)
+class _JoinKeyInference:
+    """连接条件拆分结果：可用于键连接的列对与残余谓词。"""
+
+    key_pairs: tuple[tuple[str, str], ...]
+    residual_atoms: tuple[Expr, ...]
+
+
+@dataclass(frozen=True)
+class _TablePrefilter:
+    """单表谓词下推结果。"""
+
+    predicate: Callable[[_RowLookup], object] | None
+    needed_columns: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _IndexConstraintMatch:
+    """谓词转换出的列名和单列索引约束。"""
+
+    column: str
+    constraint: "_IndexConstraint"
+
+
+@dataclass(frozen=True)
+class _IndexBoundary:
+    """索引边界值及其是否包含端点。"""
+
+    value: object
+    inclusive: bool
+
+
+@dataclass(frozen=True)
+class _IndexProbeBounds:
+    """覆盖索引首列探测范围。"""
+
+    low: object | None
+    high: object | None
+    include_low: bool
+    include_high: bool
+
+
+@dataclass(frozen=True)
+class _ProjectedRow:
+    """投影结果、排序上下文和别名值的组合。"""
+
+    values: tuple[object, ...]
+    context: _RowContext
+    aliases: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _ContextColumnSelection:
+    """逐行上下文需要的列集合与是否保留原始行顺序。"""
+
+    needed: frozenset[str] | None
+    row_order: bool
+
+
+@dataclass(frozen=True)
+class _IndexCandidateSet:
+    """一个索引约束签名对应的候选 RowId 集合。"""
+
+    signature: tuple[object, ...]
+    row_ids: tuple[RowId, ...] | None
+
+
+@dataclass(frozen=True)
+class _RowOrderEntry:
+    """SELECT * 展开所需的限定名、列名和原始值。"""
+
+    alias: str
+    column: str
+    value: object
+
+    def __iter__(self):
+        """兼容旧的三元组遍历。"""
+
+        yield self.alias
+        yield self.column
+        yield self.value
 
 
 def _collect_column_ref_nodes(value: object, sink: list[ColumnRef]) -> bool:
@@ -152,8 +239,8 @@ class _IndexConstraint:
     """单列索引条件的交集；用于按联合索引前缀生成扫描边界。"""
 
     allowed: list[object] | None = None
-    lower: tuple[object, bool] | None = None
-    upper: tuple[object, bool] | None = None
+    lower: _IndexBoundary | None = None
+    upper: _IndexBoundary | None = None
     not_null: bool = False
 
 
@@ -204,15 +291,15 @@ class QueryExecutionMixin:
         scanned = 0
 
         def _count(
-            iterable: Iterable[dict[str, object]],
-        ) -> Iterable[dict[str, object]]:
+            iterable: Iterable[_RowContext],
+        ) -> Iterable[_RowContext]:
             """统计输入中的记录数量。"""
             nonlocal scanned
             for item in iterable:
                 scanned += 1
                 yield item
 
-        contexts: Iterable[dict[str, object]] = _count(
+        contexts: Iterable[_RowContext] = _count(
             self._iter_select_contexts(
                 statement, plan=plan, allow_system_tables=allow_system_tables
             )
@@ -220,13 +307,13 @@ class QueryExecutionMixin:
         has_aggregate = any(
             self._contains_aggregate(item.expression) for item in statement.items
         ) or self._contains_aggregate(statement.having)
-        grouped: Iterable[dict[str, object]]
+        grouped: Iterable[_RowContext]
         if statement.group_by or has_aggregate:
             group_keys = [
                 self._compile_expr(expression) for expression in statement.group_by
             ]
             having = self._compile_expr(statement.having)
-            groups: dict[tuple[object, ...], list[dict[str, object]]] = {}
+            groups: dict[tuple[object, ...], list[_RowContext]] = {}
             for context in contexts:
                 if trace is not None:
                     trace.step()
@@ -234,12 +321,12 @@ class QueryExecutionMixin:
                 groups.setdefault(key, []).append(context)
             if has_aggregate and not groups:
                 groups[()] = []
-            grouped_rows: list[dict[str, object]] = []
+            grouped_rows: list[_RowContext] = []
             for group in groups.values():
                 base = (
-                    dict(group[0])
+                    _RowContext(group[0])
                     if group
-                    else {"__row_order__": [], "__row_ids__": {}}
+                    else _RowContext(__row_order__=[], __row_ids__={})
                 )
                 base["__group__"] = group
                 if statement.having is None or sql_truth(having(base)):
@@ -247,9 +334,7 @@ class QueryExecutionMixin:
             grouped = grouped_rows
         else:
             grouped = contexts
-        projected: list[
-            tuple[tuple[object, ...], dict[str, object], dict[str, object]]
-        ] = []
+        projected: list[_ProjectedRow] = []
         item_evaluators = [
             (
                 None
@@ -291,16 +376,13 @@ class QueryExecutionMixin:
                 if row_key in seen:
                     continue
                 seen.add(row_key)
-            projected.append((row_key, context, aliases))
+            projected.append(_ProjectedRow(row_key, context, aliases))
             if stop_after is not None and len(projected) >= stop_after:
                 break
         if statement.distinct:
-            unique: dict[
-                tuple[object, ...],
-                tuple[tuple[object, ...], dict[str, object], dict[str, object]],
-            ] = {}
+            unique: dict[tuple[object, ...], _ProjectedRow] = {}
             for item in projected:
-                unique.setdefault(item[0], item)
+                unique.setdefault(item.values, item)
             projected = list(unique.values())
         for order_item in reversed(statement.order_by):
             evaluator = self._compile_expr(order_item.expression)
@@ -311,11 +393,14 @@ class QueryExecutionMixin:
             alias_key = order_item.expression.name.lower() if by_alias else ""
 
             def key(
-                item: tuple[tuple[object, ...], dict[str, object], dict[str, object]],
+                item: _ProjectedRow,
             ) -> tuple[int, object]:
-                value = item[2].get(alias_key, _MISSING) if by_alias else _MISSING
+                """根据输入构造稳定的键值。"""
+                value = (
+                    item.aliases.get(alias_key, _MISSING) if by_alias else _MISSING
+                )
                 if value is _MISSING:
-                    value = evaluator(item[1])
+                    value = evaluator(item.context)
                 nulls_first = (
                     order_item.nulls_first
                     if order_item.nulls_first is not None
@@ -358,7 +443,7 @@ class QueryExecutionMixin:
         if join_kinds:
             stats["joins"] = list(join_kinds)
         return ExecutionResult(
-            tuple(names), [item[0] for item in projected], stats=stats
+            tuple(names), [item.values for item in projected], stats=stats
         )
 
     # ----- 扫描与连接上下文 -----
@@ -368,11 +453,13 @@ class QueryExecutionMixin:
         *,
         plan: _PlanNodeLike | None = None,
         allow_system_tables: bool = False,
-    ) -> Iterable[dict[str, object]]:
+    ) -> Iterable[_RowContext]:
         """惰性产出 SELECT 使用的逐行查询上下文。"""
         if self._plan_contains_kind(plan, "EmptyScan"):
             return []
-        needed, row_order = self._needed_context_columns(statement)
+        selection = self._needed_context_columns(statement)
+        needed = selection.needed
+        row_order = selection.row_order
         if statement.from_table is not None and not statement.joins:
             # HOW：覆盖索引直读优先；只在所有被引用列都在索引里时启用，且仍需用 WHERE 过滤残余谓词。
             index_only = self._index_only_contexts(
@@ -400,7 +487,13 @@ class QueryExecutionMixin:
                 prefilter_needed = frozenset(where_columns)
         scan_plans = self._scan_plans(plan)
         if statement.from_table is None:
-            return iter([{"__row_order__": [], "__row_ids__": {}, "__schemas__": {}}])
+            return iter(
+                [
+                    _RowContext(
+                        __row_order=[], __row_ids={}, __schemas={}
+                    )
+                ]
+            )
         generated = self._joined_contexts(
             statement,
             scan_plans=scan_plans,
@@ -426,7 +519,7 @@ class QueryExecutionMixin:
         row_order: bool,
         prefilter: Callable[[_RowLookup], object] | None,
         prefilter_needed: frozenset[str],
-    ) -> Iterable[dict[str, object]]:
+    ) -> Iterable[_RowContext]:
         """惰性产出逐行上下文：单表扫描与连接都不再全量物化。
 
         HOW：左表（及每个连接的左侧）保持流式；右表需要反复扫描，因此只物化右表。
@@ -453,10 +546,10 @@ class QueryExecutionMixin:
             scope_columns[reference.name.lower()] = columns
             if reference.alias:
                 scope_columns[reference.alias.lower()] = columns
-        primary_filter, primary_needed = self._table_prefilter(
-            atoms, statement.from_table
-        )
-        contexts: Iterable[dict[str, object]] = self._scan_contexts(
+        primary_prefilter = self._table_prefilter(atoms, statement.from_table)
+        primary_filter = primary_prefilter.predicate
+        primary_needed = primary_prefilter.needed_columns
+        contexts: Iterable[_RowContext] = self._scan_contexts(
             statement.from_table,
             self._scan_predicate(
                 scan_plans[0] if scan_plans else None, statement.where
@@ -472,7 +565,9 @@ class QueryExecutionMixin:
         )
         for join_index, join in enumerate(statement.joins, start=1):
             join_plan = scan_plans[join_index] if join_index < len(scan_plans) else None
-            join_filter, join_needed = self._table_prefilter(atoms, join.table)
+            join_prefilter = self._table_prefilter(atoms, join.table)
+            join_filter = join_prefilter.predicate
+            join_needed = join_prefilter.needed_columns
             right_qualifiers = {
                 join.table.name.lower(),
                 (join.table.alias or "").lower(),
@@ -511,19 +606,24 @@ class QueryExecutionMixin:
             for previous in statement.joins[: join_index - 1]:
                 left_columns |= self._relation_columns(previous.table.name) or set()
             right_columns = self._relation_columns(join.table.name) or set()
-            pairs, residual_atoms = self._join_key_pairs(
+            join_keys = self._join_key_pairs(
                 join_atoms,
                 left_qualifiers,
                 right_qualifiers,
                 left_columns,
                 right_columns,
             )
-            right_only, right_only_needed = self._table_prefilter(
+            pairs = join_keys.key_pairs
+            residual_atoms = join_keys.residual_atoms
+            right_prefilter = self._table_prefilter(
                 residual_atoms, join.table
             )
-            left_only, _left_needed = self._table_prefilter(
+            left_prefilter = self._table_prefilter(
                 residual_atoms, statement.from_table
             )
+            right_only = right_prefilter.predicate
+            right_only_needed = right_prefilter.needed_columns
+            left_only = left_prefilter.predicate
             remaining = residual_atoms
             if right_only is not None:
                 # HOW：已下推到右侧扫描的原子不再重复求值；其余（含左侧相关原子）留作连接后的残余谓词。
@@ -717,7 +817,7 @@ class QueryExecutionMixin:
         right_qualifiers: set[str],
         left_columns: set[str],
         right_columns: set[str],
-    ) -> tuple[list[tuple[str, str]], tuple[Expr, ...]]:
+    ) -> _JoinKeyInference:
         """从连接条件里抽出等值键对（左列, 右列），其余原子作为残余谓词。
 
         HOW：同时处理两种写法——`JOIN ... ON a = b` 与逗号连接 `FROM a, b WHERE a.x = b.y`
@@ -730,21 +830,25 @@ class QueryExecutionMixin:
             if isinstance(atom, BinaryOp) and atom.operator.upper() == "OR":
                 # WHY：像 Q19 那样把连接键写在每个 OR 分支里（`(p_partkey = l_partkey AND ...) OR ...`）时，
                 # 只有“每个分支都要求的等式”才能当连接键（它是必要条件，哈希连接不会漏行）。
-                left_pairs, _left_residual = self._join_key_pairs(
+                left_result = self._join_key_pairs(
                     self._conjunction_atoms(atom.left),
                     left_qualifiers,
                     right_qualifiers,
                     left_columns,
                     right_columns,
                 )
-                right_pairs, _right_residual = self._join_key_pairs(
+                right_result = self._join_key_pairs(
                     self._conjunction_atoms(atom.right),
                     left_qualifiers,
                     right_qualifiers,
                     left_columns,
                     right_columns,
                 )
-                common = [pair for pair in left_pairs if pair in right_pairs]
+                common = [
+                    pair
+                    for pair in left_result.key_pairs
+                    if pair in right_result.key_pairs
+                ]
                 pairs.extend(pair for pair in common if pair not in pairs)
                 residual.append(atom)
                 continue
@@ -780,7 +884,7 @@ class QueryExecutionMixin:
                 pairs.append((atom.right.name.lower(), atom.left.name.lower()))
             else:
                 residual.append(atom)
-        return pairs, tuple(residual)
+        return _JoinKeyInference(tuple(pairs), tuple(residual))
 
     @staticmethod
     def _column_side(
@@ -813,7 +917,7 @@ class QueryExecutionMixin:
         reference: TableRef,
         *,
         side: str,
-    ) -> Callable[[dict[str, object]], tuple[object, ...]]:
+    ) -> Callable[[_RowContext], tuple[object, ...]]:
         """把连接键编译成从上下文取值的闭包；side 决定取 left 还是 right 列。"""
 
         alias = (reference.alias or reference.name).lower()
@@ -823,7 +927,7 @@ class QueryExecutionMixin:
         fallback = tuple(f"{table_name}.{pair[index]}" for pair in pairs)
         bare = tuple(pair[index] for pair in pairs)
 
-        def extract(context: dict[str, object]) -> tuple[object, ...]:
+        def extract(context: _RowContext) -> tuple[object, ...]:
             """从当前输入提取调用方需要的信息。"""
             values = []
             for primary, secondary, plain in zip(keys, fallback, bare, strict=True):
@@ -866,18 +970,18 @@ class QueryExecutionMixin:
 
     def _hash_join(
         self,
-        left_contexts: Iterable[dict[str, object]],
-        right: list[dict[str, object]],
+        left_contexts: Iterable[_RowContext],
+        right: list[_RowContext],
         *,
         pairs: list[tuple[str, str]],
-        residual: Callable[[dict[str, object]], object] | None,
-        left_only: Callable[[dict[str, object]], object] | None,
+        residual: Callable[[_RowContext], object] | None,
+        left_only: Callable[[_RowContext], object] | None,
         join_type: str,
         join_table: TableRef,
         from_table: TableRef,
         needed: frozenset[str] | None,
         row_order: bool,
-    ) -> Iterable[dict[str, object]]:
+    ) -> Iterable[_RowContext]:
         """哈希连接：右表（建侧）建哈希表，左表流式探测；NULL 键永不匹配。"""
 
         right_key = self._compile_key_extractor(tuple(pairs), join_table, side="right")
@@ -886,14 +990,14 @@ class QueryExecutionMixin:
             if len(pairs)
             else None
         )
-        buckets: dict[tuple[object, ...], list[tuple[int, dict[str, object]]]] = {}
+        buckets: dict[tuple[object, ...], list[tuple[int, _RowContext]]] = {}
         for index, context in enumerate(right):
             key = right_key(context)
             if any(value is None or value is _MISSING for value in key):
                 continue
             buckets.setdefault(key, []).append((index, context))
         matched_right: set[int] = set()
-        null_right: list[dict[str, object]] | None = None
+        null_right: list[_RowContext] | None = None
         for left_context in left_contexts:
             if left_only is not None and not sql_truth(left_only(left_context)):
                 continue
@@ -915,7 +1019,7 @@ class QueryExecutionMixin:
                     ]
                 yield self._merge_context(left_context, null_right[0])
         if join_type in {"RIGHT", "FULL"}:
-            null_left: dict[str, object] | None = None
+            null_left: _RowContext | None = None
             for index, right_context in enumerate(right):
                 if index in matched_right:
                     continue
@@ -927,19 +1031,19 @@ class QueryExecutionMixin:
 
     def _index_join(
         self,
-        left_contexts: Iterable[dict[str, object]],
+        left_contexts: Iterable[_RowContext],
         *,
         pairs: list[tuple[str, str]],
         metadata: IndexMetadata,
         join_reference: TableRef,
         from_table: TableRef,
         table: TableMetadata,
-        residual: Callable[[dict[str, object]], object] | None,
-        left_only: Callable[[dict[str, object]], object] | None,
+        residual: Callable[[_RowContext], object] | None,
+        left_only: Callable[[_RowContext], object] | None,
         join_type: str,
         needed: frozenset[str] | None,
         row_order: bool,
-    ) -> Iterable[dict[str, object]]:
+    ) -> Iterable[_RowContext]:
         """索引嵌套循环：左表每行用连接键去右表索引上等值查找。
 
         HOW：仅支持 INNER/LEFT（RIGHT/FULL 需要知道哪些右行未匹配，交给哈希连接或嵌套循环）。
@@ -951,7 +1055,7 @@ class QueryExecutionMixin:
             join_reference, table, needed, row_order
         )
         heap = self._heap(table)
-        null_right: dict[str, object] | None = None
+        null_right: _RowContext | None = None
         for left_context in left_contexts:
             if left_only is not None and not sql_truth(left_only(left_context)):
                 continue
@@ -983,17 +1087,17 @@ class QueryExecutionMixin:
 
     def _stream_join(
         self,
-        left_contexts: Iterable[dict[str, object]],
-        right: list[dict[str, object]],
+        left_contexts: Iterable[_RowContext],
+        right: list[_RowContext],
         *,
         join_type: str,
         join_table: TableRef,
         from_table: TableRef,
-        condition: Callable[[dict[str, object]], object] | None,
+        condition: Callable[[_RowContext], object] | None,
         needed: frozenset[str] | None,
         row_order: bool,
         trace: ExecutionTrace | None,
-    ) -> Iterable[dict[str, object]]:
+    ) -> Iterable[_RowContext]:
         """流式连接：左表逐行拉取，右表已物化；RIGHT/FULL 在末尾补未匹配的右行。"""
 
         matched_right: set[int] = set() if join_type in {"RIGHT", "FULL"} else set()
@@ -1028,7 +1132,7 @@ class QueryExecutionMixin:
         self,
         atoms: tuple[Expr, ...],
         reference: TableRef,
-    ) -> tuple[Callable[[_RowLookup], object] | None, frozenset[str]]:
+    ) -> _TablePrefilter:
         """抽出只引用单表的 AND 原子，编译成该表扫描用的下推过滤。
 
         WHY：带 JOIN 时原实现只在连接后过滤 WHERE，导致左表全量参与嵌套循环
@@ -1038,7 +1142,7 @@ class QueryExecutionMixin:
         try:
             relation = self.catalog.get_relation(reference.name)
         except CatalogError:
-            return None, frozenset()
+            return _TablePrefilter(None, frozenset())
         qualifiers = {reference.name.lower(), (reference.alias or "").lower()} - {""}
         column_names = {column.name.lower() for column in relation.schema}
         picked: list[Expr] = []
@@ -1063,11 +1167,14 @@ class QueryExecutionMixin:
             if belongs:
                 picked.append(atom)
         if not picked:
-            return None, frozenset()
+            return _TablePrefilter(None, frozenset())
         predicate: Expr = picked[0]
         for extra in picked[1:]:
             predicate = BinaryOp(predicate, "AND", extra)
-        return self._compile_expr(self._fold_constants(predicate)), frozenset(needed)
+        return _TablePrefilter(
+            self._compile_expr(self._fold_constants(predicate)),
+            frozenset(needed),
+        )
 
     def _scan_contexts(
         self,
@@ -1080,7 +1187,7 @@ class QueryExecutionMixin:
         row_order: bool = True,
         prefilter: Callable[[_RowLookup], object] | None = None,
         prefilter_needed: frozenset[str] | None = None,
-    ) -> Iterable[dict[str, object]]:
+    ) -> Iterable[_RowContext]:
         """扫描一张表或视图，产出逐行上下文。
 
         HOW：传入 `prefilter` 时先用只读行视图过滤（WHERE 只涉及本表的情况），
@@ -1267,27 +1374,29 @@ class QueryExecutionMixin:
     ) -> tuple[RowId, ...] | None:
         """按索引元数据计算一组 AND 条件的候选 RowId 交集（带缓存）。"""
 
-        per_index: list[tuple[tuple[object, ...], tuple[RowId, ...] | None]] = []
+        per_index: list[_IndexCandidateSet] = []
         for metadata in self.catalog.indexes():
             if metadata.table_id != table.table_id:
                 continue
             constraints = self._constraints_for_atoms(reference, atoms)
             signature = self._index_constraint_signature(metadata, constraints)
             per_index.append(
-                (
+                _IndexCandidateSet(
                     signature,
-                    self._index_candidates_for_atoms(table, reference, metadata, atoms),
+                    self._index_candidates_for_atoms(
+                        table, reference, metadata, atoms
+                    ),
                 )
             )
-        if not any(rows is not None for _signature, rows in per_index):
+        if not any(item.row_ids is not None for item in per_index):
             return None
         # HOW：交集按“参与索引的约束组合”缓存；任一写操作都会清空整个缓存。
         intersection_key = ("intersection",) + tuple(
-            sorted(signature for signature, _rows in per_index)
+            sorted(item.signature for item in per_index)
         )
         if intersection_key in self._candidate_cache:
             return self._candidate_cache[intersection_key]
-        candidates = [rows for _signature, rows in per_index if rows is not None]
+        candidates = [item.row_ids for item in per_index if item.row_ids is not None]
         result = set(candidates[0])
         for current in candidates[1:]:
             result.intersection_update(current)
@@ -1307,8 +1416,8 @@ class QueryExecutionMixin:
             parsed = QueryExecutionMixin._index_atom_constraint(atom, reference)
             if parsed is None:
                 continue
-            column, incoming = parsed
-            current = constraints.setdefault(column, _IndexConstraint())
+            current = constraints.setdefault(parsed.column, _IndexConstraint())
+            incoming = parsed.constraint
             if incoming.allowed is not None:
                 current.allowed = QueryExecutionMixin._merge_allowed(
                     current.allowed, incoming.allowed
@@ -1356,7 +1465,7 @@ class QueryExecutionMixin:
         return (predicate,)
 
     @staticmethod
-    def _constant_expression(expression: Expr) -> tuple[bool, object]:
+    def _constant_expression(expression: Expr) -> ConstantValue:
         """提取索引边界所需的常量，也覆盖负数等一元字面量。"""
 
         return constant_value(expression)
@@ -1394,34 +1503,34 @@ class QueryExecutionMixin:
     @classmethod
     def _merge_lower(
         cls,
-        existing: tuple[object, bool] | None,
-        incoming: tuple[object, bool],
-    ) -> tuple[object, bool]:
+        existing: _IndexBoundary | None,
+        incoming: _IndexBoundary,
+    ) -> _IndexBoundary:
         """合并两个下界并保留更严格的边界。"""
         if existing is None:
             return incoming
-        comparison = cls._compare_index_values(incoming[0], existing[0])
+        comparison = cls._compare_index_values(incoming.value, existing.value)
         if comparison > 0:
             return incoming
         if comparison < 0:
             return existing
-        return incoming if not incoming[1] else existing
+        return incoming if not incoming.inclusive else existing
 
     @classmethod
     def _merge_upper(
         cls,
-        existing: tuple[object, bool] | None,
-        incoming: tuple[object, bool],
-    ) -> tuple[object, bool]:
+        existing: _IndexBoundary | None,
+        incoming: _IndexBoundary,
+    ) -> _IndexBoundary:
         """合并两个上界并保留更严格的边界。"""
         if existing is None:
             return incoming
-        comparison = cls._compare_index_values(incoming[0], existing[0])
+        comparison = cls._compare_index_values(incoming.value, existing.value)
         if comparison < 0:
             return incoming
         if comparison > 0:
             return existing
-        return incoming if not incoming[1] else existing
+        return incoming if not incoming.inclusive else existing
 
     @staticmethod
     def _index_column(column: ColumnRef, reference: TableRef) -> str | None:
@@ -1437,7 +1546,7 @@ class QueryExecutionMixin:
     def _index_atom_constraint(
         atom: Expr,
         reference: TableRef,
-    ) -> tuple[str, _IndexConstraint] | None:
+    ) -> _IndexConstraintMatch | None:
         """把一个谓词转换成单列约束；无法安全定位时返回 None。"""
 
         if isinstance(atom, BinaryOp):
@@ -1446,16 +1555,17 @@ class QueryExecutionMixin:
             right_column = atom.right if isinstance(atom.right, ColumnRef) else None
             if left_column is not None and right_column is None:
                 column = QueryExecutionMixin._index_column(left_column, reference)
-                found, value = QueryExecutionMixin._constant_expression(atom.right)
+                constant = QueryExecutionMixin._constant_expression(atom.right)
             elif right_column is not None and left_column is None:
                 column = QueryExecutionMixin._index_column(right_column, reference)
-                found, value = QueryExecutionMixin._constant_expression(atom.left)
+                constant = QueryExecutionMixin._constant_expression(atom.left)
                 if operator in {"<", "<=", ">", ">="}:
                     operator = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}[operator]
             else:
                 return None
-            if column is None or not found:
+            if column is None or not constant.found:
                 return None
+            value = constant.value
             if operator == "LIKE":
                 if not isinstance(value, str) or any(
                     marker in value for marker in ("%", "_")
@@ -1463,21 +1573,25 @@ class QueryExecutionMixin:
                     return None
                 operator = "="
             if operator == "=":
-                return column, _IndexConstraint(allowed=[value])
+                return _IndexConstraintMatch(column, _IndexConstraint(allowed=[value]))
             if operator in {"<", "<=", ">", ">="}:
-                boundary = (value, operator in {">=", "<="})
-                return column, _IndexConstraint(
+                boundary = _IndexBoundary(value, operator in {">=", "<="})
+                return _IndexConstraintMatch(column, _IndexConstraint(
                     lower=boundary if operator in {">", ">="} else None,
                     upper=boundary if operator in {"<", "<="} else None,
-                )
+                ))
             return None
 
         if isinstance(atom, IsNull) and isinstance(atom.expression, ColumnRef):
             column = QueryExecutionMixin._index_column(atom.expression, reference)
             if column is None:
                 return None
-            return column, _IndexConstraint(
-                allowed=None if atom.negated else [None], not_null=atom.negated
+            return _IndexConstraintMatch(
+                column,
+                _IndexConstraint(
+                    allowed=None if atom.negated else [None],
+                    not_null=atom.negated,
+                ),
             )
 
         if (
@@ -1490,11 +1604,11 @@ class QueryExecutionMixin:
                 return None
             values: list[object] = []
             for expression in atom.values:
-                found, value = QueryExecutionMixin._constant_expression(expression)
-                if not found:
+                constant = QueryExecutionMixin._constant_expression(expression)
+                if not constant.found:
                     return None
-                values.append(value)
-            return column, _IndexConstraint(allowed=values)
+                values.append(constant.value)
+            return _IndexConstraintMatch(column, _IndexConstraint(allowed=values))
 
         if (
             isinstance(atom, BetweenPredicate)
@@ -1504,11 +1618,17 @@ class QueryExecutionMixin:
             column = QueryExecutionMixin._index_column(atom.expression, reference)
             if column is None:
                 return None
-            lower_found, lower = QueryExecutionMixin._constant_expression(atom.lower)
-            upper_found, upper = QueryExecutionMixin._constant_expression(atom.upper)
-            if not lower_found or not upper_found:
+            lower_constant = QueryExecutionMixin._constant_expression(atom.lower)
+            upper_constant = QueryExecutionMixin._constant_expression(atom.upper)
+            if not lower_constant.found or not upper_constant.found:
                 return None
-            return column, _IndexConstraint(lower=(lower, True), upper=(upper, True))
+            return _IndexConstraintMatch(
+                column,
+                _IndexConstraint(
+                    lower=_IndexBoundary(lower_constant.value, True),
+                    upper=_IndexBoundary(upper_constant.value, True),
+                ),
+            )
         return None
 
     def _index_candidates_for_atoms(
@@ -1545,7 +1665,9 @@ class QueryExecutionMixin:
             constraint = constraints.get(columns[position])
             if constraint is None:
                 entries = tree.prefix_scan(prefix) if prefix else ()
-                return tuple(row_id for _key, row_id in entries) if prefix else None
+                return (
+                    tuple(entry.row_id for entry in entries) if prefix else None
+                )
 
             allowed = constraint.allowed
             if allowed is not None:
@@ -1560,24 +1682,24 @@ class QueryExecutionMixin:
                 for value in values:
                     if constraint.lower is not None:
                         comparison = self._compare_index_values(
-                            value, constraint.lower[0]
+                            value, constraint.lower.value
                         )
                         if comparison < 0 or (
-                            comparison == 0 and not constraint.lower[1]
+                            comparison == 0 and not constraint.lower.inclusive
                         ):
                             continue
                     if constraint.upper is not None:
                         comparison = self._compare_index_values(
-                            value, constraint.upper[0]
+                            value, constraint.upper.value
                         )
                         if comparison > 0 or (
-                            comparison == 0 and not constraint.upper[1]
+                            comparison == 0 and not constraint.upper.inclusive
                         ):
                             continue
                     nested = scan(position + 1, (*prefix, value))
                     if nested is None:
                         entries = tree.prefix_scan((*prefix, value))
-                        return tuple(row_id for _key, row_id in entries)
+                        return tuple(entry.row_id for entry in entries)
                     result.update(nested)
                 return tuple(sorted(result))
 
@@ -1587,28 +1709,28 @@ class QueryExecutionMixin:
                 and not constraint.not_null
             ):
                 return tree.prefix_scan(prefix) if prefix else None
-            if constraint.lower is not None and constraint.lower[0] is None:
+            if constraint.lower is not None and constraint.lower.value is None:
                 return ()
-            if constraint.upper is not None and constraint.upper[0] is None:
+            if constraint.upper is not None and constraint.upper.value is None:
                 return ()
             entries = tree.range_scan_prefix(
                 prefix,
-                constraint.lower[0] if constraint.lower is not None else None,
-                constraint.upper[0] if constraint.upper is not None else None,
-                include_low=constraint.lower[1]
+                constraint.lower.value if constraint.lower is not None else None,
+                constraint.upper.value if constraint.upper is not None else None,
+                include_low=constraint.lower.inclusive
                 if constraint.lower is not None
                 else True,
-                include_high=constraint.upper[1]
+                include_high=constraint.upper.inclusive
                 if constraint.upper is not None
                 else True,
             )
             if constraint.not_null:
                 entries = tuple(
-                    (key, row_id)
-                    for key, row_id in entries
-                    if len(key) > position and key[position] is not None
+                    entry
+                    for entry in entries
+                    if len(entry.key) > position and entry.key[position] is not None
                 )
-            return tuple(row_id for _key, row_id in entries)
+            return tuple(entry.row_id for entry in entries)
 
         has_leading_constraint = bool(columns) and columns[0] in constraints
         if not has_leading_constraint:
@@ -1620,7 +1742,7 @@ class QueryExecutionMixin:
         reference: TableRef,
         where: Expr | None,
         needed: frozenset[str] | None,
-    ) -> list[dict[str, object]] | None:
+    ) -> list[_RowContext] | None:
         """用覆盖索引直接产出逐行上下文，完全不读堆页。
 
         HOW：启用条件——单表查询；被引用列全部落在某个索引的（键列 + INCLUDE 列）内；
@@ -1659,7 +1781,10 @@ class QueryExecutionMixin:
             if not self.optimizer.should_use_index_only(relation.name, len(candidates)):
                 continue
             tree = self.index_manager.get(metadata.name)
-            low, high, include_low, include_high = bounds
+            low = bounds.low
+            high = bounds.high
+            include_low = bounds.include_low
+            include_high = bounds.include_high
             # WHY：必须用“前缀位置范围”而不是全键范围。联合索引下 `(1,'paid')` 与上界 `(1,)`
             # 做元组比较会被判为越界，导致等值查询返回空集（实测演示库 `customer_id = 1` 返回 0 行）。
             entries = tree.range_scan_prefix_entries(
@@ -1671,16 +1796,22 @@ class QueryExecutionMixin:
             payload_positions = [
                 relation.schema.index(column) for column in metadata.payload_columns
             ]
-            contexts: list[dict[str, object]] = []
-            for key, row_id, payload in entries:
+            contexts: list[_RowContext] = []
+            for entry in entries:
                 values: list[object] = [None] * len(relation.schema)
-                for value, position in zip(key, key_positions, strict=True):
+                for value, position in zip(entry.key, key_positions, strict=True):
                     values[position] = value
-                for value, position in zip(payload, payload_positions, strict=True):
+                for value, position in zip(
+                    entry.payload, payload_positions, strict=True
+                ):
                     values[position] = value
                 contexts.append(
                     self._table_context(
-                        reference, tuple(values), row_id, relation, template=template
+                        reference,
+                        tuple(values),
+                        entry.row_id,
+                        relation,
+                        template=template,
                     )
                 )
             return contexts
@@ -1690,7 +1821,7 @@ class QueryExecutionMixin:
     def _leading_probe_bounds(
         cls,
         constraint: _IndexConstraint | None,
-    ) -> tuple[object | None, object | None, bool, bool] | None:
+    ) -> _IndexProbeBounds | None:
         """把首列约束换成可复用的范围上下界；等值/IN 归为包含端点的区间。"""
 
         if constraint is None:
@@ -1704,26 +1835,31 @@ class QueryExecutionMixin:
             if not values:
                 return None
             ordered = sorted(values, key=cmp_to_key(cls._compare_index_values))
-            return ordered[0], ordered[-1], True, True
-        low = constraint.lower[0] if constraint.lower is not None else None
-        high = constraint.upper[0] if constraint.upper is not None else None
+            return _IndexProbeBounds(ordered[0], ordered[-1], True, True)
+        low = constraint.lower.value if constraint.lower is not None else None
+        high = constraint.upper.value if constraint.upper is not None else None
         if low is None and high is None:
             return None
-        include_low = constraint.lower[1] if constraint.lower is not None else True
-        include_high = constraint.upper[1] if constraint.upper is not None else True
-        return low, high, include_low, include_high
+        include_low = (
+            constraint.lower.inclusive if constraint.lower is not None else True
+        )
+        include_high = (
+            constraint.upper.inclusive if constraint.upper is not None else True
+        )
+        return _IndexProbeBounds(low, high, include_low, include_high)
 
     # ----- 行上下文裁剪与结果列展开 -----
     def _needed_context_columns(
         self, statement: Select
-    ) -> tuple[frozenset[str] | None, bool]:
+    ) -> _ContextColumnSelection:
         """收集语句引用到的列名，作为逐行上下文的裁剪依据。
 
-        HOW：`needed=None` 表示退回全列（遇到 `*` 时）；第二个返回值表示是否必须构建 `__row_order__`。
+        HOW：`needed=None` 表示退回全列（遇到 `*` 时）；结果对象的 ``row_order``
+        表示是否必须构建 `__row_order__`。
         """
 
         if any(isinstance(item.expression, Star) for item in statement.items):
-            return None, True
+            return _ContextColumnSelection(None, True)
         sink: set[str] = set()
         found_star = False
         for item in statement.items:
@@ -1738,8 +1874,8 @@ class QueryExecutionMixin:
             found_star |= _collect_column_refs(order_item.expression, sink)
         if found_star:
             # `COUNT(*)` 之类只需行数的聚合不引用具名列，但保守退回全列以免漏掉消费点。
-            return None, False
-        return frozenset(sink), False
+            return _ContextColumnSelection(None, False)
+        return _ContextColumnSelection(frozenset(sink), False)
 
     def _context_template(
         self,
@@ -1795,12 +1931,12 @@ class QueryExecutionMixin:
         needed: frozenset[str] | None = None,
         row_order: bool = True,
         template: _RowContextTemplate | None = None,
-    ) -> dict[str, object]:
+    ) -> _RowContext:
         """构造一行上下文；needed 不为 None 时只把被引用的列放进上下文。"""
 
         if template is None:
             template = self._context_template(reference, table, needed, row_order)
-        context: dict[str, object] = {}
+        context = _RowContext()
         if template.indices:
             picked = itemgetter(*template.indices)(row)
             context = dict(
@@ -1815,7 +1951,7 @@ class QueryExecutionMixin:
         context["__schemas__"] = template.schemas
         if template.row_order:
             context["__row_order__"] = [
-                (template.alias, column.name, value)
+                _RowOrderEntry(template.alias, column.name, value)
                 for column, value in zip(template.schema, row, strict=True)
             ]
         return context
@@ -1826,7 +1962,7 @@ class QueryExecutionMixin:
         *,
         needed: frozenset[str] | None = None,
         row_order: bool = True,
-    ) -> dict[str, object]:
+    ) -> _RowContext:
         """为外连接构造一侧列为空的查询上下文。"""
         relation = self.catalog.get_relation(reference.name)
         row = tuple(None for _column in relation.schema)
@@ -1840,14 +1976,16 @@ class QueryExecutionMixin:
         )
 
     def _merge_context(
-        self, left: dict[str, object], right: dict[str, object]
-    ) -> dict[str, object]:
+        self, left: _RowContext, right: _RowContext
+    ) -> _RowContext:
         """合并连接两侧的查询上下文。"""
-        merged = {
-            key: value
-            for key, value in left.items()
-            if key not in {"__row_ids__", "__schemas__", "__row_order__"}
-        }
+        merged = _RowContext(
+            {
+                key: value
+                for key, value in left.items()
+                if key not in {"__row_ids__", "__schemas__", "__row_order__"}
+            }
+        )
         for key, value in right.items():
             if key not in {"__row_ids__", "__schemas__", "__row_order__"}:
                 if key in merged and "." not in key:
@@ -1869,16 +2007,16 @@ class QueryExecutionMixin:
         return merged
 
     def _expand_star(
-        self, context: dict[str, object], table_name: str | None
+        self, context: _RowContext, table_name: str | None
     ) -> list[object]:
         """将 SELECT * 展开为实际列列表。"""
         result: list[object] = []
         row_order = context.get("__row_order__")
         if not isinstance(row_order, list):
             return result
-        for alias, column, value in row_order:
-            if table_name is None or str(table_name).lower() in {str(alias).lower()}:
-                result.append(value)
+        for entry in row_order:
+            if table_name is None or table_name.lower() == entry.alias.lower():
+                result.append(entry.value)
         return result
 
     def _output_names(self, statement: Select) -> list[str]:

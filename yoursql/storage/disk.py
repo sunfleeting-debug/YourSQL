@@ -4,13 +4,74 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import Iterator
 from typing import Mapping
 
 from ..common.errors import StorageError
 from ..common.trace import current_trace
 from .page import Page, PageType
+
+
+@dataclass(frozen=True)
+class DiskMetadata:
+    """磁盘文件布局的只读摘要。"""
+
+    page_size: int
+    page_count: int
+    next_page_id: int
+    free_pages: tuple[int, ...]
+    named_pages: Mapping[str, int]
+
+    def __getitem__(self, key: str) -> object:
+        """兼容存储检查适配层的旧映射式读取。"""
+
+        return self.to_dict()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """返回对象的迭代器。"""
+        return iter(
+            ("page_size", "page_count", "next_page_id", "free_pages", "named_pages")
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "page_size": self.page_size,
+            "page_count": self.page_count,
+            "next_page_id": self.next_page_id,
+            "free_pages": list(self.free_pages),
+            "named_pages": dict(self.named_pages),
+        }
+
+
+@dataclass(frozen=True)
+class DiskIOStats:
+    """磁盘管理器进程内累计页 I/O 统计。"""
+
+    page_reads: int
+    page_writes: int
+    bytes_read: int
+    bytes_written: int
+
+    def __getitem__(self, key: str) -> int:
+        """按键或下标读取对象中的元素。"""
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        """返回对象的迭代器。"""
+        return iter(("page_reads", "page_writes", "bytes_read", "bytes_written"))
+
+    def to_dict(self) -> dict[str, int]:
+        """将对象转换为可序列化的字典。"""
+        return {
+            "page_reads": self.page_reads,
+            "page_writes": self.page_writes,
+            "bytes_read": self.bytes_read,
+            "bytes_written": self.bytes_written,
+        }
 
 
 class DiskManager:
@@ -47,16 +108,16 @@ class DiskManager:
             # 页文件只扩展不收缩，next_page_id 即当前逻辑文件页数。
             return self._next_page_id
 
-    def metadata(self) -> dict[str, object]:
+    def metadata(self) -> DiskMetadata:
         """返回当前数据库或对象的元数据。"""
         with self._lock:
-            return {
-                "page_size": self.page_size,
-                "page_count": self.page_count,
-                "next_page_id": self._next_page_id,
-                "free_pages": sorted(self._free_pages),
-                "named_pages": dict(self._named_pages),
-            }
+            return DiskMetadata(
+                page_size=self.page_size,
+                page_count=self.page_count,
+                next_page_id=self._next_page_id,
+                free_pages=tuple(sorted(self._free_pages)),
+                named_pages=dict(self._named_pages),
+            )
 
     def _ensure_open(self) -> None:
         """检查磁盘管理器仍处于打开状态。"""
@@ -197,15 +258,15 @@ class DiskManager:
             self._check_page_id(page.page_id)
             self._write_raw(page)
 
-    def io_stats(self) -> dict[str, int]:
+    def io_stats(self) -> DiskIOStats:
         """返回进程内页 I/O 计数；调试读取单独排除。"""
         with self._lock:
-            return {
-                "page_reads": self._reads,
-                "page_writes": self._writes,
-                "bytes_read": self._reads * self.page_size,
-                "bytes_written": self._writes * self.page_size,
-            }
+            return DiskIOStats(
+                page_reads=self._reads,
+                page_writes=self._writes,
+                bytes_read=self._reads * self.page_size,
+                bytes_written=self._writes * self.page_size,
+            )
 
     def peek(self, page_id: int) -> Page:
         """只读调试页，恢复文件游标且不改变正常读写计数。"""
