@@ -52,6 +52,8 @@ def test_performance_monitor_aggregates_and_persists_slow_queries(
         assert summary["slow_queries"] == 1
         assert summary["p95_ms"] == 210
         assert summary["cache_hit_rate"] == 0.5
+        assert summary["latency_series"][-1]["page_reads"] == 0
+        assert summary["latency_series"][-1]["cache_misses"] == 3
         assert [item["query_id"] for item in slow_queries["items"]] == ["slow"]
         assert "stages" not in slow_queries["items"][0]
         assert list(tmp_path.glob("performance-*.jsonl"))

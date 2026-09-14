@@ -1,7 +1,7 @@
 /** 性能监控工作区：延迟摘要、慢查询和缓存淘汰诊断。 */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, Database, Gauge, RefreshCw, Server, Timer } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, Database, Gauge, Pause, Play, RefreshCw, Timer } from 'lucide-react'
 import { api, elapsed, errorMessage } from '../../api'
 import JsonTree from '../query/JsonTree'
 import type { MonitorDetail, MonitorQuery, MonitorQueriesResponse, MonitorSummary } from '../../types/monitoring'
@@ -42,41 +42,141 @@ function TimingBar({ label, value, total, tone }: { label: string; value: number
   )
 }
 
-function LatencyChart({ samples, threshold }: { samples: MonitorSummary['latency_series']; threshold: number }) {
-  const points = useMemo(() => {
-    if (!samples.length) return ''
-    const max = Math.max(threshold, ...samples.map(sample => sample.total_ms), 1)
-    return samples
-      .map((sample, index) => {
+type LiveMetric = 'total_ms' | 'page_reads' | 'page_writes' | 'cache_hits' | 'cache_misses' | 'success' | 'failed'
+type MonitorSample = MonitorSummary['latency_series'][number]
+
+interface LiveLine {
+  key: LiveMetric
+  label: string
+  color: string
+}
+
+interface LiveCardConfig {
+  title: string
+  lines: LiveLine[]
+  threshold?: number
+  latest: (sample: MonitorSample) => string
+}
+
+const LIVE_CARDS: LiveCardConfig[] = [
+  {
+    title: '查询延迟',
+    lines: [{ key: 'total_ms', label: '耗时', color: '#087f78' }],
+    latest: sample => elapsed(sample.total_ms)
+  },
+  {
+    title: '页 I/O',
+    lines: [
+      { key: 'page_reads', label: '读入', color: '#2d9fe3' },
+      { key: 'page_writes', label: '写出', color: '#e15a3a' }
+    ],
+    latest: sample => `读 ${sample.page_reads.toLocaleString()} · 写 ${sample.page_writes.toLocaleString()}`
+  },
+  {
+    title: '缓存访问',
+    lines: [
+      { key: 'cache_hits', label: '命中', color: '#087f78' },
+      { key: 'cache_misses', label: '未命中', color: '#e1a04c' }
+    ],
+    latest: sample => `命中 ${sample.cache_hits.toLocaleString()} · 未命中 ${sample.cache_misses.toLocaleString()}`
+  },
+  {
+    title: '查询状态',
+    lines: [
+      { key: 'success', label: '成功', color: '#2d9fe3' },
+      { key: 'failed', label: '失败', color: '#e15a3a' }
+    ],
+    latest: sample => (sample.status === 'success' ? '最近成功' : '最近失败')
+  }
+]
+
+function liveValue(sample: MonitorSample, key: LiveMetric): number {
+  if (key === 'success') return sample.status === 'success' ? 1 : 0
+  if (key === 'failed') return sample.status === 'success' ? 0 : 1
+  return sample[key]
+}
+
+function LiveMetricChart({ config, samples }: { config: LiveCardConfig; samples: MonitorSample[] }) {
+  const chart = useMemo(() => {
+    if (!samples.length) return null
+    const max = Math.max(config.threshold ?? 0, ...config.lines.flatMap(line => samples.map(sample => liveValue(sample, line.key))), 1)
+    const lines = config.lines.map(line => ({
+      ...line,
+      points: samples.map((sample, index) => {
         const x = samples.length === 1 ? 50 : (index / (samples.length - 1)) * 100
-        const y = 92 - (sample.total_ms / max) * 78
-        return `${x},${Math.max(10, y)}`
+        const y = 92 - (liveValue(sample, line.key) / max) * 78
+        return { x, y: Math.max(10, y) }
       })
-      .join(' ')
-  }, [samples, threshold])
-  const thresholdY = samples.length ? 92 - (threshold / Math.max(threshold, ...samples.map(sample => sample.total_ms), 1)) * 78 : 14
+    }))
+    return {
+      lines,
+      thresholdY: config.threshold == null ? null : 92 - (config.threshold / max) * 78
+    }
+  }, [config, samples])
+
   return (
-    <div className="monitor-chart-wrap">
-      {samples.length ? (
-        <svg className="monitor-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="最近查询延迟趋势">
-          <line x1="0" x2="100" y1={thresholdY} y2={thresholdY} className="monitor-chart-threshold" />
-          <polyline points={points} className="monitor-chart-line" />
-          {samples.map((sample, index) => {
-            const [x, y] = points.split(' ')[index].split(',')
-            return <circle key={`${sample.at}-${index}`} cx={x} cy={y} r="1.7" className={sample.slow ? 'slow' : ''} />
-          })}
+    <div className="monitor-live-chart-wrap">
+      {chart ? (
+        <svg className="monitor-live-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${config.title}动态趋势`}>
+          {[25, 50, 75].map(level => (
+            <line key={level} x1="0" x2="100" y1={level} y2={level} className="monitor-live-grid-line" />
+          ))}
+          {chart.thresholdY != null && <line x1="0" x2="100" y1={chart.thresholdY} y2={chart.thresholdY} className="monitor-live-threshold" />}
+          {chart.lines.map(line => (
+            <g key={line.key}>
+              <polyline
+                points={line.points.map(point => `${point.x},${point.y}`).join(' ')}
+                className="monitor-live-line"
+                style={{ stroke: line.color }}
+              />
+              <circle
+                cx={line.points[line.points.length - 1].x}
+                cy={line.points[line.points.length - 1].y}
+                r="1.8"
+                className="monitor-live-point"
+                style={{ fill: line.color }}
+              />
+            </g>
+          ))}
         </svg>
       ) : (
-        <div className="monitor-chart-empty">
-          <Activity size={20} />
+        <div className="monitor-live-chart-empty">
+          <Activity size={18} />
           <span>执行查询后显示趋势</span>
         </div>
       )}
-      <div className="monitor-chart-axis">
+      <div className="monitor-live-axis">
         <span>{samples.length ? time(samples[0].at) : '—'}</span>
-        <span>阈值 {elapsed(threshold)}</span>
+        <span>{config.threshold != null ? `阈值 ${elapsed(config.threshold)}` : `${samples.length} 个采样`}</span>
         <span>{samples.length ? time(samples[samples.length - 1].at) : '—'}</span>
       </div>
+      <div className="monitor-live-legend">
+        {config.lines.map(line => (
+          <span key={line.key}>
+            <i style={{ background: line.color }} />
+            {line.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function LiveMetricGrid({ samples, threshold }: { samples: MonitorSample[]; threshold: number }) {
+  return (
+    <div className="monitor-live-grid" aria-label="动态监控指标">
+      {LIVE_CARDS.map(config => (
+        <section className="monitor-live-card" key={config.title}>
+          <div className="monitor-live-card-heading">
+            <div>
+              <strong>{config.title}</strong>
+              <span>{samples.length ? config.latest(samples[samples.length - 1]) : '等待采样'}</span>
+            </div>
+            <span className="monitor-live-badge">LIVE</span>
+          </div>
+          <LiveMetricChart config={{ ...config, threshold: config.title === '查询延迟' ? threshold : undefined }} samples={samples} />
+        </section>
+      ))}
     </div>
   )
 }
@@ -89,6 +189,7 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
   const [busy, setBusy] = useState(true)
   const [detailBusy, setDetailBusy] = useState(false)
   const [error, setError] = useState('')
+  const [autoRefresh, setAutoRefresh] = useState(true)
 
   const refresh = useCallback(async () => {
     setBusy(true)
@@ -113,6 +214,12 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
   useEffect(() => {
     if (active) void refresh()
   }, [active, refresh])
+
+  useEffect(() => {
+    if (!active || !autoRefresh) return
+    const timer = window.setInterval(() => void refresh(), 3000)
+    return () => window.clearInterval(timer)
+  }, [active, autoRefresh, refresh])
 
   useEffect(() => {
     if (!selectedId) {
@@ -199,6 +306,14 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
           >
             轻量 {currentSummary.lightweight_samples} · 诊断 {currentSummary.diagnostic_samples} · 资源 {currentSummary.resource_warnings}
           </span>
+          <button
+            className="monitor-live-toggle"
+            onClick={() => setAutoRefresh(current => !current)}
+            title={autoRefresh ? '暂停动态监控' : '继续动态监控'}
+          >
+            {autoRefresh ? <Pause size={13} /> : <Play size={13} />}
+            {autoRefresh ? '暂停' : '继续'}
+          </button>
           <button onClick={() => void refresh()} disabled={busy} title="刷新监控数据">
             <RefreshCw size={14} className={busy ? 'spin' : ''} />
             刷新
@@ -246,45 +361,7 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
           </div>
         </div>
 
-        <div className="monitor-overview-grid">
-          <section className="monitor-card monitor-trend-card">
-            <div className="monitor-card-heading">
-              <div>
-                <strong>延迟趋势</strong>
-                <span>最近 {currentSummary.latency_series.length} 条观测</span>
-              </div>
-              <code>P50 {elapsed(currentSummary.p50_ms)}</code>
-            </div>
-            <LatencyChart samples={currentSummary.latency_series} threshold={currentSummary.threshold_ms} />
-          </section>
-          <section className="monitor-card monitor-io-card">
-            <div className="monitor-card-heading">
-              <div>
-                <strong>存储访问</strong>
-                <span>查询期间累计页级指标</span>
-              </div>
-              <Server size={15} />
-            </div>
-            <dl className="monitor-io-list">
-              <div>
-                <dt>页读取</dt>
-                <dd>{currentSummary.page_reads}</dd>
-              </div>
-              <div>
-                <dt>页写入</dt>
-                <dd>{currentSummary.page_writes}</dd>
-              </div>
-              <div>
-                <dt>缓存命中</dt>
-                <dd>{currentSummary.cache_hits}</dd>
-              </div>
-              <div>
-                <dt>缓存未命中</dt>
-                <dd>{currentSummary.cache_misses}</dd>
-              </div>
-            </dl>
-          </section>
-        </div>
+        <LiveMetricGrid samples={currentSummary.latency_series} threshold={currentSummary.threshold_ms} />
 
         <div className="monitor-main-grid">
           <section className="monitor-card monitor-query-card">

@@ -101,7 +101,7 @@ class PerformanceMonitor:
         slow = sum(bool(record.get("slow")) for record in records)
         cache_hits = sum(_integer(record.get("cache_hits")) for record in records)
         cache_misses = sum(_integer(record.get("cache_misses")) for record in records)
-        chronological = list(reversed(records))
+        chronological = records
         return {
             "threshold_ms": self.slow_threshold_ms,
             "diagnostic_sample_rate": self.diagnostic_sample_rate,
@@ -149,6 +149,10 @@ class PerformanceMonitor:
                     "total_ms": _number(record.get("total_ms")),
                     "slow": bool(record.get("slow")),
                     "status": record.get("status", "error"),
+                    "page_reads": _integer(record.get("page_reads")),
+                    "page_writes": _integer(record.get("page_writes")),
+                    "cache_hits": _integer(record.get("cache_hits")),
+                    "cache_misses": _integer(record.get("cache_misses")),
                 }
                 for record in chronological[-30:]
             ],

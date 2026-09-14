@@ -110,12 +110,14 @@
 .monitor-kpi.warning > span svg {
   color: #c27e31;
 }
-.monitor-overview-grid,
+.monitor-live-grid,
 .monitor-main-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(250px, 1fr);
   gap: 12px;
   margin-top: 12px;
+}
+.monitor-live-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .monitor-main-grid {
   grid-template-columns: minmax(0, 1.15fr) minmax(340px, 1fr);
@@ -142,75 +144,111 @@
 .monitor-card-heading > svg {
   color: #83a0a1;
 }
-.monitor-chart-wrap {
-  height: 150px;
-  padding: 14px 15px 10px;
+.monitor-live-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: #fff;
 }
-.monitor-chart {
+.monitor-live-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
+  border-bottom: 1px solid #edf1f3;
+}
+.monitor-live-card-heading > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+.monitor-live-card-heading strong {
+  color: #34475b;
+  font-size: 11px;
+  font-weight: 600;
+}
+.monitor-live-card-heading > div span {
+  overflow: hidden;
+  color: #8999a4;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.monitor-live-badge {
+  flex: 0 0 auto;
+  color: #299177 !important;
+  font-size: 8px !important;
+  letter-spacing: 0.6px;
+}
+.monitor-live-chart-wrap {
+  height: 132px;
+  padding: 9px 11px 7px;
+}
+.monitor-live-chart {
+  display: block;
   width: 100%;
-  height: 110px;
+  height: 87px;
   overflow: visible;
 }
-.monitor-chart-line {
+.monitor-live-line {
   fill: none;
-  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
   stroke-width: 1.6;
   vector-effect: non-scaling-stroke;
 }
-.monitor-chart circle {
-  fill: #fff;
-  stroke: var(--accent);
-  stroke-width: 1.4;
+.monitor-live-point {
+  stroke: #fff;
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
-.monitor-chart circle.slow {
-  fill: #e5a34d;
-  stroke: #e5a34d;
+.monitor-live-grid-line {
+  stroke: #edf2f3;
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
 }
-.monitor-chart-threshold {
+.monitor-live-threshold {
   stroke: #e3a45c;
   stroke-dasharray: 3 3;
   stroke-width: 0.8;
   vector-effect: non-scaling-stroke;
 }
-.monitor-chart-axis {
+.monitor-live-axis {
   display: flex;
   justify-content: space-between;
   color: #a2adb6;
   font-size: 9px;
 }
-.monitor-chart-axis span:nth-child(2) {
+.monitor-live-axis span:nth-child(2) {
   color: #bf8b4a;
 }
-.monitor-chart-empty {
+.monitor-live-chart-empty {
   display: flex;
-  height: 110px;
+  height: 87px;
   align-items: center;
   justify-content: center;
   gap: 8px;
   color: #a2adb6;
   font-size: 11px;
 }
-.monitor-io-list {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0;
-  margin: 0;
-  padding: 8px 15px;
+.monitor-live-legend {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  color: #8999a4;
+  font-size: 9px;
 }
-.monitor-io-list div {
-  padding: 10px 3px;
-  border-bottom: 1px solid #f0f2f4;
+.monitor-live-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
-.monitor-io-list dt {
-  color: #8795a1;
-  font-size: 10px;
-}
-.monitor-io-list dd {
-  margin: 5px 0 0;
-  color: #34495d;
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 16px;
+.monitor-live-legend i {
+  width: 7px;
+  height: 2px;
+  border-radius: 1px;
 }
 .monitor-count {
   display: grid;
@@ -403,9 +441,9 @@
     padding-left: 18px;
     padding-right: 18px;
   }
-  .monitor-overview-grid,
+  .monitor-live-grid,
   .monitor-main-grid {
-    grid-template-columns: minmax(0, 1.3fr) minmax(230px, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .monitor-main-grid {
     grid-template-columns: 1fr;
@@ -426,10 +464,10 @@
     padding: 12px;
   }
   .monitor-kpis,
-  .monitor-overview-grid {
+  .monitor-live-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .monitor-overview-grid,
+  .monitor-live-grid,
   .monitor-main-grid {
     gap: 10px;
     margin-top: 10px;
@@ -445,6 +483,17 @@
     padding: 0 11px;
   }
   .monitor-card-heading > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .monitor-live-card-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    padding: 9px 11px 7px;
+  }
+  .monitor-live-card-heading > div {
     align-items: flex-start;
     flex-direction: column;
     gap: 2px;

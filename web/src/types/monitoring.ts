@@ -8,6 +8,10 @@ export interface LatencySample {
   total_ms: number
   slow: boolean
   status: string
+  page_reads: number
+  page_writes: number
+  cache_hits: number
+  cache_misses: number
 }
 
 export interface StorageEvent {
