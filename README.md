@@ -70,15 +70,28 @@ SHOW GRANTS FOR USER alice;
 
 **持久化**：库与目录都落在页面文件里，重新打开同一个 `.db` 即可读回数据；页大小由 superblock 识别，不依赖调用方传 `DatabaseConfig`。
 
+**事务/并发/恢复**：`BEGIN [TRANSACTION] [ISOLATION LEVEL ...]` / `COMMIT` / `ROLLBACK` / `SET TRANSACTION ISOLATION LEVEL ...`；缺省自动提交（每条写语句自成事务）。并发采用**表级 S/X 锁 + 严格两阶段封锁**，支持锁升级与可重入，等待图检测死锁（回滚年龄最小者）并带锁超时；两种隔离级别 `serializable`（默认）与 `read_committed`。崩溃恢复基于**页级预写日志**（`<db>.wal`，JSON-Lines）：页头记录 LSN，脏页落盘前先刷日志，重启时按 undo 回滚未提交事务、回收其分配页。
+
+```sql
+BEGIN;
+INSERT INTO student VALUES (3, 'carol', 90);
+ROLLBACK;                     -- carol 不会保留
+BEGIN ISOLATION LEVEL read_committed;
+INSERT INTO student VALUES (4, 'dave', 88);
+COMMIT;
+```
+
+配置项：`wal_enabled`（`--no-wal`）、`lock_mode`（`table`/`none`）、`lock_timeout_seconds`、`default_isolation`；`--txn-status` 可在 CLI 查看当前事务状态。
+
 ## 测试与基准
 
 ```powershell
-python -m pytest -q                                     # 201 passed
+python -m pytest -q                                     # 251 passed
 cd web; npm test                                        # 4 passed
 python -m benchmarks.run_benchbox_tpch --iterations 5 --force
 ```
 
-`pytest` 覆盖公共层、存储、SQL、索引、服务与工作台。SQL 语义与优化规则的对外复现用例维护在 [`examples/test_example.md`](examples/test_example.md)（配套 [`examples/test_example.sql`](examples/test_example.sql)），按文档步骤可复现全部断言。
+`pytest` 覆盖公共层、存储、SQL、索引、事务、并发、故障恢复、服务与工作台。SQL 语义与优化规则的对外复现用例维护在 [`examples/test_example.md`](examples/test_example.md)（配套 [`examples/test_example.sql`](examples/test_example.sql)），按文档步骤可复现全部断言。
 
 第二条命令用第三方 BenchBox 0.4.0 跑 TPC-H SF0.01 Q6：数据来自 `TPCH.generate_data()`，SQL 来自 `TPCH.get_query(6, dialect="sqlite")`，YourSQL 只负责加载与执行。结果写入 `benchmarks/reports/tpch_sf001_q6.json`；这是 Q6 子集实验，不等同官方 QphH@Size 成绩。数据集与运行产物落在 `benchmarks/third_party/`、`benchmarks/results/`，不入库。
 
@@ -342,7 +355,7 @@ WHY 这一步是决定性的：本批 8 条查询里 6 条带连接，而 TPC-H 
 
 ## 验收状态
 
-- 后端 `python -m pytest -q`：201 passed。
+- 后端 `python -m pytest -q`：251 passed（含事务 16、并发 10、WAL 14）。
 - 前端 `npm test`：4 passed（块点击语义、常驻右栏布局）；`npm run build` 成功。
 - 演示库 `data/showcase_v2.db`：CLI（`SHOW TABLES`、分组聚合、`EXPLAIN` 走 `IndexScan`、`analyst` 权限登录）与工作台 HTTP 链路（登录 → `/api/queries` 异步任务 → 结果分页 → 存储快照）均通过。
 - BenchBox TPC-H SF0.01 Q6：PASS，`734493.7281`，平均 `2.2167s`、中位数 `2.2323s`（CPython 3.12.13 / Windows 11），摘要见 `benchmarks/reports/tpch_sf001_q6.json`。

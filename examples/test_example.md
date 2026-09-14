@@ -160,3 +160,137 @@ SUM(列)        :    344.3 ms   operator=SeqScan  rows_examined=60175
 
 覆盖：与逐行扫描结果一致、删除后按活槽计数、带 WHERE 时不能走快路径、`SELECT *` 仍要展开全部
 列、交叉连接 / `GROUP BY` / `HAVING` / 空表，以及存储层 `TableHeap.count()` 与 `scan()` 永远同口径。
+
+## 事务、并发与预写日志
+
+脚本末尾三组语句即可复现最基本的事务语义（[`test_example.sql`](./test_example.sql)）：
+
+```sql
+CREATE TABLE IF NOT EXISTS txn_demo (id INT PRIMARY KEY, note VARCHAR(20));
+
+BEGIN;                                        -- BEGIN / BEGIN WORK / BEGIN TRANSACTION 等价
+INSERT INTO txn_demo VALUES (1, 'rolled-back');
+ROLLBACK;                                     -- 上面这一行必须消失
+
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO txn_demo VALUES (2, 'committed');
+COMMIT;
+
+SELECT id, note FROM txn_demo ORDER BY id;    -- 只应看到 (2, 'committed')
+```
+
+预期输出：
+
+```text
+BEGIN serializable (txn 1)
+INSERT 1
+ROLLBACK 1
+BEGIN read_committed (txn 2)
+INSERT 1
+COMMIT 2
++----+-----------+
+| id | note      |
++----+-----------+
+| 2  | committed |
++----+-----------+
+```
+
+### 事务语义要点
+
+- **语法**：`BEGIN | BEGIN WORK | BEGIN TRANSACTION [ISOLATION LEVEL ...]`、`START TRANSACTION`、`COMMIT [WORK]`、`ROLLBACK [WORK]`、`SET TRANSACTION ISOLATION LEVEL {SERIALIZABLE | READ COMMITTED}`。
+- **自动提交**：不写 `BEGIN` 时每条语句各自成事务，成功即提交、失败即回滚。所以 `INSERT INTO t VALUES (2,'b'), (1,'dup'), (3,'c')` 撞主键时，前半批也不会留下。
+- **原子性靠页级前像**：事务第一次改动某页时留存"修改前的整页内容"，回滚按相反顺序写回。堆表页、索引页、目录页一视同仁——`UPDATE` 走的索引条目同样被撤销。
+- **失败事务状态**：显式事务里语句报错后事务进入 `failed`，继续持锁；后续语句与 `COMMIT` 一律被拒，只能 `ROLLBACK`（与 PostgreSQL 一致），"半条语句"不会泄漏给别的语句。
+- **DDL 也能回滚**：`CREATE TABLE` / `CREATE INDEX` 在事务内执行后 `ROLLBACK`，目录快照会把它撤掉，索引连页一起释放。
+- **`DROP TABLE` 在显式事务内被明确拒绝**：数据页会被立即归还空闲链表、内容随即被覆盖，页级前像救不回来，因此不给出"能回滚"的错觉。
+
+### 并发：封锁与死锁
+
+并发语义用 Python 多线程在同一个 `Database` 实例上演示（事务状态绑定在线程上）。下面这段可以证明"写者持 X 锁时，另一个写者必须等"：
+
+```python
+import threading
+from yoursql.engine.runtime.database import Database
+
+with Database("tmp/lock.db") as db:
+    db.execute("CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(20))")
+    db.execute("INSERT INTO t VALUES (1, 'a')")
+    a_locked, release_a = threading.Event(), threading.Event()
+
+    def writer_a():
+        db.execute("BEGIN")
+        db.execute("UPDATE t SET v = 'A' WHERE id = 1")   # 拿到 t 的 X 锁
+        a_locked.set()
+        release_a.wait(10)
+        db.execute("COMMIT")
+
+    def writer_b():
+        a_locked.wait(10)
+        db.execute("BEGIN")
+        db.execute("UPDATE t SET v = 'B' WHERE id = 1")   # 阻塞，直到 A 提交
+        db.execute("COMMIT")
+
+    ta = threading.Thread(target=writer_a)
+    tb = threading.Thread(target=writer_b)
+    ta.start(); tb.start()
+    a_locked.wait(10)
+    print(db.lock_manager.snapshot()["resources"])   # t 被 A 独占
+    print(db.lock_manager.waiters("t"))              # B 的事务号在等待队列里
+    release_a.set()
+    ta.join(10); tb.join(10)
+    print(db.execute("SELECT v FROM t").rows)        # [('B',)]
+```
+
+命令行可以直接看到事务 / 锁表 / 日志状态：
+
+```powershell
+.venv\Scripts\python.exe -m yoursql.cli --database .\tmp\optimizer-example.db --txn-status
+.venv\Scripts\python.exe -m yoursql.cli --database .\tmp\optimizer-example.db --lock-mode none `
+    --sql "BEGIN; SELECT COUNT(*) FROM employees; COMMIT;"     # 关闭并发控制做对照
+```
+
+死锁用"两个事务交叉抢占两张表"复现：等待图检出环后回滚**事务号最大（最年轻）** 的那个，
+另一个拿到锁继续提交；锁等待超时（`--lock-timeout`，默认 5 s）同样抛 `ConcurrencyError`。
+
+### WAL 与崩溃恢复
+
+日志文件与数据库同目录，名为 `<db>.wal`。写前日志规则是"脏页写回磁盘前，先把它对应的日志 fsync"，
+页头末尾 4 字节的对齐保留位现在承载该页的 LSN（旧库文件末 4 字节恒为 0，按 LSN=0 读，格式向后兼容）。
+
+崩溃恢复的验证思路是**手工制造一次断电**：把脏页落盘（对应缓冲池的 steal 行为），
+然后直接关闭文件句柄——不跑回滚、也不补 `commit` 记录：
+
+```python
+from yoursql.engine.runtime.database import Database
+
+db = Database("tmp/crash.db")
+db.execute("CREATE TABLE t (id INT PRIMARY KEY)")
+db.execute("INSERT INTO t VALUES (1)")
+db.execute("BEGIN")
+db.execute("INSERT INTO t VALUES (2)")     # 未提交
+db.buffer_pool.flush_all()                 # 脏页已经落到磁盘
+db.disk.close(); db.wal.close()            # 断电：没有任何事务收尾
+
+with Database("tmp/crash.db") as recovered:
+    print(recovered.recovery_report.rolled_back)          # (2,) —— 未提交事务被撤销
+    print(recovered.execute("SELECT id FROM t").rows)     # [(1,)]
+```
+
+要点：
+
+- **提交顺序即恢复策略**：先把目录与数据页全部刷盘并 fsync，**再**写 `commit` 记录。
+  于是"有 commit 记录"等价于"改动都在磁盘上"，恢复只需回滚未提交事务，**不需要 redo**。
+- 事务新申请的页由 `alloc` 记录记账，回滚时精确回收；恢复是幂等的（重复打开结果一致）。
+- 日志尾部被写了一半的行按"尾部截断"容忍；中间出现坏行才报 `RecoveryError`。
+- 关闭日志做对照：`--no-wal`（或 `DatabaseConfig(wal_enabled=False)`）——事务语义仍成立（回滚靠内存前像），但断电后无法撤销已落盘的未提交改动。
+- 崩溃恢复确实发生时，CLI 会往 **stderr** 打一行 `[recovery] 回滚了 N 个未提交事务…`（不污染 `--json` 输出）。
+
+### 自动化断言
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_transactions.py tests/test_concurrency.py tests/test_wal.py -q
+```
+
+- `tests/test_transactions.py`（16 条）：提交 / 回滚 / 自动提交、更新与删除的撤销、**索引条目一并回滚**、失败事务状态、DDL 事务（建表 / 建索引回滚）、`DROP TABLE` 守卫、脚本级事务、隔离级别切换、约束校验不自锁。
+- `tests/test_concurrency.py`（10 条）：X 锁串行化、读等写、死锁检测选牺牲者、锁超时、`lock_mode=none`、两种隔离级别的 S 锁持有范围、4 线程 × 6 行并发写入行数完整。
+- `tests/test_wal.py`（14 条）：页 LSN 落位、**写前日志规则**（挂在 `DiskManager.write` 上断言"落盘页 LSN ≤ 已 fsync 的 LSN"）、checkpoint 截断、崩溃回滚、已提交数据不丢、页回收、只撤销未提交事务、恢复幂等、残缺尾行容忍、坏行报错、关闭日志、旧页头兼容。

@@ -73,6 +73,39 @@
 - [x] 存储缓存性能统计、落盘索引页检查、索引前后路径对比和第三方 BenchBox/TPC-H Q6 跑分适配。
 - [x] 跨引擎逐值对拍：`benchmarks/verify_tpch_values.py` 把 TPC-H 查询的结果与同数据的 SQLite 库做行多重集比对（数值归一到 6 位小数，DECIMAL/float 都能并排比较），不一致即以非零码退出。当前覆盖 **16 条**（Q1/Q3/Q5–Q14/Q16–Q19）全部一致，其中 Q6 记为 `KNOWN_DIFFERENCES`（DECIMAL 定点 vs SQLite 双精度浮点的口径差异，非错误）；Q2/Q4/Q15/Q20/Q21 因相关子查询逐行重跑超时、Q22 单条约 50 s，未纳入。报告里的 `sample_match` 字段提供同一信息的快速版本。
 
+## 事务、并发与预写日志
+
+三项能力共用一套机制落地：**事务定义语义，封锁提供并发，预写日志负责崩溃恢复**。
+
+- [x] **事务（BEGIN / COMMIT / ROLLBACK）**
+  - 语法：`BEGIN | BEGIN WORK | BEGIN TRANSACTION [ISOLATION LEVEL ...]`、`START TRANSACTION`、`COMMIT [WORK]`、`ROLLBACK [WORK]`、`SET TRANSACTION ISOLATION LEVEL {SERIALIZABLE | READ COMMITTED}`。
+  - **原子性靠页级前像**：事务第一次修改某个页时把"修改前的整页内容"留存下来（同时写进 WAL）。回滚时按相反顺序把前像写回，堆表页、索引页、目录页一视同仁——不需要为每种页面单独写逆向操作。这一点由 `test_rollback_restores_index_lookups` 固定住：UPDATE 走的索引条目同样被撤销。
+  - **自动提交**：所有语句一律跑在事务里。没有显式事务时开一条隐式事务，成功即提交、失败即回滚；只读语句不开事务（否则会白写 BEGIN 日志、还会误清计划缓存），只取一次临时读锁（负数编号，不与真实事务号冲突）。
+  - **失败事务状态**：与 PostgreSQL 一致——显式事务里某条语句出错后事务进入 `failed`，继续持锁，后续语句与 COMMIT 一律被拒，只能 ROLLBACK。避免"半条语句"被后续语句读走。
+  - **DDL 事务**：回滚时按 BEGIN 时的目录快照重建目录对象，并重建索引（不再存在的索引树连页一起释放）。`DROP TABLE` 在显式事务内**明确拒绝**——它会把数据页立即归还空闲链表，页级前像救不回已被释放的页，与其给出"能回滚"的错觉不如直接报错。
+  - 事务状态绑定在**线程**上（`threading.local`），同一个 `Database` 实例可以被多线程共享，每个线程各开各的事务。
+  - `tests/test_transactions.py` 16 条。
+
+- [x] **并发控制（表级共享/排他锁 + 严格两阶段封锁）**
+  - 读申请 **S 锁**、写申请 **X 锁**，S/S 相容、S/X 与 X/X 互斥；允许 **锁升级**（S→X，仅当自己是唯一持有者）；锁按事务重入计数，所以 `INSERT` 内部扫表校验唯一约束不会自锁。
+  - **严格 2PL**：锁保持到事务结束，因此不会级联回滚，天然可串行化。`READ COMMITTED` 隔离级别下语句结束就放掉 S 锁（X 锁仍保持到事务结束），两种级别可用 `test_read_committed_releases_shared_locks_per_statement` 与 `test_serializable_holds_shared_locks_until_commit` 现场对比。
+  - **死锁检测**：等待期间构造等待图（等待者 → 所需资源的持有者），深度优先找经过自己的环；命中则选**事务号最大（最年轻）** 的事务作牺牲者，标记后由其自行回滚并释放锁唤醒其余事务。等待超过 `lock_timeout_seconds`（默认 5 s）同样抛 `ConcurrencyError`。
+  - 锁可按粒度关闭：`DatabaseConfig(lock_mode="none")` / CLI `--lock-mode none`，用于现场对照"有/无并发控制"的差别。
+  - `tests/test_concurrency.py` 10 条（含 4 线程 × 6 行并发写入最终行数完整的压力用例）。并发用例全部以"事件 / 锁表状态"做同步点，不靠 sleep 猜时序。
+
+- [x] **预写日志与崩溃恢复**
+  - 日志文件 `<db>.wal`（JSON Lines：文件头存 `next_lsn`，其后每行一条记录），记录类型 `begin / commit / abort / page / alloc / checkpoint`；`page` 记录携带整页前像，`alloc` 记录用于回滚时精确回收事务新申请的页。
+  - **页 LSN 落在页头**：页头末尾原本是 4 字节对齐填充（旧文件恒为 0），现复用为 LSN。结构体尺寸与磁盘布局没变，**旧数据库文件可直接打开**（`test_legacy_page_header_without_lsn_still_reads`）。
+  - **写前日志规则**：缓冲池把脏页写回磁盘前，先 `ensure_persisted(page.lsn)` 把该页之前的日志 fsync；`test_wal_is_flushed_before_dirty_page_reaches_disk` 挂在 `DiskManager.write` 上断言"每个落盘页的 LSN ≤ 当时已 fsync 的 LSN"。
+  - **提交顺序即恢复策略**：先把目录与数据页全部刷盘并 fsync，**再**写 `commit` 记录并 fsync。因此"有 commit 记录"等价于"改动全都在磁盘上"，恢复只需**回滚未提交事务**，不需要 redo——`test_recovery_only_undoes_incomplete_transactions` 用一份手工构造的日志（事务 91 有 commit、92 没有）验证了这一点。
+  - 提交时若系统内没有其它活跃事务，直接做 **checkpoint** 截断日志（保留文件头与 LSN 计数）。
+  - 崩溃恢复在 `Database.__init__` 里、**装载目录之前**执行：按页取该事务最早的一份前像覆盖回去，回收 `alloc` 记录里的页，写 `abort` 留痕并 checkpoint。恢复是幂等的（`test_recovery_is_idempotent`）。
+  - 日志尾部被写了一半的行按"尾部截断"容忍；中间出现坏行才报 `RecoveryError`（两条用例各一）。
+  - 可用 `DatabaseConfig(wal_enabled=False)` / CLI `--no-wal` 关闭，对照"没有日志时崩溃会丢什么"。
+  - `tests/test_wal.py` 14 条，其中"崩溃"用 `_crash()` 模拟：先把脏页落盘（对应 steal 行为）再直接关句柄，不跑回滚、不补 commit。
+
+- [x] **可观测入口**：CLI `--txn-status` 打印当前事务 / 锁表 / WAL / 上次恢复报告的 JSON；交互模式提示符在事务中显示 `yoursql(txn <id>)>`；`Database.transaction_state()` 同时挂进 `metrics()`。崩溃恢复发生时会往 **stderr** 打一行提示（不污染 `--json` 的标准输出）。
+
 ## 高级扩展逐项对照
 
 指导书 17 项"高级扩展"的落点与证据（"已有"指本轮之前已实现，"本轮"指本次补齐）：
@@ -93,14 +126,17 @@
 | 12 | NULL / LIKE / JOIN 语义 | 已有 | 三值逻辑、LIKE 通配、NULL 连接键不匹配、外连接补 NULL |
 | 13 | 更新操作 | 已有 | INSERT（含批量）/ UPDATE / DELETE |
 | 14 | 错误处理 | 已有 | Lexical / Syntax / Semantic / Execution / Storage 五类，统一 `at line <行>, column <列>` |
-| 15 | EXPLAIN 与查询计划可视化 | 已有 + 本轮补齐 | 文本树 `PlanNode.explain()` 与 `to_dict()` JSON 已有；本轮补后端 Mermaid / DOT / HTML 通道（见"查询优化"节） |
-| 16 | 错误恢复 | **本轮补齐** | `parse_recovering` / `ParseOutcome` / `Database.check_script` / CLI `--check`；`tests/test_error_recovery.py` |
-| 17 | 算法规则框架 | **本轮补齐** | `RewriteRule` + `DEFAULT_RULES`（5 条具名规则）+ `plan.properties["rules"]` + CLI `--rules` / `--disable-rule`；`tests/test_optimizer_rules.py` |
+| 15 | EXPLAIN 与查询计划可视化 | 已有 + 上轮补齐 | 文本树 `PlanNode.explain()` 与 `to_dict()` JSON 已有；上轮补后端 Mermaid / DOT / HTML 通道（见"查询优化"节） |
+| 16 | 错误恢复 | **已补齐** | `parse_recovering` / `ParseOutcome` / `Database.check_script` / CLI `--check`；`tests/test_error_recovery.py` |
+| 17 | 算法规则框架 | **已补齐** | `RewriteRule` + `DEFAULT_RULES`（5 条具名规则）+ `plan.properties["rules"]` + CLI `--rules` / `--disable-rule`；`tests/test_optimizer_rules.py` |
+| 18 | 事务 | **本轮补齐** | BEGIN/COMMIT/ROLLBACK、页级前像回滚（含索引页与目录页）、失败事务状态、DDL 事务；`tests/test_transactions.py` 16 条 |
+| 19 | 并发 | **本轮补齐** | 表级 S/X 锁 + 严格两阶段封锁 + 锁升级 + 等待图死锁检测 + 锁超时 + 两种隔离级别；`tests/test_concurrency.py` 10 条 |
+| 20 | WAL / 崩溃恢复 | **本轮补齐** | `<db>.wal` 日志文件、页头 LSN、写前日志规则、undo-only 恢复、checkpoint 截断；`tests/test_wal.py` 14 条 |
 
 验收现场可以直接跑这几条命令取证：
 
 ```
-python -m pytest -q                                  # 201 passed
+python -m pytest -q                                  # 251 passed
 python -m yoursql.cli --rules                        # 规则清单（5/5 启用）
 python -m yoursql.cli --sql "SELECT 1; SELCT 2; SELECT @ FROM t;" --check
 # <db> 换成任意已有库；接上 --disable-rule 即可现场对比同一语句的计划差异
@@ -108,6 +144,13 @@ python -m yoursql.cli --database <db> --sql "SELECT ... " --plan mermaid
 python -m yoursql.cli --database <db> --sql "SELECT ... " --plan dot --disable-rule index_selection
 python -m scripts.plan_visualize --database <db> --sql "SELECT ... " \
     --format html --out docs/plan_demo.html
+
+# 事务 / 并发 / WAL：全链路取证
+python -m pytest tests/test_transactions.py tests/test_concurrency.py tests/test_wal.py -q
+python -m yoursql.cli --database tmp/txn.db --txn-status          # 事务 / 锁表 / WAL / 上次恢复报告
+python -m yoursql.cli --database tmp/txn.db --lock-mode none --sql "BEGIN; ..."   # 关闭并发控制对照
+python -m yoursql.cli --database tmp/txn.db --no-wal --sql "..."                  # 关闭预写日志对照
+python -m yoursql.cli --database tmp/txn.db --isolation read_committed --sql "BEGIN; SELECT ...; COMMIT;"
 ```
 
 ## 下一步（按已实测到的缺口）
@@ -133,7 +176,7 @@ python -m scripts.plan_visualize --database <db> --sql "SELECT ... " \
   - 新增 `SlottedPage.live_count()` 与 `TableHeap.count()`：只数槽目录的活槽，不切记录、不跑 JSON 解码；`_scan_contexts` 在"不需要任何列值 + 无谓词"时走该快路径，用同一个只读上下文重复产出，行数与 `rows_examined` 语义不变。
   - 顺带修 `SlottedPage._from_binary` 每页把 `sorted(ranges)` 算两遍（宽表全表扫描每页白排一次），以及 `TableHeap.scan` 每行重复构造 `PageId`。
   - 测量口径：`benchmarks/bench_scan_paths.py`，每个用例独立进程 × 重复取最小值。同进程连测会被堆状态与 GC 干扰（同一配置实测能差 30%，Q6 曾因此被误判成"变慢 30%"），该脚本强制隔离。
-  - 回归：`tests/test_scan_fast_path.py` 10 条（结果一致、删除后按活槽计数、带 WHERE/交叉连接/分组/HAVING/空表、存储层 `count()` 与 `scan()` 同口径）；另外与原始 `.tbl` 行数（8 张表全对）和同数据 SQLite 库（16 条 lineitem 聚合语句逐值）对拍一致；全量 `pytest` **211 条通过**。
+  - 回归：`tests/test_scan_fast_path.py` 10 条（结果一致、删除后按活槽计数、带 WHERE/交叉连接/分组/HAVING/空表、存储层 `count()` 与 `scan()` 同口径）；另外与原始 `.tbl` 行数（8 张表全对）和同数据 SQLite 库（16 条 lineitem 聚合语句逐值）对拍一致；全量 `pytest` **251 条通过**。
 
 ### 待办（已用实测数据重写过方向）
 

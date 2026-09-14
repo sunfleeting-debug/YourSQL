@@ -29,11 +29,14 @@ yoursql/
 │  ├─ evaluator.py         # 表达式编译、常量折叠、函数与三值逻辑
 │  ├─ query.py             # 查询扫描、连接、索引访问、上下文和投影
 │  └─ executor.py          # 与 SQL 无关的 Volcano 算子契约
-├─ storage/                # Page / Heap / BufferPool / Disk / B+Tree
+├─ storage/                # Page / Heap / BufferPool / Disk / WAL / B+Tree
 └─ engine/
    ├─ runtime/
-   │  ├─ database.py       # Database 生命周期、事务边界与跨层协调
+   │  ├─ database.py       # Database 生命周期、事务编排、崩溃恢复与跨层协调
    │  └─ commands.py       # SQL 命令授权、DDL、DML 和索引变更
+   ├─ concurrency/
+   │  ├─ transaction.py    # 事务对象、页前像、事务状态机与事务管理器
+   │  └─ lock_manager.py   # 表级 S/X 锁、严格两阶段封锁、等待图死锁检测
    ├─ catalog.py           # 表、视图、索引元数据
    ├─ security/            # RBAC、Session、AuditLog、安全管理器
    └─ services/            # HTTP、SSH、Workbench、存储检查协议
@@ -60,7 +63,19 @@ SQL 前端统一从 `sql` 导入，计划器从 `planner` 导入，执行器从 
 - **执行器**：`execution/query.py` 负责把物理计划转换为扫描、连接和投影过程，并在满足联合索引最左前缀的等值、范围、`IN`、`BETWEEN` 及 AND/OR 组合谓词上选择 IndexScan；通用 Volcano 契约位于 `execution/executor.py`。
 - **执行实现状态**：表达式能力位于 `execution/evaluator.py`，查询扫描、连接、索引访问和投影位于 `execution/query.py`，可复用的 Volcano 算子位于 `execution/executor.py`；`engine/runtime/commands.py` 负责 SQL 命令实现，`engine/runtime/database.py` 只保留跨层编排、生命周期和持久化，不再承载新的查询/命令细节。
 - **单表选择规则**：小表（不超过 128 行）优先复用可用索引；大表在索引候选行数为 0 或不超过总行数 20% 时用 IndexScan，否则回退 SeqScan。该规则尤其针对 `SELECT *` 的回表成本。优化器先按索引元数据生成候选计划，再用当前 B+Tree 的候选行数校正大表单表计划；写入、删除与 DDL 会失效计划缓存，确保分布变化后重新判断。
-- **持久化**：每个写语句完成后立即持久化目录与脏页；重新打开数据库时，Catalog、表数据与索引都直接从页面文件读回。
+- **持久化**：写语句在事务提交时持久化目录与脏页；重新打开数据库时，Catalog、表数据与索引都直接从页面文件读回。
+
+## 事务、并发与预写日志
+
+三项能力是同一套机制的三面：**事务定义语义，封锁提供并发，预写日志负责崩溃恢复**。
+
+- **模型**：所有语句都跑在事务里。没有显式事务时开一条隐式事务（成功即提交、失败即回滚，等价自动提交）；只读语句**不开事务**，只取一次临时读锁，避免白写 BEGIN 日志、也避免误清计划缓存。事务状态存在 `threading.local` 上，同一个 `Database` 实例可被多线程共享，每个线程各开各的事务。
+- **原子性 = 页级前像**：事务第一次改动某个页时，把修改前的整页内容留一份（`BufferPool.put_page` 里通过 `image_sink` 回调交给当前事务）。回滚时按相反顺序写回前像，于是堆表页、索引页、目录页一视同仁——不需要为每种页面各写一套逆向操作。事务新申请的页由 `DiskManager.allocate_hook` 单独记账，回滚时精确回收（而不是把 `next_page_id` 整体回退，那在并发下会与其它事务撞车）。
+- **失败事务状态**：与 PostgreSQL 一致——显式事务里语句出错后事务进入 `failed`，继续持锁，后续语句与 `COMMIT` 一律被拒，只能 `ROLLBACK`。`DROP TABLE` 在显式事务内明确拒绝：它会把数据页立即归还空闲链表，页级前像救不回已被释放的页。
+- **封锁**：表级 S/X 锁 + **严格两阶段封锁**（锁保持到事务结束，因此不会级联回滚、天然可串行化）。读申请 S、写申请 X，允许只在"自己是唯一持有者"时升级 S→X；锁按事务重入计数，所以 `INSERT` 内部扫表校验唯一约束不会自锁。等待期间用**等待图**找经过自己的环，命中则回滚事务号最大（最年轻）的那个牺牲者；等待超过 `lock_timeout_seconds` 抛 `ConcurrencyError`。`READ COMMITTED` 下语句结束就放掉 S 锁，X 锁仍保持到事务结束。
+- **预写日志**：日志文件 `<db>.wal`（JSON Lines；文件头存 `next_lsn`，其后每行一条记录），记录类型 `begin/commit/abort/page/alloc/checkpoint`，`page` 记录携带整页前像。页头末尾原本的 4 字节对齐填充**复用为页 LSN**，结构体尺寸与磁盘布局不变，旧库文件可直接打开。脏页写回磁盘前先按页 LSN 把日志 fsync（写前日志规则）。
+- **提交顺序即恢复策略**：先把目录与数据页全部刷盘并 fsync，**再**写 `commit` 记录。于是"有 commit 记录"等价于"改动全在磁盘上"，恢复只需**回滚未提交事务**，不需要 redo。恢复在 `Database.__init__` 里、**装载目录之前**执行：按页取该事务最早的前像覆盖回去 → 回收 `alloc` 记下的页 → 写 `abort` 留痕 → checkpoint 截断日志。恢复是幂等的。日志尾部被写坏的行按"尾部截断"容忍，中间坏行才报 `RecoveryError`。
+- **可观测**：`Database.transaction_state()`（也挂在 `metrics()` 里）返回当前事务、事务计数、锁表与等待队列、WAL 统计、上次恢复报告；CLI `--txn-status` 直接打印；交互模式提示符在事务中显示 `yoursql(txn <id>)>`；崩溃恢复发生时会往 stderr 打一行提示。
 
 ## 权限目录
 
@@ -70,9 +85,12 @@ SQL 前端统一从 `sql` 导入，计划器从 `planner` 导入，执行器从 
 
 ```powershell
 & '.venv\Scripts\python.exe' -m pytest -q
+& '.venv\Scripts\python.exe' -m pytest tests/test_transactions.py tests/test_concurrency.py tests/test_wal.py -q
 & '.venv\Scripts\python.exe' -m benchmarks.run_benchbox_tpch --iterations 5 --force
 & '.venv\Scripts\python.exe' -m benchmarks.compare_tpch_q6 --iterations 5
 & '.venv\Scripts\python.exe' -m yoursql.cli --database data/showcase_v2.db --sql "SHOW TABLES; SHOW VIEWS;"
+& '.venv\Scripts\python.exe' -m yoursql.cli --database data/showcase_v2.db --txn-status
+& '.venv\Scripts\python.exe' -m yoursql.cli --database data/showcase_v2.db --lock-mode none --sql "BEGIN; SELECT COUNT(*) FROM lineitem; COMMIT;"
 ```
 
 单元测试使用临时目录。第三方 benchmark 的 TPC-H 数据与数据库写入 `benchmarks/third_party/`、`benchmarks/results/`，跑分摘要写入 `benchmarks/reports/tpch_sf001_q6.json`（BenchBox 适配器口径）与 `benchmarks/reports/tpch_sf001_q6_engines.json`（SQLite/DuckDB 对照，裸 `execute()` 口径）；前两者不会进入源码提交。
