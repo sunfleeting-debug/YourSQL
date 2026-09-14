@@ -319,25 +319,12 @@ function PageAssociation({
   )
 }
 
-function PagePayloadWorkbench({
-  detail,
-  jsonDetail,
-  raw,
-  onSelectTable,
-  onOpenIndex
-}: {
-  detail: StoragePageDetail
-  jsonDetail: JsonObject | null
-  raw: RawPayload | null
-  onSelectTable?: (tableName: string) => void
-  onOpenIndex?: (indexName: string) => void
-}) {
+function PagePayloadWorkbench({ detail, jsonDetail, raw }: { detail: StoragePageDetail; jsonDetail: JsonObject | null; raw: RawPayload | null }) {
   return (
     <section className="storage-page-workbench" aria-label="页面级信息">
       <div className="storage-page-workbench-heading">
         <strong>页面信息</strong>
       </div>
-      <PageAssociation page={detail} onSelectTable={onSelectTable} onOpenIndex={onOpenIndex} />
       {jsonDetail && (
         <details className="storage-json-details" open>
           <summary>结构化页字段</summary>
@@ -1380,6 +1367,12 @@ export default function StoragePanel({
     },
     [inspect, selectedIndexName]
   )
+  const openIndex = useCallback(
+    (indexName: string) => {
+      void inspect('indexes', indexName)
+    },
+    [inspect]
+  )
   const selectedPageHeader = selectedPageId && snapshot ? (snapshot.pages.find(page => String(page.page_id) === selectedPageId) ?? null) : null
   const detailPanelOpen = selected?.kind === 'pages' && pageDetail !== null && cellSelection !== null
   // HOW：页面地图页签常驻右侧详情栏；未选中块时只给占位提示，布局不因开关抽屉而重排。
@@ -1631,16 +1624,12 @@ export default function StoragePanel({
                       />
                       {!pageDetail && selectedPageHeader && selectedPageHeader.table_name && (
                         <div className="storage-page-association-preview">
-                          <PageAssociation
-                            page={selectedPageHeader}
-                            onSelectTable={onSelectTable}
-                            onOpenIndex={indexName => {
-                              void inspect('indexes', indexName)
-                            }}
-                          />
+                          <PageAssociation page={selectedPageHeader} onSelectTable={onSelectTable} onOpenIndex={openIndex} />
                         </div>
                       )}
-                      {pageDetail && <PageGrid detail={pageDetail} onCellDetail={handleCellDetail} />}
+                      {pageDetail && (
+                        <PageGrid detail={pageDetail} onCellDetail={handleCellDetail} onSelectTable={onSelectTable} onOpenIndex={openIndex} />
+                      )}
                       {pageDetail?.type === 'heap' && (
                         <section className="storage-slot-workbench" aria-label="槽位记录">
                           <div className="storage-slot-workbench-heading">
@@ -1673,17 +1662,7 @@ export default function StoragePanel({
                           )}
                         </section>
                       )}
-                      {pageDetail && (
-                        <PagePayloadWorkbench
-                          detail={pageDetail}
-                          jsonDetail={jsonDetail}
-                          raw={raw}
-                          onSelectTable={onSelectTable}
-                          onOpenIndex={indexName => {
-                            void inspect('indexes', indexName)
-                          }}
-                        />
-                      )}
+                      {pageDetail && <PagePayloadWorkbench detail={pageDetail} jsonDetail={jsonDetail} raw={raw} />}
                     </>
                   )}
                   {tab === 'buffer' && currentCache && (

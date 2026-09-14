@@ -37,7 +37,11 @@ export interface PageGridSelection {
 interface Props {
   detail: StoragePageDetail
   onCellDetail?: (selection: PageGridSelection | null) => void
+  onSelectTable?: (tableName: string) => void
+  onOpenIndex?: (indexName: string) => void
 }
+
+type PageAssociationInlineProps = Pick<Props, 'detail' | 'onSelectTable' | 'onOpenIndex'>
 
 export type PageGridCellKind = 'header' | 'inner-header' | 'directory' | 'free' | 'record' | 'payload' | 'legacy-slot'
 type CellKind = PageGridCellKind
@@ -944,7 +948,43 @@ export function PageGridSelectionDetail({ selection, detail }: { selection: Page
   )
 }
 
-function PageGrid({ detail, onCellDetail }: Props) {
+function PageAssociationInline({ detail, onSelectTable, onOpenIndex }: PageAssociationInlineProps) {
+  const tableName = detail.table_name?.trim() || '未知'
+  const indexName = detail.index_name?.trim() || '未知'
+  const tableLinkable = tableName !== '未知' && tableName !== 'MASKED' && !!onSelectTable
+  const indexLinkable = indexName !== '未知' && indexName !== 'MASKED' && !!onOpenIndex
+  const hasTable = tableName !== '未知'
+  const hasIndex = indexName !== '未知'
+  const associationText = [hasTable ? `表 ${tableName}` : '', hasIndex ? `索引 ${indexName}` : ''].filter(Boolean).join(' · ')
+
+  if (!hasTable && !hasIndex) return null
+
+  return (
+    <span className="page-visual-association" aria-label={`关联对象：${associationText}`}>
+      <span className="page-visual-association-prefix">（关联对象：</span>
+      {hasTable &&
+        (tableLinkable ? (
+          <button type="button" title={`定位表 ${tableName}`} onClick={() => onSelectTable(tableName)}>
+            表 {tableName}
+          </button>
+        ) : (
+          <span className="page-visual-association-value">表 {tableName}</span>
+        ))}
+      {hasTable && hasIndex && <span className="page-visual-association-separator">·</span>}
+      {hasIndex &&
+        (indexLinkable ? (
+          <button type="button" title={`打开索引 ${indexName}`} onClick={() => onOpenIndex(indexName)}>
+            索引 {indexName}
+          </button>
+        ) : (
+          <span className="page-visual-association-value">索引 {indexName}</span>
+        ))}
+      <span className="page-visual-association-suffix">）</span>
+    </span>
+  )
+}
+
+function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
   const { cells, slotWidth } = useMemo(() => makeCells(detail), [detail])
   const groups = useMemo(() => makeGroups(cells), [cells])
   const slots = detail.slots ?? []
@@ -1189,7 +1229,9 @@ function PageGrid({ detail, onCellDetail }: Props) {
       <div className="page-visual-heading">
         <div>
           <strong>
-            <Grid3X3 size={13} />页 #{detail.page_id}
+            <Grid3X3 size={13} />
+            <span className="page-visual-page-label">页 #{detail.page_id}</span>
+            <PageAssociationInline detail={detail} onSelectTable={onSelectTable} onOpenIndex={onOpenIndex} />
           </strong>
           <span>
             {detail.page_size.toLocaleString()} B · {cells.length} 格 · {slotWidth} B/格

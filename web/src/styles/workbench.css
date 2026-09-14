@@ -1186,6 +1186,45 @@
 .page-visual-heading strong svg {
   color: #288278;
 }
+.page-visual-heading .page-visual-page-label {
+  color: inherit;
+  font-size: inherit;
+  white-space: nowrap;
+}
+.page-visual-association {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #879aa2;
+  font-size: 9px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.page-visual-association-prefix,
+.page-visual-association-suffix,
+.page-visual-association-separator {
+  color: #a1afb4;
+}
+.page-visual-association button,
+.page-visual-association-value {
+  color: #27766d;
+  font-size: inherit;
+  font-weight: 600;
+}
+.page-visual-association button {
+  padding: 1px 3px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+}
+.page-visual-association button:hover {
+  background: #e4f3f0;
+  color: #14645e;
+}
+.page-visual-association button:focus-visible {
+  outline: 2px solid #55a99f;
+  outline-offset: 1px;
+}
 .page-visual-heading span,
 .page-visual-heading small {
   font-size: 9px;
