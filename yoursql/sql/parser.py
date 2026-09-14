@@ -10,11 +10,13 @@ from ..common.types import DataType
 from .diagnostics import Diagnostic, ParseOutcome
 from .ast import (
     BetweenPredicate,
+    BeginTransaction,
     BinaryOp,
     CaseExpression,
     CastExpression,
     ColumnDefinition,
     ColumnRef,
+    Commit,
     CreateRole,
     CreateIndex,
     CreateTable,
@@ -38,8 +40,10 @@ from .ast import (
     OrderItem,
     Parameter,
     Revoke,
+    Rollback,
     Select,
     SelectItem,
+    SetTransaction,
     Show,
     ShowGrants,
     Star,
@@ -169,6 +173,11 @@ class Parser:
             TokenKind.REVOKE,
             TokenKind.DESC,
             TokenKind.DESCRIBE,
+            TokenKind.BEGIN,
+            TokenKind.START,
+            TokenKind.COMMIT,
+            TokenKind.ROLLBACK,
+            TokenKind.SET,
         }
     )
 
@@ -260,11 +269,66 @@ class Parser:
             return self._located(Explain(self._statement()), token)
         if kind is TokenKind.SHOW:
             return self._show()
+        if kind in {TokenKind.BEGIN, TokenKind.START}:
+            return self._begin()
+        if kind is TokenKind.COMMIT:
+            token = self._advance()
+            self._match(TokenKind.WORK)
+            return self._located(Commit(), token)
+        if kind is TokenKind.ROLLBACK:
+            token = self._advance()
+            self._match(TokenKind.WORK)
+            return self._located(Rollback(), token)
+        if kind is TokenKind.SET:
+            return self._set_transaction()
         if kind in {TokenKind.DESC, TokenKind.DESCRIBE}:
             self._advance()
             name, token = self._name_with_token("表名")
             return self._located(Show("COLUMNS", name), token)
-        self._error("不支持的语句起始符号", "CREATE/INSERT/SELECT/UPDATE/DELETE")
+        self._error(
+            "不支持的语句起始符号",
+            "CREATE/INSERT/SELECT/UPDATE/DELETE/BEGIN/COMMIT/ROLLBACK",
+        )
+
+    def _begin(self) -> Statement:
+        """解析 BEGIN [WORK|TRANSACTION] [ISOLATION LEVEL <级别>] 与 START TRANSACTION。"""
+
+        token = self._advance()
+        if token.kind is TokenKind.START:
+            self._expect(TokenKind.TRANSACTION, "START TRANSACTION")
+        elif not self._match(TokenKind.TRANSACTION):
+            # 兼容 BEGIN / BEGIN WORK / BEGIN TRANSACTION 三种写法。
+            self._match(TokenKind.WORK)
+        isolation = self._isolation_clause()
+        return self._located(BeginTransaction(isolation), token)
+
+    def _set_transaction(self) -> Statement:
+        """解析 SET TRANSACTION ISOLATION LEVEL <级别>。"""
+
+        token = self._expect(TokenKind.SET, "SET")
+        self._expect(TokenKind.TRANSACTION, "SET TRANSACTION")
+        isolation = self._isolation_clause()
+        if isolation is None:
+            self._error("SET TRANSACTION 需要 ISOLATION LEVEL 子句", "ISOLATION LEVEL")
+        return self._located(SetTransaction(isolation), token)
+
+    def _isolation_clause(self) -> str | None:
+        """解析可选的 ISOLATION LEVEL 子句；目前支持 SERIALIZABLE 与 READ COMMITTED。"""
+
+        if not self._match(TokenKind.ISOLATION):
+            return None
+        self._expect(TokenKind.LEVEL, "ISOLATION LEVEL")
+        if self._match(TokenKind.SERIALIZABLE):
+            return "serializable"
+        if self._match(TokenKind.READ):
+            if self._match(TokenKind.COMMITTED):
+                return "read_committed"
+            self._error(
+                "目前只支持 READ COMMITTED 隔离级别",
+                "COMMITTED",
+            )
+        self._error("隔离级别无效", "SERIALIZABLE/READ COMMITTED")
+        return None
 
     def _show(self) -> Statement:
         show_token = self._expect(TokenKind.SHOW, "SHOW")

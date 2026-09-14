@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..sql.ast import (
+    BeginTransaction,
+    Commit,
     CreateIndex,
     CreateRole,
     CreateTable,
@@ -18,7 +20,9 @@ from ..sql.ast import (
     Grant,
     Insert,
     Revoke,
+    Rollback,
     Select,
+    SetTransaction,
     Show,
     ShowGrants,
     Statement,
@@ -175,6 +179,19 @@ def plan_from_statement(statement: Statement) -> LogicalPlanNode:
         root = LogicalPlanNode(
             "ShowGrants",
             {"target_kind": statement.target_kind, "target": statement.target_name},
+        )
+    elif isinstance(statement, BeginTransaction):
+        root = LogicalPlanNode(
+            "BeginTransaction",
+            {"isolation": statement.isolation or "session default"},
+        )
+    elif isinstance(statement, Commit):
+        root = LogicalPlanNode("Commit", {})
+    elif isinstance(statement, Rollback):
+        root = LogicalPlanNode("Rollback", {})
+    elif isinstance(statement, SetTransaction):
+        root = LogicalPlanNode(
+            "SetTransaction", {"isolation": statement.isolation}
         )
     elif isinstance(statement, Explain):
         root = LogicalPlanNode(

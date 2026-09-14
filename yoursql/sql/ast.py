@@ -357,13 +357,39 @@ class ShowGrants(Statement):
     target_name: str | None = None
 
 
+@dataclass(frozen=True)
+class BeginTransaction(Statement):
+    """开启显式事务；``isolation`` 为空时使用会话默认隔离级别。"""
+
+    isolation: str | None = None
+
+
+@dataclass(frozen=True)
+class Commit(Statement):
+    """提交当前事务。"""
+
+
+@dataclass(frozen=True)
+class Rollback(Statement):
+    """回滚当前事务。"""
+
+
+@dataclass(frozen=True)
+class SetTransaction(Statement):
+    """设置本会话后续事务的默认隔离级别。"""
+
+    isolation: str
+
+
 __all__ = [
     "BetweenPredicate",
+    "BeginTransaction",
     "BinaryOp",
     "CaseExpression",
     "CastExpression",
     "ColumnDefinition",
     "ColumnRef",
+    "Commit",
     "CreateRole",
     "CreateIndex",
     "CreateTable",
@@ -387,8 +413,10 @@ __all__ = [
     "OrderItem",
     "Parameter",
     "Revoke",
+    "Rollback",
     "Select",
     "SelectItem",
+    "SetTransaction",
     "Show",
     "ShowGrants",
     "Star",
