@@ -29,6 +29,11 @@ function signalLabel(signal: string): string {
   return labels[signal] ?? signal
 }
 
+function sampleNumber(sample: MonitorSample, key: 'total_ms' | 'page_reads' | 'page_writes' | 'cache_hits' | 'cache_misses'): number {
+  const value = sample[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
 function TimingBar({ label, value, total, tone }: { label: string; value: number; total: number; tone: string }) {
   const width = total > 0 ? Math.min(100, (value / total) * 100) : 0
   return (
@@ -62,7 +67,7 @@ const LIVE_CARDS: LiveCardConfig[] = [
   {
     title: '查询延迟',
     lines: [{ key: 'total_ms', label: '耗时', color: '#087f78' }],
-    latest: sample => elapsed(sample.total_ms)
+    latest: sample => elapsed(sampleNumber(sample, 'total_ms'))
   },
   {
     title: '页 I/O',
@@ -70,7 +75,7 @@ const LIVE_CARDS: LiveCardConfig[] = [
       { key: 'page_reads', label: '读入', color: '#2d9fe3' },
       { key: 'page_writes', label: '写出', color: '#e15a3a' }
     ],
-    latest: sample => `读 ${sample.page_reads.toLocaleString()} · 写 ${sample.page_writes.toLocaleString()}`
+    latest: sample => `读 ${sampleNumber(sample, 'page_reads').toLocaleString()} · 写 ${sampleNumber(sample, 'page_writes').toLocaleString()}`
   },
   {
     title: '缓存访问',
@@ -78,7 +83,7 @@ const LIVE_CARDS: LiveCardConfig[] = [
       { key: 'cache_hits', label: '命中', color: '#087f78' },
       { key: 'cache_misses', label: '未命中', color: '#e1a04c' }
     ],
-    latest: sample => `命中 ${sample.cache_hits.toLocaleString()} · 未命中 ${sample.cache_misses.toLocaleString()}`
+    latest: sample => `命中 ${sampleNumber(sample, 'cache_hits').toLocaleString()} · 未命中 ${sampleNumber(sample, 'cache_misses').toLocaleString()}`
   },
   {
     title: '查询状态',
@@ -93,7 +98,7 @@ const LIVE_CARDS: LiveCardConfig[] = [
 function liveValue(sample: MonitorSample, key: LiveMetric): number {
   if (key === 'success') return sample.status === 'success' ? 1 : 0
   if (key === 'failed') return sample.status === 'success' ? 0 : 1
-  return sample[key]
+  return sampleNumber(sample, key)
 }
 
 function LiveMetricChart({ config, samples }: { config: LiveCardConfig; samples: MonitorSample[] }) {
