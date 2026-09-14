@@ -70,7 +70,7 @@ class SlottedPageBinary:
 
 @dataclass(frozen=True)
 class SlotLocation:
-    """槽在完整数据库页中的物理位置；供检查工具和工作台使用。"""
+    """【前端特供】槽在完整数据库页中的物理位置展示结果。"""
 
     slot_id: int
     offset: int
@@ -85,7 +85,7 @@ class SlotLocation:
         return getattr(self, key)
 
     def to_dict(self) -> dict[str, int | bool | None]:
-        """转换为工作台 JSON 使用的映射。"""
+        """【前端特供】转换为工作台 JSON 使用的映射。"""
 
         return {
             "slot_id": self.slot_id,
@@ -113,7 +113,7 @@ class LiveSlot:
 
 @dataclass(frozen=True)
 class PageRegion:
-    """页布局中的一个连续区域。"""
+    """【前端特供】页布局中的一个连续区域展示结果。"""
 
     start: int
     end: int
@@ -121,7 +121,7 @@ class PageRegion:
     direction: str
 
     def to_dict(self) -> dict[str, int | str]:
-        """转换为工作台使用的区域描述字典。"""
+        """【前端特供】转换为工作台使用的区域描述字典。"""
         return {
             "start": self.start,
             "end": self.end,
@@ -132,7 +132,7 @@ class PageRegion:
 
 @dataclass(frozen=True)
 class SlottedPageLayoutInfo:
-    """工作台绘制双向槽式页所需的带名布局结果。"""
+    """【前端特供】工作台绘制双向槽式页所需的带名布局结果。"""
 
     format: str
     physical: bool
@@ -156,7 +156,7 @@ class SlottedPageLayoutInfo:
         return self.to_dict().get(key, default)
 
     def to_dict(self) -> dict[str, object]:
-        """转换为工作台使用的完整布局字典。"""
+        """【前端特供】转换为工作台使用的完整布局字典。"""
         return {
             "format": self.format,
             "physical": self.physical,
@@ -740,7 +740,7 @@ class SlottedPage:
         self._entries[slot_id] = SlotEntry(entry.offset, entry.length, True)
 
     def slot_layout(self) -> list[SlotLocation]:
-        """返回每个槽的物理范围，offset 相对于完整数据库页。"""
+        """【前端特供】返回每个槽的物理范围，offset 相对于完整数据库页。"""
 
         binary = self._build_binary()
         return [
@@ -754,7 +754,7 @@ class SlottedPage:
         ]
 
     def layout_info(self) -> SlottedPageLayoutInfo:
-        """返回工作台绘制双向页布局所需的带名结构。"""
+        """【前端特供】返回工作台绘制双向页布局所需的带名结构。"""
 
         binary = self._build_binary()
         entries = binary.entries
@@ -817,7 +817,7 @@ class SlottedPage:
         )
 
     def layout_metadata(self) -> dict[str, object]:
-        """返回工作台协议使用的 JSON 映射；内部代码使用 :meth:`layout_info`。"""
+        """【前端特供】返回工作台协议使用的 JSON 映射；内部代码使用 :meth:`layout_info`。"""
 
         return self.layout_info().to_dict()
 

@@ -1,4 +1,4 @@
-"""索引物理页检查结果的构造。"""
+"""【前端特供】索引物理页检查结果的构造。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def index_page_info(
     limit: int = 100,
     codec: PayloadCodec | str | None = None,
 ) -> IndexPageInfo:
-    """返回有界的索引页结构，避免把整页重复展开到 HTTP 响应。"""
+    """【前端特供】返回有界的索引页结构，避免整页重复展开到 HTTP 响应。"""
 
     node = _IndexNode.from_page(page, codec)
     safe_offset = max(0, int(offset))

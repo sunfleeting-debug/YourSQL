@@ -1,4 +1,4 @@
-"""工作台 SQL 边界、脱敏、阶段采集和结果列类型。"""
+"""【前端特供】工作台 SQL 边界、脱敏、阶段采集和结果列类型。"""
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ __all__ = [
 
 @dataclass(frozen=True)
 class SQLSlice:
+    """【前端特供】带源码位置的工作台 SQL 语句片段。"""
+
     sql: str
     start: int
     end: int
@@ -52,7 +54,7 @@ class SQLSlice:
 
 
 def split_sql(sql: str, *, max_statements: int = MAX_STATEMENTS) -> list[SQLSlice]:
-    """与 Lexer 一致地跳过注释、字符串和引用标识符中的分号。"""
+    """【前端特供】与 Lexer 一致地切分工作台 SQL 脚本。"""
     result: list[SQLSlice] = []
     start = index = 0
     quote = ""
@@ -110,7 +112,7 @@ def _slice(sql: str, start: int, end: int) -> SQLSlice:
 
 
 def redact_sql(sql: str) -> str:
-    """历史移除注释和全部字面量；无法分词时不保留源码。"""
+    """【前端特供】移除 SQL 历史中的注释和全部字面量。"""
     try:
         literals = {TokenKind.STRING, TokenKind.INTEGER, TokenKind.FLOAT}
         return " ".join(
@@ -218,7 +220,7 @@ def _keyword_suggestion(
 def error_info(
     error: Exception, source: SQLSlice, *, sensitive: bool = False
 ) -> JsonObject:
-    """返回带完整词素和轻量关键字建议的工作台诊断。"""
+    """【前端特供】返回带词素和轻量关键字建议的工作台诊断。"""
     if isinstance(error, YourSQLError):
         precise = error.line is not None
         if precise:
@@ -280,7 +282,7 @@ def stage(
     reason: str | None = None,
     error: JsonObject | None = None,
 ) -> JsonObject:
-    """记录或构造一个执行阶段。"""
+    """【前端特供】记录或构造一个工作台执行阶段。"""
     return {
         "name": name,
         "status": status,
@@ -298,7 +300,7 @@ def stage(
 def compile_observed(
     database: Database, source: SQLSlice, stages: list[JsonObject]
 ) -> CompilationResult:
-    """逐阶段调用原编译器组件，实际执行复用同一 CompilationResult。"""
+    """【前端特供】采集编译阶段，同时复用核心 CompilationResult。"""
     sensitive = "IDENTIFIED" in source.sql.upper()
 
     def capture(
@@ -382,7 +384,7 @@ def compile_observed(
 def result_columns(
     database: Database, statement: Statement, result: ExecutionResult
 ) -> list[JsonObject]:
-    """直列引用来自 Schema；表达式列使用运行时类型，空列明确标为 UNKNOWN。"""
+    """【前端特供】构造工作台结果列的声明类型和运行时类型。"""
     declared: list[str | None] = []
     if isinstance(statement, Select):
         references = ([statement.from_table] if statement.from_table else []) + [

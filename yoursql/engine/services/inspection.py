@@ -1,4 +1,4 @@
-"""存储只读检查：页头总览支持全量返回，明细字段保持有界，不触碰缓存替换状态。"""
+"""【前端特供】存储只读检查和页面地图数据，不触碰缓存替换状态。"""
 
 from __future__ import annotations
 
@@ -38,14 +38,14 @@ __all__ = [
 
 @dataclass(frozen=True)
 class IndexPageBinding:
-    """索引物理页到目录元数据的绑定。"""
+    """【前端特供】索引物理页到目录元数据的绑定。"""
 
     index_name: str
     table: TableMetadata | None
 
 
 def authorize_storage(database: Database) -> None:
-    """原始页可能含多个对象，仅允许拥有全库读取和安全管理权限的会话。"""
+    """【前端特供】校验存储检查接口所需的全库读取和安全管理权限。"""
     database.session.authorize("SECURITY")
     database.session.authorize("SELECT")
 
@@ -105,7 +105,7 @@ def page_header(
     *,
     index_pages: Mapping[int, list[IndexPageBinding]] | None = None,
 ) -> JsonObject:
-    """构造工作台展示用的页头摘要。"""
+    """【前端特供】构造工作台展示用的页头摘要。"""
     result: JsonObject = {
         "page_id": page.page_id,
         "type": page.page_type.value,
@@ -174,7 +174,7 @@ def page_header(
 def storage_snapshot(
     database: Database, offset: int, limit: int, *, map_only: bool = False
 ) -> JsonObject:
-    """返回页面地图；map_only 只给画地图必需的页头字段。"""
+    """【前端特供】返回页面地图；map_only 只给画地图必需的页头字段。"""
 
     authorize_storage(database)
     disk = database.disk
@@ -228,7 +228,7 @@ def storage_snapshot(
 
 
 def storage_page_changes(database: Database, since: int, limit: int) -> JsonObject:
-    """按缓存中的内容变更游标返回页头增量，避免重复读取整张页面地图。"""
+    """【前端特供】按内容变更游标返回页头增量，避免重复读取整张页面地图。"""
 
     authorize_storage(database)
     changes = database.buffer_pool.changes_since(since)
@@ -273,7 +273,7 @@ def storage_page_changes(database: Database, since: int, limit: int) -> JsonObje
 
 
 def storage_cache_snapshot(database: Database, offset: int, limit: int) -> JsonObject:
-    """只读取 BufferPool 运行态，缓存换入换出无需重新加载页面地图。"""
+    """【前端特供】只读取 BufferPool 运行态，无需重新加载页面地图。"""
 
     authorize_storage(database)
     return {
@@ -286,7 +286,7 @@ def storage_cache_snapshot(database: Database, offset: int, limit: int) -> JsonO
 
 
 def storage_index_snapshot(database: Database, limit: int) -> JsonObject:
-    """只刷新索引目录，索引详情和页面地图保持不动。"""
+    """【前端特供】只刷新索引目录，索引详情和页面地图保持不动。"""
 
     authorize_storage(database)
     return {
@@ -299,7 +299,7 @@ def storage_index_snapshot(database: Database, limit: int) -> JsonObject:
 def inspect_page(
     database: Database, page_id: int, offset: int, limit: int
 ) -> JsonObject:
-    """读取并返回指定页的只读检查信息。"""
+    """【前端特供】读取并返回指定页的只读检查信息。"""
     authorize_storage(database)
     if page_id >= database.disk.page_count:
         raise YourSQLError("页不存在", "NOT_FOUND")
@@ -449,7 +449,7 @@ def inspect_page(
 
 
 def inspect_index(database: Database, name: str, offset: int, limit: int) -> JsonObject:
-    """读取并返回指定索引的只读检查信息。"""
+    """【前端特供】读取并返回指定索引的只读检查信息。"""
     authorize_storage(database)
     metadata = database.catalog.get_index(name)
     return {

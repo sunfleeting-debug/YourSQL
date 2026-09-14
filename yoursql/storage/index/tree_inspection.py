@@ -34,7 +34,7 @@ class _TreeInspectionMixin(_TreeContext):
         return tuple(result)
 
     def physical_page_ids(self, *, readonly: bool = False) -> tuple[int, ...]:
-        """返回索引物理页；只读检查可避免触碰 BufferPool 的访问顺序。"""
+        """【前端特供】返回索引物理页；只读检查可避免触碰缓存访问顺序。"""
 
         with self._lock:
             if not self._persistent:
@@ -42,7 +42,7 @@ class _TreeInspectionMixin(_TreeContext):
             return self._physical_page_ids_unlocked(readonly=readonly)
 
     def snapshot(self, offset: int = 0, limit: int = 100) -> BPlusTreeSnapshot:
-        """按键分页返回真实叶子记录，并附带物理节点摘要。"""
+        """【前端特供】按键分页返回叶子记录，并附带物理节点摘要。"""
 
         safe_offset = max(0, int(offset))
         safe_limit = max(1, int(limit))

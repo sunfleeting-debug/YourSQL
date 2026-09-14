@@ -1,7 +1,8 @@
 """对外服务适配层。
 
-这里放置 HTTP、SSH、工作台和存储检查等协议边界。它们可以调用引擎，
-但不应把协议细节反向带入 SQL、存储或安全核心。
+这里放置 HTTP、SSH、工作台和存储检查等协议边界。HTTP、Workbench 和
+storage inspection 属于【前端特供】适配；SSH 是独立的命令协议。它们可以
+调用引擎，但不应把协议细节反向带入 SQL、存储或安全核心。
 """
 
 from yoursql.engine.services.http import (

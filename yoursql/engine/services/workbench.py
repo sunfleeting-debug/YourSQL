@@ -1,4 +1,4 @@
-"""工作台服务：有界任务、持久化 RBAC 认证与查询历史。"""
+"""【前端特供】工作台服务：有界任务、持久化 RBAC 认证与查询历史。"""
 
 from __future__ import annotations
 
@@ -44,12 +44,14 @@ __all__ = ["QueryTask", "WebSession", "Workbench", "now"]
 
 
 def now() -> str:
-    """返回当前时间的标准化表示。"""
+    """【前端特供】返回工作台协议使用的标准化时间表示。"""
     return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
 class WebSession:
+    """【前端特供】浏览器工作台会话及其认证连接。"""
+
     key: str
     connection: Session
     expires_at: float
@@ -59,6 +61,8 @@ class WebSession:
 
 @dataclass
 class QueryTask:
+    """【前端特供】工作台异步查询任务及其阶段结果。"""
+
     id: str
     session_key: str
     sql: str
@@ -74,7 +78,7 @@ class QueryTask:
 
 
 class Workbench:
-    """一个 HTTP 服务复用一个 Database。"""
+    """【前端特供】一个 HTTP 服务复用一个 Database。"""
 
     def __init__(
         self,

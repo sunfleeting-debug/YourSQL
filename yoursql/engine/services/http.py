@@ -1,4 +1,4 @@
-"""兼容标准库 HTTP 服务与工作台 REST API，默认只监听本机。"""
+"""【前端特供】兼容标准库 HTTP 服务与工作台 REST API，默认只监听本机。"""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ STORAGE_PAGE_LIMIT = 500
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
-    """协议层只负责校验、认证和路由，不重新实现 SQL。"""
+    """【前端特供】协议层只负责校验、认证和路由，不重新实现 SQL。"""
 
     server: DatabaseHTTPServer
 
@@ -630,7 +630,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
 
 class DatabaseHTTPServer(ThreadingHTTPServer):
-    """保留旧构造方式；工作台启动器默认关闭匿名 /sql。"""
+    """【前端特供】保留旧构造方式；工作台启动器默认关闭匿名 /sql。"""
 
     daemon_threads = True
 
@@ -676,7 +676,7 @@ class DatabaseHTTPServer(ThreadingHTTPServer):
 
 
 class HTTPService:
-    """可嵌入测试或应用的 HTTP 服务生命周期封装。"""
+    """【前端特供】可嵌入测试或应用的 HTTP 服务生命周期封装。"""
 
     def __init__(
         self,
@@ -734,7 +734,7 @@ class HTTPService:
 
 
 def serve_http(database: Database, host: str = "127.0.0.1", port: int = 8080) -> None:
-    """兼容原始教学服务；工作台推荐 python -m yoursql.web。"""
+    """【前端特供】兼容原始教学服务；工作台推荐 python -m yoursql.web。"""
     server = DatabaseHTTPServer((host, port), database)
     try:
         server.serve_forever()

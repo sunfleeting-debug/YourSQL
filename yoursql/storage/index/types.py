@@ -64,7 +64,7 @@ class IndexPayloadEntry:
 
 @dataclass(frozen=True)
 class IndexPageEntry:
-    """索引页检查结果中的叶子条目。"""
+    """【前端特供】索引页检查结果中的叶子条目。"""
 
     key: Key
     row_id: RowId
@@ -76,7 +76,7 @@ class IndexPageEntry:
 
 @dataclass(frozen=True)
 class IndexPageInfo:
-    """单个 INDEX 页的有界结构化检查结果。"""
+    """【前端特供】单个 INDEX 页的有界结构化检查结果。"""
 
     format: str
     physical: bool
@@ -146,7 +146,7 @@ class IndexPageInfo:
 
 @dataclass(frozen=True)
 class IndexSnapshotEntry:
-    """B+Tree 按键聚合后的检查条目。"""
+    """【前端特供】B+Tree 按键聚合后的检查条目。"""
 
     key: Key
     row_ids: tuple[RowId, ...]
@@ -165,7 +165,7 @@ class IndexSnapshotEntry:
 
 @dataclass(frozen=True)
 class IndexNodeSnapshot:
-    """B+Tree 物理节点的检查摘要。"""
+    """【前端特供】B+Tree 物理节点的检查摘要。"""
 
     page_id: int
     node_type: str
@@ -198,7 +198,7 @@ class IndexNodeSnapshot:
 
 @dataclass(frozen=True)
 class BPlusTreeSnapshot:
-    """B+Tree 的内存/落盘统一检查快照。"""
+    """【前端特供】B+Tree 的内存/落盘统一检查快照。"""
 
     entries: tuple[IndexSnapshotEntry, ...]
     total: int

@@ -56,7 +56,7 @@ class BufferPoolStats:
 
 @dataclass(frozen=True)
 class BufferFrameSnapshot:
-    """缓存帧的只读检查摘要。"""
+    """【前端特供】缓存帧的只读检查摘要。"""
 
     page_id: int
     page_type: str
@@ -79,7 +79,7 @@ class BufferFrameSnapshot:
 
 @dataclass(frozen=True)
 class BufferPoolSnapshot:
-    """BufferPool 检查快照；不包含页 payload。"""
+    """【前端特供】BufferPool 检查快照；不包含页 payload。"""
 
     stats: BufferPoolStats
     policy: str
@@ -111,7 +111,7 @@ class BufferPoolSnapshot:
 
 @dataclass(frozen=True)
 class ChangeSet:
-    """BufferPool 页内容变更游标的结果。"""
+    """【前端特供】BufferPool 页内容变更游标的结果。"""
 
     revision: int
     changed_page_ids: tuple[int, ...]
@@ -340,7 +340,7 @@ class BufferPool:
         self._frames.clear()
 
     def snapshot(self, offset: int = 0, limit: int = 100) -> BufferPoolSnapshot:
-        """只复制有限帧头，不 pin、不淘汰、不刷新或推进替换时钟。"""
+        """【前端特供】只复制有限帧头，不 pin、不淘汰、不刷新或推进替换时钟。"""
         from itertools import islice
 
         with self._lock:
@@ -368,7 +368,7 @@ class BufferPool:
             )
 
     def changes_since(self, revision: int) -> ChangeSet:
-        """返回指定游标之后发生变化的页号，不读取磁盘也不触碰替换状态。"""
+        """【前端特供】返回指定游标之后变化的页号，不读取磁盘也不触碰替换状态。"""
 
         with self._lock:
             if revision >= self._revision:

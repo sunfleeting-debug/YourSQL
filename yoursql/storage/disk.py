@@ -18,7 +18,7 @@ from yoursql.storage.page import Page, PageType
 
 @dataclass(frozen=True)
 class DiskMetadata:
-    """磁盘文件布局的只读摘要。"""
+    """【前端特供】磁盘文件布局的只读摘要。"""
 
     page_size: int
     page_count: int
@@ -50,7 +50,7 @@ class DiskMetadata:
 
 @dataclass(frozen=True)
 class DiskIOStats:
-    """磁盘管理器进程内累计页 I/O 统计。"""
+    """【前端特供】磁盘管理器进程内累计页 I/O 统计。"""
 
     page_reads: int
     page_writes: int
@@ -119,7 +119,7 @@ class DiskManager:
             return self._next_page_id
 
     def metadata(self) -> DiskMetadata:
-        """返回当前数据库或对象的元数据。"""
+        """【前端特供】返回当前数据库文件布局的只读摘要。"""
         with self._lock:
             return DiskMetadata(
                 page_size=self.page_size,
@@ -290,7 +290,7 @@ class DiskManager:
             self._write_raw(page)
 
     def io_stats(self) -> DiskIOStats:
-        """返回进程内页 I/O 计数；调试读取单独排除。"""
+        """【前端特供】返回进程内页 I/O 计数；调试读取单独排除。"""
         with self._lock:
             return DiskIOStats(
                 page_reads=self._reads,
