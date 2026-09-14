@@ -14,6 +14,7 @@ from yoursql.storage.index.ordering import (
     _compare_values,
     _key,
     _memory_key,
+    _lower_bound,
 )
 from yoursql.storage.index.protocols import _TreeContext
 from yoursql.storage.index.types import IndexEntry, IndexPayloadEntry
@@ -30,14 +31,11 @@ class _TreeSearchMixin(_TreeContext):
         while not node.leaf:
             if not node.children:
                 raise StorageError(f"索引内部页 {node.page_id} 没有子页")
-            child_index = 0
-            while (
-                child_index < len(node.keys)
-                and _compare_keys(target, node.keys[child_index]) > 0
-            ):
-                child_index += 1
+            # WHY：内部页的 keys 是有序分隔键，children 数量恒为 keys + 1；
+            # 用 lower_bound 找到第一个不小于目标键的分隔位置，避免宽节点逐项扫描。
+            child_index = _lower_bound(node.keys, target)
             node = self._read_node(
-                node.children[min(child_index, len(node.children) - 1)],
+                node.children[child_index],
                 readonly=readonly,
             )
         return node
