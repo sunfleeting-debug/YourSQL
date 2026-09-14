@@ -577,6 +577,12 @@ def test_performance_monitor_routes_expose_query_and_storage_diagnostics(service
         assert detail_response["data"]["stages"]
     else:
         assert "stages" not in detail_response["data"]
+    status, statistics_response = client.request(
+        f"/api/monitor/queries/{query_id}/statistics"
+    )
+    assert status == 200
+    assert statistics_response["data"]["query_id"] == query_id
+    assert "stages" not in statistics_response["data"]
     status, history_response = client.request(
         f"/api/monitor/queries/{query_id}/history?limit=10"
     )
@@ -594,6 +600,11 @@ def test_performance_monitor_routes_expose_query_and_storage_diagnostics(service
     assert status == 200
     assert reader_history["data"]["current"]["user"] == "reader"
     assert all(item["user"] == "reader" for item in reader_history["data"]["items"])
+    status, reader_statistics = reader.request(
+        f"/api/monitor/queries/{reader_query_id}/statistics"
+    )
+    assert status == 200
+    assert reader_statistics["data"]["user"] == "reader"
     assert reader.request("/api/monitor/summary")[0] == 403
 
 

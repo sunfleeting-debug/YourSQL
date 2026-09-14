@@ -1212,6 +1212,18 @@ class Workbench:
                 user=session.connection.user.name,
             )
 
+    def monitoring_statistics(self, session: WebSession, query_id: str) -> JsonObject:
+        """【前端特供】返回当前用户单条查询的轻量执行统计。"""
+        with self.connection(session):
+            task_id, separator, raw_index = query_id.rpartition(":")
+            if not separator or not raw_index.isdigit():
+                raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
+            self.task(session, task_id, result_index=int(raw_index))
+            return self.monitor.statistics(
+                query_id,
+                user=session.connection.user.name,
+            )
+
     def close(self) -> None:
         """关闭资源并释放关联状态。"""
         with self._lock:

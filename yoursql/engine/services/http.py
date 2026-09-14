@@ -531,6 +531,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 and len(parts) == 5
                 and parts[1] == "monitor"
                 and parts[2] == "queries"
+                and parts[4] == "statistics"
+            ):
+                data = workbench.monitoring_statistics(session, parts[3])
+            elif (
+                not post
+                and len(parts) == 5
+                and parts[1] == "monitor"
+                and parts[2] == "queries"
                 and parts[4] == "history"
             ):
                 data = workbench.monitoring_history(

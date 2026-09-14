@@ -56,6 +56,10 @@ def test_performance_monitor_aggregates_and_persists_slow_queries(
         assert "stages" not in slow_queries["items"][0]
         assert list(tmp_path.glob("performance-*.jsonl"))
         assert monitor.detail("slow")["plan"] == {"operator": "SeqScan"}
+        statistics = monitor.statistics("slow")
+        assert statistics["query_id"] == "slow"
+        assert "stages" not in statistics
+        assert "plan" not in statistics
         history = monitor.history("slow")
         assert history["current"]["query_id"] == "slow"
         assert [item["query_id"] for item in history["items"]] == ["fast", "slow"]

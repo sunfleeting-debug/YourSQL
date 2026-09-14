@@ -97,7 +97,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
     if (mode !== 'statistics' || !queryId) return
     const controller = new AbortController()
     setStatisticsLoading(true)
-    api<ExecutionStatisticsResponse>(`/api/monitor/queries/${encodeURIComponent(queryId)}/history?limit=30`, undefined, controller.signal)
+    api<ExecutionStatisticsResponse>(`/api/monitor/queries/${encodeURIComponent(queryId)}/statistics`, undefined, controller.signal)
       .then(value => setStatistics(value))
       .catch(requestError => {
         if (!controller.signal.aborted) setStatisticsError(errorMessage(requestError))

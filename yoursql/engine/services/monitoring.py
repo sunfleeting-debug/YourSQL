@@ -198,6 +198,17 @@ class PerformanceMonitor:
                     return _copy_json_object(record)
         raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
 
+    def statistics(self, query_id: str, *, user: str | None = None) -> JsonObject:
+        """【前端特供】返回单条查询的轻量执行统计，不包含历史和诊断产物。"""
+        with self._lock:
+            for record in self._records:
+                if record.get("query_id") != query_id:
+                    continue
+                if user is not None and record.get("user") != user:
+                    continue
+                return _copy_lightweight_record(record)
+        raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
+
     def history(
         self, query_id: str, *, limit: int = 30, user: str | None = None
     ) -> JsonObject:
