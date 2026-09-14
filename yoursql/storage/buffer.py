@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from threading import RLock
+from typing import Callable
 
 from ..common.errors import StorageError
 from ..common.trace import current_trace
 from .disk import DiskManager
 from .page import Page, PageType
+from .wal import WriteAheadLog
 
 
 @dataclass
@@ -22,10 +24,23 @@ class BufferFrame:
 
 
 class BufferPool:
-    """缓存磁盘页并记录命中、缺页和淘汰统计。"""
+    """缓存磁盘页并记录命中、缺页和淘汰统计。
+
+    接入日志后额外承担两条职责：
+
+    * **写前日志规则**：脏页在写回磁盘前，必须先把它对应的日志刷到稳定存储
+      （见 ``_write_back``），否则日志无法重放/撤销这次修改。
+    * **前像捕获**：页第一次被当前事务修改时，把修改前的内容交给前像回调，
+      供事务回滚与崩溃恢复使用。
+    """
 
     def __init__(
-        self, disk: DiskManager, capacity: int = 64, replacement_policy: str = "lru"
+        self,
+        disk: DiskManager,
+        capacity: int = 64,
+        replacement_policy: str = "lru",
+        *,
+        wal: WriteAheadLog | None = None,
     ) -> None:
         if capacity < 1:
             raise ValueError("缓存容量必须为正数")
@@ -35,6 +50,11 @@ class BufferPool:
         self.disk = disk
         self.capacity = capacity
         self.replacement_policy = policy
+        self.wal = wal
+        # HOW：前像回调由运行时注入，内部会查询"当前线程所属事务"，
+        # 因此缓冲池本身不需要知道事务对象。返回值是该页被赋予的日志序号，
+        # 缓冲池把它写回页头，从而让"日志先于数据页落盘"可以被校验。
+        self.image_sink: Callable[[int, bytes, int], int] | None = None
         # HOW：`_frames` 自身按淘汰优先级排序（队首最先淘汰），使淘汰 O(1) 摊还。
         self._frames: OrderedDict[int, BufferFrame] = OrderedDict()
         self._clock = 0
@@ -97,6 +117,34 @@ class BufferPool:
             candidates.sort(key=lambda item: (item[1].last_used, item[0]))
         return [page_id for page_id, _ in candidates]
 
+    def _write_back(self, frame: BufferFrame) -> None:
+        """按写前日志规则把脏页写回磁盘。
+
+        WHY：日志必须先于数据页落盘，否则崩溃后既无法用日志补齐这次修改，
+        也无法把它撤销——磁盘上会出现“无日志可解释的改动”。
+        """
+
+        if self.wal is not None and self.wal.enabled:
+            self.wal.ensure_persisted(frame.page.lsn)
+        self.disk.write(frame.page)
+        frame.dirty = False
+
+    def _capture_image(self, page_id: int, previous: Page | None) -> int:
+        """把修改前的页内容交给当前事务，返回该页对应的日志序号（无事务时 0）。"""
+
+        sink = self.image_sink
+        if sink is None:
+            return 0
+        snapshot = previous
+        if snapshot is None:
+            # HOW：页不在缓存中时（极少见，通常是已被淘汰后又被直接改写），
+            # 只能从磁盘取当前内容作为前像。
+            try:
+                snapshot = self.disk.peek(page_id)
+            except StorageError:
+                return 0
+        return sink(page_id, snapshot.to_bytes(), snapshot.lsn)
+
     def _evict_one(self) -> None:
         """淘汰队首第一个未 pin 的页。
 
@@ -114,7 +162,7 @@ class BufferPool:
             raise StorageError("缓存已满且所有页都被 pin")
         page_id, frame = victim
         if frame.dirty:
-            self.disk.write(frame.page)
+            self._write_back(frame)
         del self._frames[page_id]
         self._evictions += 1
 
@@ -150,16 +198,26 @@ class BufferPool:
             if trace is not None:
                 trace.event("put_page", page.page_id, dirty=dirty)
             frame = self._frames.get(page.page_id)
-            if frame is None:
+            if frame is not None:
+                # HOW：前像必须在覆盖帧内容之前取，因此先算 LSN 再赋值。
+                if dirty:
+                    lsn = self._capture_image(page.page_id, frame.page)
+                    if lsn:
+                        page.lsn = lsn
+                frame.page = page
+                frame.dirty = frame.dirty or dirty
+                self._touch(frame)
+            else:
+                if dirty:
+                    # HOW：页不在缓存里，磁盘内容才是"修改前"的样子。
+                    lsn = self._capture_image(page.page_id, None)
+                    if lsn:
+                        page.lsn = lsn
                 if len(self._frames) >= self.capacity:
                     self._evict_one()
                 self._clock += 1
                 frame = BufferFrame(page, 0, dirty, self._clock, self._clock)
                 self._frames[page.page_id] = frame
-            else:
-                frame.page = page
-                frame.dirty = frame.dirty or dirty
-                self._touch(frame)
             self._mark_changed(page.page_id)
 
     def pin_page(self, page_id: int) -> Page:
@@ -187,14 +245,26 @@ class BufferPool:
             if frame is None:
                 return
             if frame.dirty:
-                self.disk.write(frame.page)
-                frame.dirty = False
+                self._write_back(frame)
 
     def flush_all(self) -> None:
         with self._lock:
             for page_id in tuple(self._frames):
                 self.flush_page(page_id)
             self.disk.sync()
+
+    def restore_page(self, page_id: int, raw: bytes) -> None:
+        """用日志前像把页恢复成旧内容，并同步缓存与磁盘。
+
+        HOW：先直接写盘（跳过脏页标记），再让缓存帧失效后按需重新装载，
+        避免缓存里残留回滚前的新内容。
+        """
+
+        with self._lock:
+            page = Page.from_bytes(raw, page_size=self.disk.page_size)
+            self.disk.write(page)
+            self._frames.pop(int(page_id), None)
+            self._mark_changed(int(page_id))
 
     def new_page(
         self, page_type: PageType = PageType.FREE, payload: bytes = b""
@@ -277,7 +347,9 @@ class BufferPool:
             frame = self._frames.get(page_id)
             if frame is not None:
                 page = frame.page
-                return Page(page.page_id, page.page_size, page.page_type, page.payload)
+                return Page(
+                    page.page_id, page.page_size, page.page_type, page.payload, page.lsn
+                )
             return self.disk.peek(page_id)
 
     def __contains__(self, page_id: object) -> bool:

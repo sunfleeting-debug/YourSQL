@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 from threading import RLock
-from typing import Mapping
+from typing import Callable, Mapping
 
 from ..common.errors import StorageError
 from ..common.trace import current_trace
@@ -31,6 +31,9 @@ class DiskManager:
         self._free_pages: set[int] = set()
         self._next_page_id = 1
         self._named_pages: dict[str, int] = {}
+        # HOW：页分配既会改 superblock 又绕过缓冲池，事务无法通过缓存观测到它；
+        # 这里留一个回调，让运行时把"本事务新分配的页号"记下来，回滚时精确回收。
+        self.allocate_hook: Callable[[int], None] | None = None
         if exists:
             self._load_superblock()
         else:
@@ -146,6 +149,8 @@ class DiskManager:
             page = Page(page_id, self.page_size, page_type, payload)
             self._write_raw(page)
             self._write_superblock()
+            if self.allocate_hook is not None:
+                self.allocate_hook(page_id)
             return page
 
     def free(self, page_id: int) -> None:
