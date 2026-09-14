@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Callable, TypeVar
 
-from ...common import ExecutionResult, JsonObject, YourSQLError, Value
+from ...common import ExecutionResult, JsonObject, YourSQLError, Value, json_safe
 from ...sql.ast import ColumnRef, Explain, Select, Show, Star, Statement
 from ...sql.binder import Binder
 from ...sql.compiler import CompilationResult
@@ -155,6 +155,16 @@ def _edit_distance(left: str, right: str) -> int:
     return previous[-1]
 
 
+def _common_prefix_length(left: str, right: str) -> int:
+    """两个词从首字符起相同的长度，用于打破编辑距离相同时的平局。"""
+
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
 def _keyword_suggestion(
     source: SQLSlice, error: YourSQLError
 ) -> tuple[str, int, int, str] | None:
@@ -176,7 +186,18 @@ def _keyword_suggestion(
         if token.kind is not TokenKind.IDENTIFIER:
             continue
         word = token.lexeme.upper()
-        suggestion = min(keywords, key=lambda item: _edit_distance(word, item))
+        # HOW：`keywords` 是 set，迭代顺序随进程哈希种子变化，所以平局必须显式定序：
+        # 先看解析器是否明确期待，再比公共前缀长度（`wher` 对 WHERE 前缀 4、对 WHEN 前缀 2），
+        # 最后按字典序兜底。否则同一句话在不同进程会给出不同的建议词。
+        suggestion = min(
+            keywords,
+            key=lambda item: (
+                _edit_distance(word, item),
+                0 if item in expected_words else 1,
+                -_common_prefix_length(word, item),
+                item,
+            ),
+        )
         distance = _edit_distance(word, suggestion)
         # 短词只接受一个编辑差异，避免把合法的表名误报成关键字。
         if distance > max(1, min(2, len(word) // 3)) or suggestion == word:
@@ -282,7 +303,7 @@ def stage(
         "name": name,
         "status": status,
         "data": data,
-        "text": json.dumps(data, ensure_ascii=False, indent=2)
+        "text": json.dumps(json_safe(data), ensure_ascii=False, indent=2)
         if data is not None
         else reason or "",
         "duration_ms": duration_ms,

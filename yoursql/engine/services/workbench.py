@@ -22,6 +22,7 @@ from ...common import (
     JsonObject,
     YourSQLError,
     RuntimeConfig,
+    json_safe,
 )
 from ...common.trace import ExecutionTrace, current_trace
 from ...sql.ast import Explain, Select, Show
@@ -735,11 +736,13 @@ class Workbench:
                         retained_bytes = 0
                         for row in result.rows[: task.row_limit]:
                             size = len(
-                                json.dumps(row, ensure_ascii=False).encode("utf-8")
+                                json.dumps(json_safe(row), ensure_ascii=False).encode(
+                                    "utf-8"
+                                )
                             )
                             if size + retained_bytes > remaining_bytes:
                                 break
-                            rows.append(list(row))
+                            rows.append(json_safe(list(row)))
                             retained_bytes += size
                         remaining_bytes -= retained_bytes
                         plan_estimate = None

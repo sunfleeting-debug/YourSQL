@@ -26,7 +26,8 @@ from ...sql.ast import Explain, Select, Statement
 from ...sql.binder import Binder
 from ...sql.compiler import CompilationResult, Compiler
 from ...sql.lexer import tokenize
-from ...sql.parser import Parser
+from ...sql.diagnostics import ParseOutcome
+from ...sql.parser import Parser, parse_recovering
 from ...planner.logical import LogicalPlanNode, plan_from_statement
 from ...planner.optimizer import CostEstimate, Optimizer, StatisticsStore
 from ...planner.physical import PhysicalPlanNode, PlanNode
@@ -118,6 +119,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         audit_path: str | os.PathLike[str] | None = None,
         user: str = "admin",
         password: str = "admin",
+        disabled_rules: Iterable[str] = (),
     ) -> None:
         selected_page_size = None
         if config is None and path is not None and str(path) != ":memory:":
@@ -169,7 +171,11 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self.audit = AuditLog(audit_path)
         self.session = Session(self.rbac.authenticate(user, password), self.rbac)
         self.optimizer = Optimizer(
-            StatisticsStore(), buffer_pool_pages=self.config.buffer_pool_size
+            StatisticsStore(),
+            buffer_pool_pages=self.config.buffer_pool_size,
+            # HOW：允许从外部（CLI / 演示脚本）关掉若干条优化规则，
+            # 用来现场对比"同一语句、开/关某条规则"的计划差异。
+            disabled_rules=tuple(disabled_rules),
         )
         self.compiler = Compiler()
         self._rebuild_indexes()
@@ -468,6 +474,15 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
             results.append(self._execute_compilation(compilation, sql=cache_sql))
         return results
+
+    def check_script(self, sql: str) -> ParseOutcome:
+        """只做词法与语法检查，把脚本里的错误一次报全（不绑定、不执行、不改目录）。
+
+        WHY：``execute_script`` 是首错即抛（生产路径要快速失败），但"改一个错跑一次"
+        对准备验收脚本、批量导入 SQL 极其低效。这里给出一条把错误收全的只读通道。
+        """
+
+        return parse_recovering(sql)
 
     def compile(self, sql: str) -> CompilationResult:
         """使用当前目录编译一条 SQL，不执行也不修改目录。"""
