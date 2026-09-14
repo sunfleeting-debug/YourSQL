@@ -92,6 +92,16 @@ export function pipelineWorkspaceClassName(resizing: boolean): string {
   return classNames('pipeline-workspace', resizing && 'is-resizing')
 }
 
+/** 可拖拽的数据库侧栏边界。 */
+export function sidebarResizeHandleClassName(resizing: boolean): string {
+  return classNames('sidebar-resize-handle', resizing && 'is-resizing')
+}
+
+/** 存储页右侧详情栏：拖拽时扩大边界提示。 */
+export function storageDetailPanelClassName(resizing: boolean): string {
+  return classNames('storage-detail-panel', resizing && 'is-resizing')
+}
+
 /** 在线/离线指示灯。 */
 export function statusDotClassName(online: boolean): string {
   return classNames('status-dot', online ? 'online' : 'offline')

@@ -54,7 +54,7 @@ export interface QueryWorkspaceProps {
   onResultIndex: (index: number) => void
   onPipelineStages: (stages: Stage[]) => void
   onTogglePipeline: () => void
-  onBeginPipelineResize: (event: ReactPointerEvent<HTMLDivElement>) => void
+  onBeginPipelineResize: (event: ReactPointerEvent<HTMLElement>) => void
   onClosePipeline: () => void
   notify: (message: string, error?: boolean) => void
 }

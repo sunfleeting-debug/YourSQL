@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties } from 'react'
 import type { EditorView } from '@codemirror/view'
 import { api, ApiError, errorMessage, upload } from './api'
 import { DEFAULT_DATABASE_CONFIG, FIRST_QUERY_ID, INITIAL_SQL, createQueryTab } from './app/constants'
@@ -16,7 +16,8 @@ import { StoragePanel } from './components/storage'
 import { PerformancePanel } from './components/monitoring'
 import WorkbenchStatusBar from './components/layout/WorkbenchStatusBar'
 import { currentStatement, formatSQL } from './sql'
-import { workbenchClassName } from './view-classes'
+import { useResizableWidth } from './use-resizable-width'
+import { sidebarResizeHandleClassName, workbenchClassName } from './view-classes'
 import type { DBError, SessionInfo } from './types/common'
 import type { DatabaseFiles, DatabaseSwitch, Dialect, Metadata } from './types/catalog'
 import type { History, QueryTask, Stage } from './types/query'
@@ -48,8 +49,8 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false)
   const [pipelineStages, setPipelineStages] = useState<Stage[]>([])
   const [pipelineOpen, setPipelineOpen] = useState(false)
-  const [pipelineWidth, setPipelineWidth] = useState(500)
-  const [pipelineResizing, setPipelineResizing] = useState(false)
+  const pipelinePane = useResizableWidth({ initialWidth: 500, minWidth: 320, maxWidth: 760, edge: 'left' })
+  const sidebarPane = useResizableWidth({ initialWidth: null, minWidth: 196, maxWidth: 360, edge: 'right' })
 
   // 数据库选择器与存储页配置
   const [toast, setToast] = useState<ToastState | null>(null)
@@ -70,7 +71,6 @@ export default function App() {
   const databaseDialog = useRef<HTMLDialogElement>(null)
   const settingsDialog = useRef<DatabaseSettingsDialogHandle>(null)
   const sources = useRef(new Map<string, RunSource>())
-  const pipelineResizeStart = useRef<{ x: number; width: number } | null>(null)
 
   // 从当前标签派生的视图数据
   const activeQuery = queryTabs.find(tab => tab.id === activeQueryId) ?? queryTabs[0]
@@ -234,29 +234,6 @@ export default function App() {
       return () => clearTimeout(timer)
     }
   }, [toast])
-  useEffect(() => {
-    if (!pipelineResizing) return
-    const move = (event: globalThis.PointerEvent) => {
-      const start = pipelineResizeStart.current
-      if (!start) return
-      setPipelineWidth(Math.min(760, Math.max(320, start.width + start.x - event.clientX)))
-    }
-    const stop = () => {
-      pipelineResizeStart.current = null
-      setPipelineResizing(false)
-    }
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', stop)
-    return () => {
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', stop)
-    }
-  }, [pipelineResizing])
-
   useEffect(() => {
     if (!activeId || !activeRunTabId) return
     const runTabId = activeRunTabId
@@ -526,11 +503,6 @@ export default function App() {
     if (mode === 'monitor') setPipelineOpen(false)
     startModeTransition(() => setWorkspaceMode(mode))
   }
-  function beginPipelineResize(event: ReactPointerEvent<HTMLDivElement>) {
-    event.preventDefault()
-    pipelineResizeStart.current = { x: event.clientX, width: pipelineWidth }
-    setPipelineResizing(true)
-  }
   // 应用壳层渲染
   return (
     <div className="app-shell">
@@ -564,11 +536,26 @@ export default function App() {
         <>
           <main
             className={workbenchClassName({ leftOpen, storage: workspaceMode === 'storage', pipelineOpen })}
-            style={{ '--pipeline-width': String(pipelineWidth) + 'px' } as CSSProperties}
+            style={
+              {
+                '--pipeline-width': `${pipelinePane.width}px`,
+                ...(sidebarPane.width === null ? {} : { '--sidebar-width': `${sidebarPane.width}px` })
+              } as CSSProperties
+            }
             aria-busy={isModePending}
           >
             {leftOpen && (
               <aside className="sidebar">
+                <div
+                  className={sidebarResizeHandleClassName(sidebarPane.resizing)}
+                  role="separator"
+                  aria-label="调整数据库面板宽度"
+                  aria-orientation="vertical"
+                  aria-valuemin={196}
+                  aria-valuemax={360}
+                  aria-valuenow={sidebarPane.width ?? undefined}
+                  onPointerDown={sidebarPane.beginResize}
+                />
                 <SchemaBrowser
                   database={session.database}
                   tables={tables}
@@ -611,8 +598,8 @@ export default function App() {
               history={history}
               pipelineStages={pipelineStages}
               pipelineOpen={pipelineOpen}
-              pipelineWidth={pipelineWidth}
-              pipelineResizing={pipelineResizing}
+              pipelineWidth={pipelinePane.width ?? 500}
+              pipelineResizing={pipelinePane.resizing}
               pollError={pollError}
               storagePane={
                 storageVisited && (
@@ -664,7 +651,7 @@ export default function App() {
               onResultIndex={setActiveResultIndex}
               onPipelineStages={updatePipelineStages}
               onTogglePipeline={() => setPipelineOpen(open => !open)}
-              onBeginPipelineResize={beginPipelineResize}
+              onBeginPipelineResize={pipelinePane.beginResize}
               onClosePipeline={() => setPipelineOpen(false)}
               notify={notify}
             />
