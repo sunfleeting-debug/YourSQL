@@ -5,7 +5,7 @@ import type { ChangeEvent, FormEvent } from 'react'
 import { FilePlus2, FolderOpen, RefreshCw, X } from 'lucide-react'
 import type { DatabaseFile, DatabaseFiles } from '../../types/catalog'
 import type { DatabaseCreateConfig, DatabaseDialogMode } from '../../app/types'
-import { formatFileSize, isReplacementPolicy } from './utils'
+import { formatFileSize, isPayloadCodec, isReplacementPolicy } from './utils'
 
 export interface DatabasePickerProps {
   files: DatabaseFiles | null
@@ -258,6 +258,20 @@ const DatabasePickerDialog = forwardRef<HTMLDialogElement, DatabasePickerProps>(
                 >
                   <option value="lru">LRU</option>
                   <option value="fifo">FIFO</option>
+                </select>
+              </label>
+              <label>
+                Payload 编码
+                <select
+                  value={createConfig.payload_codec}
+                  onChange={event => {
+                    const codec = event.target.value
+                    if (isPayloadCodec(codec)) onCreateConfigChange({ ...createConfig, payload_codec: codec })
+                  }}
+                  title="新建后写入 superblock，已有数据库不能直接切换"
+                >
+                  <option value="json">JSON 兼容</option>
+                  <option value="manual">手写二进制</option>
                 </select>
               </label>
             </div>

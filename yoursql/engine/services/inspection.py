@@ -221,7 +221,7 @@ def storage_snapshot(
         "indexes": [index.to_dict() for index in database.catalog.indexes()][:limit],
         "limitations": [
             "B+Tree 的内部页、叶子页、分裂/合并和 key/RowId 均已落盘。",
-            "HEAP 页统一采用双向槽式布局，记录区保存 JSON UTF-8 行数据。",
+            f"HEAP 页统一采用双向槽式布局，记录区保存 {database.payload_codec.name} 行数据。",
             "I/O 指标是本进程页接口调用计数，不是操作系统物理磁盘或设备吞吐量。",
         ],
     }
@@ -413,11 +413,11 @@ def inspect_page(
                         "byte_length": byte_length,
                         "slot_directory_offset": directory_offset,
                         "slot_directory_length": SLOT_ENTRY_SIZE,
-                        "storage_encoding": "JSON UTF-8 row bytes",
+                        "storage_encoding": f"{database.payload_codec.name} row payload bytes",
                     }
                 )
         result["layout"] = (
-            "双向槽式页：槽目录向前增长，空闲片段按真实范围分布，JSON UTF-8 记录区从页尾向前增长。"
+            f"双向槽式页：槽目录向前增长，空闲片段按真实范围分布，{database.payload_codec.name} 记录区从页尾向前增长。"
         )
         result["slots"] = slot_rows
         result["total_slots"] = len(slotted.slots)

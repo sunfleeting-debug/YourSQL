@@ -1,7 +1,7 @@
 /** 应用页头：连接状态、工作区模式和当前用户操作。 */
 
 import { Braces, Database, FolderOpen, HardDrive, LogOut, ShieldCheck, UserRound } from 'lucide-react'
-import type { SessionInfo } from '../../types/common'
+import type { PayloadCodecName, SessionInfo } from '../../types/common'
 import type { WorkspaceMode } from '../../app/types'
 import { statusDotClassName } from '../../view-classes'
 
@@ -10,6 +10,7 @@ export interface AppHeaderProps {
   online: boolean
   running: boolean
   databasePickerBusy: boolean
+  payloadCodec: PayloadCodecName | null
   workspaceMode: WorkspaceMode
   modePending: boolean
   onOpenDatabasePicker: () => void
@@ -23,6 +24,7 @@ export default function AppHeader({
   online,
   running,
   databasePickerBusy,
+  payloadCodec,
   workspaceMode,
   modePending,
   onOpenDatabasePicker,
@@ -41,6 +43,9 @@ export default function AppHeader({
         <span title={session?.database_path ?? undefined}>
           {online ? (session ? `已连接 · ${session.database_path ?? session.database}` : '已连接') : '服务不可用'}
         </span>
+        {session && payloadCodec && (
+          <code title="该数据库的 payload 编码记录在 superblock 中">payload:{payloadCodec === 'manual' ? '手写' : 'JSON'}</code>
+        )}
         {session && (
           <button className="database-switch" onClick={onOpenDatabasePicker} disabled={running || databasePickerBusy} title="选择或新建数据库">
             <FolderOpen size={13} />

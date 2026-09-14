@@ -1,6 +1,6 @@
 /** 数据库目录、文件和 SQL 方言的响应模型。 */
 
-import type { JsonValue } from './common'
+import type { JsonValue, PayloadCodecName } from './common'
 
 export interface Column {
   name: string
@@ -109,6 +109,7 @@ export interface DatabaseSwitch {
 }
 
 export interface Dialect {
+  payload_codec: PayloadCodecName
   keywords: string[]
   types: string[]
   functions: string[]

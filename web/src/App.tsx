@@ -529,6 +529,7 @@ export default function App() {
         online={online}
         running={running}
         databasePickerBusy={databasePickerBusy}
+        payloadCodec={dialect?.payload_codec ?? null}
         workspaceMode={workspaceMode}
         modePending={isModePending}
         onOpenDatabasePicker={() => void openDatabasePicker()}

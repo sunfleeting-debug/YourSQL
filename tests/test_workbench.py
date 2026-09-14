@@ -228,6 +228,7 @@ def test_database_path_selection_and_creation_with_config(tmp_path: Path) -> Non
             })
             assert status == 201 and response["data"]["config"] == {
                 "page_size": 8192, "buffer_pool_size": 32, "replacement_policy": "fifo",
+                "payload_codec": "json",
             }
             assert created_path.is_file()
             assert client.request("/api/session")[0] == 401

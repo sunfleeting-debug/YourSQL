@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator
 
+from ..common.codec import PayloadCodec, PayloadCodecError, decode_payload
+from ..common.codec import payload_codec as get_payload_codec
 from ..common.errors import ExecutionError, StorageError
 from ..common.types import PageId, RowId
 from .page import Page, PageType
@@ -183,7 +184,12 @@ def _lower_bound(keys: list[Key], target: Key) -> int:
     return low
 
 
-def _entry_payload_size(key: Key, row_id: RowId, payload: Iterable[object] = ()) -> int:
+def _entry_payload_size(
+    key: Key,
+    row_id: RowId,
+    payload: Iterable[object] = (),
+    codec: PayloadCodec | str = "json",
+) -> int:
     """单条目在叶页 JSON 载荷里的字节数（含分隔逗号）；覆盖列值一并计入。
 
     HOW：`bulk_load` 用它做增量容量核算，避免“每行都序列化整块候选节点”。
@@ -193,23 +199,37 @@ def _entry_payload_size(key: Key, row_id: RowId, payload: Iterable[object] = ())
     payload_values = list(payload)
     if payload_values:
         entry.append(payload_values)
-    encoded = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
-    return len(encoded) + 1
+    selected = codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
+    return len(selected.encode(entry)) + 1
 
 
-def _leaf_payload_overhead() -> int:
+def _leaf_payload_overhead(codec: PayloadCodec | str = "json") -> int:
     """叶页载荷里与条目无关的固定开销（取上界，宁宓勿溢）。"""
 
+    selected = codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
     return len(INDEX_MAGIC) + len(
-        '{"version":99,"kind":"leaf","level":0,"parent":1234567,"next":1234567,"prev":1234567,'
-        '"keys":[],"row_ids":[]}'
+        selected.encode(
+            {
+                "version": 99,
+                "kind": "leaf",
+                "level": 0,
+                "parent": 1234567,
+                "next": 1234567,
+                "prev": 1234567,
+                "keys": [],
+                "row_ids": [],
+            }
+        )
     )
 
 
-def _internal_payload_entry_size(key: Key, child_id: int) -> int:
+def _internal_payload_entry_size(
+    key: Key, child_id: int, codec: PayloadCodec | str = "json"
+) -> int:
     """内部页中“一个子页 + 对应分隔键”的字节数上界。"""
 
-    key_size = len(json.dumps(list(key), ensure_ascii=False, separators=(",", ":"))) + 1
+    selected = codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
+    key_size = len(selected.encode(list(key))) + 1
     return key_size + len(str(int(child_id))) + 4
 
 
@@ -310,7 +330,7 @@ class _IndexNode:
         ):
             raise StorageError(f"索引内部页 {self.page_id} 的分隔键未排序")
 
-    def payload(self) -> bytes:
+    def payload(self, codec: PayloadCodec | str = "json") -> bytes:
         """返回索引条目的覆盖列载荷。"""
         self.validate()
         value: dict[str, object] = {
@@ -332,16 +352,17 @@ class _IndexNode:
                 value["payloads"] = [list(payload) for payload in self.payloads]
         else:
             value["children"] = list(self.children)
+        selected = codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
         try:
-            encoded = json.dumps(
-                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
+            encoded = selected.encode(value)
+        except (PayloadCodecError, TypeError, ValueError) as exc:
             raise StorageError(f"索引页 {self.page_id} 含无法序列化的键值") from exc
         return INDEX_MAGIC + encoded
 
     @classmethod
-    def from_page(cls, page: Page) -> "_IndexNode":
+    def from_page(
+        cls, page: Page, preferred: PayloadCodec | str | None = None
+    ) -> "_IndexNode":
         """从数据库页恢复索引节点。"""
         if page.page_type is not PageType.INDEX:
             raise StorageError(f"页 {page.page_id} 不是 INDEX 页")
@@ -350,7 +371,7 @@ class _IndexNode:
         if not page.payload.startswith(INDEX_MAGIC):
             raise StorageError(f"索引页 {page.page_id} 的格式版本不受支持")
         try:
-            raw = json.loads(page.payload[len(INDEX_MAGIC) :].decode("utf-8"))
+            raw, _codec = decode_payload(page.payload[len(INDEX_MAGIC) :], preferred)
             if not isinstance(raw, dict) or int(raw.get("version", 0)) != INDEX_VERSION:
                 raise ValueError("版本不匹配")
             kind = str(raw.get("kind"))
@@ -395,7 +416,7 @@ class _IndexNode:
             return node
         except (
             UnicodeDecodeError,
-            json.JSONDecodeError,
+            PayloadCodecError,
             TypeError,
             ValueError,
             KeyError,
@@ -591,10 +612,15 @@ class BPlusTreeSnapshot:
         return result
 
 
-def index_page_info(page: Page, offset: int = 0, limit: int = 100) -> IndexPageInfo:
+def index_page_info(
+    page: Page,
+    offset: int = 0,
+    limit: int = 100,
+    codec: PayloadCodec | str | None = None,
+) -> IndexPageInfo:
     """返回有界的索引页结构，避免把整页重复展开到 HTTP 响应。"""
 
-    node = _IndexNode.from_page(page)
+    node = _IndexNode.from_page(page, codec)
     safe_offset = max(0, int(offset))
     safe_limit = max(1, int(limit))
     common = {
@@ -678,7 +704,7 @@ class BPlusTree:
         page = self._buffer_pool.peek_page(selected_root)
         if not page.payload:
             raise StorageError(f"索引根页 {selected_root} 为空")
-        node = _IndexNode.from_page(page)
+        node = _IndexNode.from_page(page, self.payload_codec)
         if node.parent is not None:
             raise StorageError(f"索引根页 {selected_root} 不能拥有父页")
 
@@ -698,6 +724,14 @@ class BPlusTree:
         return (
             self._buffer_pool.disk.page_size if self._buffer_pool is not None else 4096
         )
+
+    @property
+    def payload_codec(self) -> PayloadCodec:
+        """返回当前持久化索引使用的 payload 编解码器。"""
+
+        if self._buffer_pool is None:
+            return get_payload_codec("json")
+        return self._buffer_pool.disk.payload_codec
 
     def _ensure_alive(self) -> None:
         """检查索引仍处于可用状态。"""
@@ -728,10 +762,12 @@ class BPlusTree:
         if self._buffer_pool is None:
             raise StorageError("内存索引没有物理页")
         if readonly:
-            return _IndexNode.from_page(self._buffer_pool.peek_page(page_id))
+            return _IndexNode.from_page(
+                self._buffer_pool.peek_page(page_id), self.payload_codec
+            )
         page = self._buffer_pool.get_page(page_id, pin=True)
         try:
-            return _IndexNode.from_page(page)
+            return _IndexNode.from_page(page, self.payload_codec)
         finally:
             self._buffer_pool.unpin(page_id)
 
@@ -740,7 +776,7 @@ class BPlusTree:
         self._ensure_alive()
         if self._buffer_pool is None:
             raise StorageError("内存索引没有物理页")
-        payload = node.payload()
+        payload = node.payload(self.payload_codec)
         if len(payload) > self.page_size - Page.HEADER_SIZE:
             raise StorageError(f"索引页 {node.page_id} 超过页容量，请缩短索引键")
         self._buffer_pool.put_page(
@@ -761,11 +797,10 @@ class BPlusTree:
         if self._buffer_pool is not None and self._valid_index_page(page_id):
             self._buffer_pool.delete_page(page_id)
 
-    @staticmethod
-    def _node_fits(node: _IndexNode, page_size: int) -> bool:
+    def _node_fits(self, node: _IndexNode, page_size: int) -> bool:
         """判断索引节点是否能放入当前页。"""
         try:
-            payload_size = len(node.payload())
+            payload_size = len(node.payload(self.payload_codec))
             usable = page_size - Page.HEADER_SIZE
             if payload_size > usable:
                 return False
@@ -791,7 +826,7 @@ class BPlusTree:
         if not node.leaf and len(node.children) < 2:
             return True
         usable = self.page_size - Page.HEADER_SIZE
-        return len(node.payload()) < max(1, usable // 2)
+        return len(node.payload(self.payload_codec)) < max(1, usable // 2)
 
     def _empty_root(self) -> _IndexNode:
         """创建空的索引根节点。"""
@@ -1833,13 +1868,13 @@ class BPlusTree:
             # HOW：按“条目编码长度”做增量容量核算。原实现每行都复制当前块并调 `_node_fits`，
             # 而 `_node_fits` 会 json.dumps 整个候选节点 → O(行数 × 叶大小)，60k 行要十几分钟。
             usable = self.page_size - Page.HEADER_SIZE
-            leaf_overhead = _leaf_payload_overhead()
+            leaf_overhead = _leaf_payload_overhead(self.payload_codec)
             chunks: list[list[IndexPayloadEntry]] = []
             current: list[IndexPayloadEntry] = []
             used = leaf_overhead
             for entry in normalized_entries:
                 entry_bytes = _entry_payload_size(
-                    entry.key, entry.row_id, entry.payload
+                    entry.key, entry.row_id, entry.payload, self.payload_codec
                 )
                 if entry_bytes + leaf_overhead > usable:
                     raise StorageError("单条索引键和 RowId 超过页容量")
@@ -1888,13 +1923,13 @@ class BPlusTree:
                 return cached
 
             while len(level_children) > 1:
-                internal_overhead = _leaf_payload_overhead()
+                internal_overhead = _leaf_payload_overhead(self.payload_codec)
                 groups: list[list[int]] = []
                 current_children: list[int] = []
                 used = internal_overhead
                 for child_id in level_children:
                     entry_bytes = _internal_payload_entry_size(
-                        child_max_key(child_id), child_id
+                        child_max_key(child_id), child_id, self.payload_codec
                     )
                     if entry_bytes + internal_overhead > usable:
                         raise StorageError("索引内部节点无法容纳单个子页")

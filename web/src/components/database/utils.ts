@@ -1,4 +1,5 @@
 import type { ReplacementPolicy } from '../../types/storage'
+import type { PayloadCodecName } from '../../types/common'
 
 /** 数据库选择器共享的展示和路径规则。 */
 
@@ -15,4 +16,8 @@ export function siblingDatabasePath(path: string): string {
 
 export function isReplacementPolicy(value: string): value is ReplacementPolicy {
   return value === 'lru' || value === 'fifo'
+}
+
+export function isPayloadCodec(value: string): value is PayloadCodecName {
+  return value === 'json' || value === 'manual'
 }

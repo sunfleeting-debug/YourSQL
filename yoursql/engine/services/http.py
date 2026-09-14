@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import mimetypes
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 from ...common import JsonObject, JsonValue
+from ...common.codec import MANUAL_CONTENT_TYPE, PayloadCodecError, payload_codec
 from ...common.config import RuntimeConfig
 from ...common.errors import YourSQLError
 from ..runtime.database import Database
@@ -64,11 +64,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
         length: int,
         extra: dict[str, str] | None = None,
     ) -> None:
-        """构造 JSON 响应所需的通用响应头。"""
+        """构造 payload 响应所需的通用响应头。"""
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("X-Request-ID", self.request_id)
+        self.send_header(
+            "X-YourSQL-Payload-Codec",
+            "manual" if content_type.startswith("application/x-yoursql") else "json",
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "same-origin")
@@ -101,7 +105,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         envelope: bool = False,
         extra: dict[str, str] | None = None,
     ) -> None:
-        """发送 JSON 响应及其 HTTP 状态码。"""
+        """按 Accept 发送 JSON 或 manual 响应。"""
         if envelope:
             payload = {
                 "ok": status < 400,
@@ -109,10 +113,28 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 "data": payload if status < 400 else None,
                 "error": payload if status >= 400 else None,
             }
-        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode(
-            "utf-8"
-        )
-        self._headers(status, "application/json; charset=utf-8", len(encoded), extra)
+        accepts = {
+            item.split(";", 1)[0].strip().lower()
+            for item in self.headers.get("Accept", "").split(",")
+        }
+        if "application/x-yoursql" in accepts:
+            codec = payload_codec("manual")
+            content_type = MANUAL_CONTENT_TYPE
+        elif "application/json" in accepts:
+            codec = payload_codec("json")
+            content_type = "application/json; charset=utf-8"
+        else:
+            codec = payload_codec(self.server.settings.payload_codec)
+            content_type = (
+                MANUAL_CONTENT_TYPE
+                if codec.name == "manual"
+                else "application/json; charset=utf-8"
+            )
+        try:
+            encoded = codec.encode(payload)
+        except PayloadCodecError as exc:
+            raise YourSQLError("响应 payload 无法编码", "INTERNAL_ERROR") from exc
+        self._headers(status, content_type, len(encoded), extra)
         try:
             self.wfile.write(encoded)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -135,9 +157,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             raise YourSQLError("拒绝跨站请求", "AUTHORIZATION_ERROR")
 
     def _body(self) -> JsonObject:
-        """读取请求体并解析为 JSON 对象。"""
-        if self.headers.get_content_type() != "application/json":
-            raise YourSQLError("请使用 application/json", "BAD_REQUEST")
+        """读取 JSON 或 manual 请求体并解析为对象。"""
+        content_type = self.headers.get_content_type()
+        if content_type not in {"application/json", "application/x-yoursql"}:
+            raise YourSQLError("请使用 application/json 或 application/x-yoursql", "BAD_REQUEST")
         if self.headers.get("Transfer-Encoding"):
             raise YourSQLError("不支持分块请求体", "BAD_REQUEST")
         try:
@@ -148,9 +171,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
             raise YourSQLError(
                 f"请求体为空或超过 {self.server.max_body_bytes} B", "BAD_REQUEST"
             )
-        value = json.loads(self.rfile.read(length).decode("utf-8"))
+        codec = payload_codec(
+            "manual" if content_type == "application/x-yoursql" else "json"
+        )
+        try:
+            value = codec.decode(self.rfile.read(length))
+        except PayloadCodecError as exc:
+            raise YourSQLError("请求 payload 格式无效", "BAD_REQUEST") from exc
         if not isinstance(value, dict):
-            raise YourSQLError("JSON 请求体必须是对象", "BAD_REQUEST")
+            raise YourSQLError("请求 payload 必须是对象", "BAD_REQUEST")
         return value
 
     def _binary_body(self) -> bytes:
@@ -383,7 +412,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 path = self._string(body, "path", 4096)
                 options = {
                     key: body[key]
-                    for key in ("page_size", "buffer_pool_size", "replacement_policy")
+                    for key in (
+                        "page_size",
+                        "buffer_pool_size",
+                        "replacement_policy",
+                        "payload_codec",
+                    )
                     if key in body
                 }
                 data = workbench.create_database(session, path, options)
@@ -612,7 +646,10 @@ class DatabaseHTTPServer(ThreadingHTTPServer):
     ) -> None:
         """初始化实例所需的状态和依赖。"""
         self._initial_database = database
-        self.settings = settings or RuntimeConfig()
+        self.settings = settings or RuntimeConfig(
+            payload_codec=database.config.payload_codec,
+            database_config=database.config,
+        )
         self.max_body_bytes = self.settings.max_request_body_bytes
         self.max_sql_chars = self.settings.max_sql_chars
         self.workbench = Workbench(database, settings=self.settings)

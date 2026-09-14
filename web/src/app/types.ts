@@ -1,6 +1,7 @@
 /** App 级状态：只描述工作台编排，不混入后端响应模型。 */
 
 import type { DBError } from '../types/common'
+import type { PayloadCodecName } from '../types/common'
 import type { QueryTask } from '../types/query'
 import type { ReplacementPolicy } from '../types/storage'
 
@@ -34,6 +35,7 @@ export interface DatabaseCreateConfig {
   page_size: number
   buffer_pool_size: number
   replacement_policy: ReplacementPolicy
+  payload_codec: PayloadCodecName
 }
 
 export interface ToastState {

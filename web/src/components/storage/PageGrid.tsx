@@ -7,6 +7,7 @@ import type { JsonObject, JsonValue } from '../../types/common'
 import type { RawPayload, StorageLayout, StoragePageDetail, StorageRegion, StorageSlot } from '../../types/storage'
 import { pageCellClassName, pageCellSegmentClassName } from '../../view-classes'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
+import { inspectYsplPayload } from './raw-bytes'
 
 type PageGridValue = JsonValue | undefined
 
@@ -24,6 +25,12 @@ export interface PageGridSelection {
   explanation: string
   hex: string
   ascii: string
+  completeRange: string
+  completeByteCount: number
+  completeHex: string
+  completeAscii: string
+  completeKind: PageGridCellKind
+  yspl: ReturnType<typeof inspectYsplPayload>
   grouped: boolean
 }
 
@@ -845,11 +852,34 @@ function SlotSelectionInfo({ slots }: { slots: StorageSlot[] }) {
   )
 }
 
+function YsplSelectionInfo({ inspection }: { inspection: NonNullable<PageGridSelection['yspl']> }) {
+  return (
+    <section className="selected-payload-special" aria-label="YSPL 特殊解析">
+      <div className="selected-payload-special-heading">
+        <strong>{inspection.title}</strong>
+        <span>{inspection.summary}</span>
+      </div>
+      <dl>
+        {inspection.fields.map(field => (
+          <div key={field.label}>
+            <dt>{field.label}</dt>
+            <dd>
+              <code>{field.value}</code>
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
+
 export function PageGridSelectionDetail({ selection, detail }: { selection: PageGridSelection; detail?: StoragePageDetail }) {
   const rawDetailsOpen = useSyncExternalStore(subscribeRawByteDetails, getRawByteDetailsOpen, getRawByteDetailsOpen)
   const showRawDetails = selection.kind !== 'header' && selection.kind !== 'inner-header'
   const scopeLabel = selection.grouped ? '选中区域' : '选中格'
   const rawLabel = selection.grouped ? '选中区域 Hex / ASCII' : '选中格 Hex / ASCII'
+  const completeDiffers = selection.completeRange !== selection.range || selection.completeHex !== selection.hex
+  const showCompleteDetails = completeDiffers || selection.kind === 'header' || selection.kind === 'inner-header'
   return (
     <div className={`page-cell-detail ${selection.grouped ? 'group-detail' : ''}`} data-selection-scope={selection.grouped ? 'region' : 'cell'}>
       {detail && <PageStructureSummary detail={detail} selection={selection} />}
@@ -863,6 +893,34 @@ export function PageGridSelectionDetail({ selection, detail }: { selection: Page
       </div>
       <SlotSelectionInfo slots={selection.slotDetails} />
       {selection.explanation && <p>{selection.explanation}</p>}
+      {showCompleteDetails && (
+        <details
+          className="raw-byte-details complete-byte-details"
+          open={selection.completeKind === 'record' || selection.completeKind === 'legacy-slot'}
+        >
+          <summary>
+            <span>完整块 Hex / ASCII</span>
+            <small>
+              {selection.completeRange} B · {selection.completeByteCount} B · {kindLabel(selection.completeKind)}
+            </small>
+          </summary>
+          <div className="page-group-readout">
+            <dl>
+              <dt>Hex</dt>
+              <dd>
+                <pre>{selection.completeHex}</pre>
+              </dd>
+            </dl>
+            <dl>
+              <dt>ASCII</dt>
+              <dd>
+                <pre>{selection.completeAscii}</pre>
+              </dd>
+            </dl>
+          </div>
+        </details>
+      )}
+      {selection.yspl && <YsplSelectionInfo inspection={selection.yspl} />}
       {showRawDetails && (
         <details className="raw-byte-details" open={rawDetailsOpen} onToggle={event => setRawByteDetailsOpen(event.currentTarget.open)}>
           <summary>{rawLabel}</summary>
@@ -1049,6 +1107,16 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
       : ''
   const selectedExplanation = displayGroup ? groupDescription(displayGroup, binaryLayout) : cellDescription(selected, binaryLayout)
   const selectedSlotIds = displayGroup?.slotIds ?? selected.slotIds
+  const completeGroup = displayGroup ?? groups.get(cellGroupKey(selected))
+  const completeBytes = completeGroup?.bytes ?? selected.bytes
+  const completeMasked = completeGroup?.masked ?? selected.masked
+  const completeKind = completeGroup?.kind ?? selected.kind
+  const completeRange = completeGroup
+    ? rangeText(completeGroup.offset, completeGroup.end)
+    : rangeText(selected.offset, selected.offset + selected.bytes.length - 1)
+  const completeHex = completeMasked ? 'MASKED' : hex(completeBytes)
+  const completeAscii = completeMasked ? 'MASKED' : ascii(completeBytes)
+  const yspl = inspectYsplPayload(completeBytes, completeMasked)
   const layoutSlotDetails = new Map(
     (layout?.slots ?? []).map(slot => [
       slot.slot_id,
@@ -1081,12 +1149,23 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
     explanation: selectedExplanation,
     hex: displayHex,
     ascii: displayAscii,
+    completeRange,
+    completeByteCount: completeBytes.length,
+    completeHex,
+    completeAscii,
+    completeKind,
+    yspl,
     grouped: displayGroup !== undefined
   }
   useEffect(() => {
     onCellDetailRef.current?.(selection)
   }, [
     selection.ascii,
+    selection.completeAscii,
+    selection.completeByteCount,
+    selection.completeHex,
+    selection.completeKind,
+    selection.completeRange,
     selection.byteCount,
     selection.cellCount,
     selection.cellIndex,
@@ -1099,7 +1178,10 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
     selection.range,
     slotDetailsKey,
     selection.slotIds.join(','),
-    selection.slotText
+    selection.slotText,
+    selection.yspl?.title,
+    selection.yspl?.summary,
+    selection.yspl?.fields.map(field => `${field.label}:${field.value}`).join('|')
   ])
 
   return (

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .codec import PayloadCodecName, validate_payload_codec
 
 # HOW：命令行和 Web 工作台共用这个相对项目目录的默认文件位置，避免把运行数据散落在仓库根目录。
 DEFAULT_DATABASE_PATH = Path("data") / "workbench.db"
@@ -108,6 +109,12 @@ def _env_origins(name: str = "YOURSQL_ALLOWED_ORIGINS") -> tuple[str, ...]:
     return tuple(origin.strip() for origin in value.split(",") if origin.strip())
 
 
+def _env_payload_codec(name: str = "YOURSQL_PAYLOAD_CODEC") -> PayloadCodecName:
+    """读取 payload 编码开关。"""
+
+    return validate_payload_codec(_env_text(name, "json"))
+
+
 @dataclass(frozen=True)
 class DatabaseConfig:
     """控制页大小、缓存和字符串长度限制。"""
@@ -116,6 +123,7 @@ class DatabaseConfig:
     buffer_pool_size: int = 64
     replacement_policy: str = "lru"
     max_varchar_length: int = 1_000_000
+    payload_codec: PayloadCodecName = "json"
 
     @classmethod
     def from_environment(cls) -> "DatabaseConfig":
@@ -130,6 +138,7 @@ class DatabaseConfig:
             max_varchar_length=_env_int(
                 "YOURSQL_MAX_VARCHAR_LENGTH", cls.max_varchar_length
             ),
+            payload_codec=_env_payload_codec(),
         )
 
     def __post_init__(self) -> None:
@@ -142,6 +151,7 @@ class DatabaseConfig:
             raise ValueError("replacement_policy 只能是 lru 或 fifo")
         if self.max_varchar_length < 1:
             raise ValueError("max_varchar_length 必须为正数")
+        object.__setattr__(self, "payload_codec", validate_payload_codec(self.payload_codec))
 
 
 @dataclass(frozen=True)
@@ -167,6 +177,7 @@ class RuntimeConfig:
     history_entries: int = 200
     result_retention_bytes: int = 2_000_000
     trace_max_steps: int | None = None
+    payload_codec: PayloadCodecName = "json"
     database_config: DatabaseConfig = field(default_factory=DatabaseConfig)
 
     @classmethod
@@ -195,6 +206,7 @@ class RuntimeConfig:
                 "YOURSQL_RESULT_RETENTION_BYTES", 2_000_000
             ),
             trace_max_steps=_env_optional_int("YOURSQL_TRACE_MAX_STEPS"),
+            payload_codec=_env_payload_codec(),
             database_config=DatabaseConfig.from_environment(),
         )
         if config.default_query_timeout_seconds > config.max_query_timeout_seconds:
@@ -241,6 +253,7 @@ class RuntimeConfig:
             raise ValueError(f"{invalid} 必须为正数")
         if self.trace_max_steps is not None and self.trace_max_steps < 1:
             raise ValueError("trace_max_steps 必须为正数或 None")
+        object.__setattr__(self, "payload_codec", validate_payload_codec(self.payload_codec))
 
 
 def configure_logging(
