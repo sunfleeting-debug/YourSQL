@@ -515,8 +515,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     "1",
                     "true",
                 }
+                attention_only = query.get("attention", ["0"])[0].lower() in {
+                    "1",
+                    "true",
+                }
                 data = workbench.monitoring_queries(
-                    session, slow_only=slow_only, limit=min(limit, 500)
+                    session,
+                    slow_only=slow_only,
+                    attention_only=attention_only,
+                    limit=min(limit, 500),
                 )
             elif (
                 not post

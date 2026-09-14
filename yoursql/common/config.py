@@ -103,6 +103,20 @@ def _env_float(name: str, default: float, *, minimum: float = 0.001) -> float:
     return parsed
 
 
+def _env_ratio(name: str, default: float) -> float:
+    """读取 0–1 的比例环境变量。"""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+    if not 0 <= parsed <= 1:
+        raise ValueError(f"{name} 必须在 0–1 范围内")
+    return parsed
+
+
 def _env_optional_int(name: str, default: int | None = None) -> int | None:
     """读取可选整数环境变量；空值表示未启用限制。"""
     value = os.getenv(name)
@@ -185,6 +199,7 @@ class RuntimeConfig:
     history_entries: int = 200
     result_retention_bytes: int = 2_000_000
     slow_query_ms: float = 500
+    monitor_diagnostic_sample_rate: float = 0.01
     trace_max_steps: int | None = None
     payload_codec: PayloadCodecName = "json"
     database_config: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -215,6 +230,10 @@ class RuntimeConfig:
                 "YOURSQL_RESULT_RETENTION_BYTES", 2_000_000
             ),
             slow_query_ms=_env_float("YOURSQL_SLOW_QUERY_MS", cls.slow_query_ms),
+            monitor_diagnostic_sample_rate=_env_ratio(
+                "YOURSQL_MONITOR_DIAGNOSTIC_SAMPLE_RATE",
+                cls.monitor_diagnostic_sample_rate,
+            ),
             trace_max_steps=_env_optional_int("YOURSQL_TRACE_MAX_STEPS"),
             payload_codec=_env_payload_codec(),
             database_config=DatabaseConfig.from_environment(),
@@ -262,6 +281,8 @@ class RuntimeConfig:
         )
         if invalid is not None:
             raise ValueError(f"{invalid} 必须为正数")
+        if not 0 <= self.monitor_diagnostic_sample_rate <= 1:
+            raise ValueError("monitor_diagnostic_sample_rate 必须在 0–1 范围内")
         if self.trace_max_steps is not None and self.trace_max_steps < 1:
             raise ValueError("trace_max_steps 必须为正数或 None")
         object.__setattr__(self, "payload_codec", validate_payload_codec(self.payload_codec))

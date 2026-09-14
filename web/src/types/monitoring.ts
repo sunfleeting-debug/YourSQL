@@ -22,10 +22,17 @@ export interface StorageEvent {
 
 export interface MonitorSummary {
   threshold_ms: number
+  diagnostic_sample_rate: number
   sampled_queries: number
   successful_queries: number
   failed_queries: number
   slow_queries: number
+  execution_slow_queries: number
+  queue_slow_queries: number
+  latency_regressions: number
+  resource_warnings: number
+  diagnostic_samples: number
+  lightweight_samples: number
   avg_ms: number
   p50_ms: number
   p95_ms: number
@@ -41,6 +48,7 @@ export interface MonitorSummary {
   storage_policy: string
   retention: string
   log_failures: number
+  log_dropped: number
 }
 
 export interface MonitorQuery {
@@ -68,17 +76,24 @@ export interface MonitorQuery {
   operator: string | null
   error_code: string | null
   slow: boolean
+  execution_slow?: boolean
+  queue_slow?: boolean
+  latency_regression?: boolean
+  baseline_ms?: number | null
+  diagnostic_available?: boolean
+  resource_signals?: string[]
 }
 
 export interface MonitorDetail extends MonitorQuery {
-  stages: Stage[]
-  plan: JsonValue | null
-  plan_estimate: PlanEstimate | null
+  stages?: Stage[]
+  plan?: JsonValue | null
+  plan_estimate?: PlanEstimate | null
 }
 
 export interface MonitorQueriesResponse {
   items: MonitorQuery[]
   total: number
   slow_only: boolean
+  attention_only: boolean
   threshold_ms: number
 }

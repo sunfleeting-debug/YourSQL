@@ -186,7 +186,7 @@ SSH 场景执行 `python -m yoursql.cli --database demo.db --stdio`，由 OpenSS
 
 审计日志默认写入当前工作目录的 `logs/audit-YYYY-MM-DD.jsonl`，按日期分文件；目录会在首次写入时自动创建。通过 `Database(..., audit_path=...)` 可覆盖默认路径。标准日志配置仍可通过 `configure_logging(..., log_file=...)` 单独指定文件。
 
-工作台性能监控按查询采集排队、编译、执行、结果物化、页 I/O、缓存命中和淘汰数据；默认 `YOURSQL_SLOW_QUERY_MS=500`，超过阈值的查询摘要追加到 `logs/performance-YYYY-MM-DD.jsonl`。监控主指标是端到端 wall time，查询详情另显示优化器的 cost 估算（不是毫秒）。监控样本仅保留在当前服务进程内，重启后清空；`GET /api/monitor/summary`、`GET /api/monitor/queries` 和 `GET /api/monitor/queries/{query_id}` 需要 `SECURITY` 权限，前端“性能监控”工作区直接使用这些接口。SQL 和执行计划遵循工作台现有脱敏/有界返回规则。
+工作台性能监控按查询采集排队、编译、执行、结果物化、页 I/O、缓存命中和淘汰数据；默认 `YOURSQL_SLOW_QUERY_MS=500`，超过阈值的查询摘要异步追加到 `logs/performance-YYYY-MM-DD.jsonl`。普通查询只保留轻量看板字段；慢查询、页 I/O/缓存淘汰明显或扫描放大的查询自动保留完整诊断样本，其他普通查询按 `YOURSQL_MONITOR_DIAGNOSTIC_SAMPLE_RATE`（默认 1%）抽样。监控主指标是端到端 wall time，查询详情另显示优化器的 cost 估算（不是毫秒）。监控样本仅保留在当前服务进程内，重启后清空；`GET /api/monitor/summary`、`GET /api/monitor/queries` 和 `GET /api/monitor/queries/{query_id}` 需要 `SECURITY` 权限，其中查询列表传 `attention=1` 可同时筛出慢查询、I/O/缓存/扫描异常和延迟回归，前端“性能监控”工作区直接使用这些接口。SQL 和执行计划遵循工作台现有脱敏/有界返回规则。
 
 ## Web 数据库工作台
 

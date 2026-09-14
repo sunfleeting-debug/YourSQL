@@ -112,6 +112,7 @@ class Workbench:
         self.monitor = PerformanceMonitor(
             slow_threshold_ms=self.settings.slow_query_ms,
             log_dir=Path("logs"),
+            diagnostic_sample_rate=self.settings.monitor_diagnostic_sample_rate,
         )
         self._sessions: dict[str, WebSession] = {}
         self._tasks: OrderedDict[str, QueryTask] = OrderedDict()
@@ -1174,12 +1175,21 @@ class Workbench:
             return summary
 
     def monitoring_queries(
-        self, session: WebSession, *, slow_only: bool, limit: int
+        self,
+        session: WebSession,
+        *,
+        slow_only: bool,
+        limit: int,
+        attention_only: bool = False,
     ) -> JsonObject:
         """【前端特供】返回性能看板的查询列表。"""
         with self.connection(session):
             session.connection.authorize("SECURITY")
-            return self.monitor.queries(slow_only=slow_only, limit=limit)
+            return self.monitor.queries(
+                slow_only=slow_only,
+                attention_only=attention_only,
+                limit=limit,
+            )
 
     def monitoring_detail(self, session: WebSession, query_id: str) -> JsonObject:
         """【前端特供】返回单条查询的阶段明细和执行计划。"""
@@ -1194,5 +1204,6 @@ class Workbench:
             for task in self._tasks.values():
                 task.cancel.set()
         self._worker.shutdown(wait=True)
+        self.monitor.close()
         with self.database._lock:
             self._sessions.clear()

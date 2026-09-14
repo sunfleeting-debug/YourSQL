@@ -22,6 +22,7 @@ def test_runtime_config_reads_query_limits(monkeypatch) -> None:
     monkeypatch.setenv("YOURSQL_MAX_SQL_CHARS", "2048")
     monkeypatch.setenv("YOURSQL_MAX_STATEMENTS", "4")
     monkeypatch.setenv("YOURSQL_SLOW_QUERY_MS", "125.5")
+    monkeypatch.setenv("YOURSQL_MONITOR_DIAGNOSTIC_SAMPLE_RATE", "0.05")
     monkeypatch.setenv("YOURSQL_TRACE_MAX_STEPS", "")
 
     config = RuntimeConfig.from_environment()
@@ -29,4 +30,5 @@ def test_runtime_config_reads_query_limits(monkeypatch) -> None:
     assert config.max_sql_chars == 2048
     assert config.max_statements == 4
     assert config.slow_query_ms == 125.5
+    assert config.monitor_diagnostic_sample_rate == 0.05
     assert config.trace_max_steps is None

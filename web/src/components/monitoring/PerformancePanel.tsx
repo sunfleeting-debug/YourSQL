@@ -18,6 +18,17 @@ function queryTitle(query: MonitorQuery): string {
   return query.sql.replace(/\s+/g, ' ').trim() || '未命名语句'
 }
 
+function signalLabel(signal: string): string {
+  const labels: Record<string, string> = {
+    io: 'I/O',
+    cache_eviction: '缓存淘汰',
+    scan_amplification: '扫描放大',
+    queue: '排队过长',
+    latency_regression: '延迟回归'
+  }
+  return labels[signal] ?? signal
+}
+
 function TimingBar({ label, value, total, tone }: { label: string; value: number; total: number; tone: string }) {
   const width = total > 0 ? Math.min(100, (value / total) * 100) : 0
   return (
@@ -85,7 +96,7 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
     try {
       const [nextSummary, nextQueries] = await Promise.all([
         api<MonitorSummary>('/api/monitor/summary'),
-        api<MonitorQueriesResponse>('/api/monitor/queries?slow_only=1&limit=100')
+        api<MonitorQueriesResponse>('/api/monitor/queries?attention=1&limit=100')
       ])
       setSummary(nextSummary)
       setQueries(nextQueries.items)
@@ -139,10 +150,17 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
 
   const currentSummary = summary ?? {
     threshold_ms: 500,
+    diagnostic_sample_rate: 0.01,
     sampled_queries: 0,
     successful_queries: 0,
     failed_queries: 0,
     slow_queries: 0,
+    execution_slow_queries: 0,
+    queue_slow_queries: 0,
+    latency_regressions: 0,
+    resource_warnings: 0,
+    diagnostic_samples: 0,
+    lightweight_samples: 0,
     avg_ms: 0,
     p50_ms: 0,
     p95_ms: 0,
@@ -157,7 +175,8 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
     storage_events: [],
     storage_policy: 'lru',
     retention: '',
-    log_failures: 0
+    log_failures: 0,
+    log_dropped: 0
   }
   const selected = detail ?? (selectedId ? queries.find(item => item.query_id === selectedId) : null)
 
@@ -174,6 +193,12 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
         </div>
         <div className="monitor-heading-actions">
           <span className="monitor-threshold">慢查询 ≥ {elapsed(currentSummary.threshold_ms)}</span>
+          <span
+            className="monitor-threshold"
+            title={`普通查询只保留轻量指标；诊断样本含 Trace 和执行计划，默认抽样 ${(currentSummary.diagnostic_sample_rate * 100).toFixed(1)}%`}
+          >
+            轻量 {currentSummary.lightweight_samples} · 诊断 {currentSummary.diagnostic_samples} · 资源 {currentSummary.resource_warnings}
+          </span>
           <button onClick={() => void refresh()} disabled={busy} title="刷新监控数据">
             <RefreshCw size={14} className={busy ? 'spin' : ''} />
             刷新
@@ -265,10 +290,10 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
           <section className="monitor-card monitor-query-card">
             <div className="monitor-card-heading">
               <div>
-                <strong>慢查询列表</strong>
-                <span>{queries.length ? `${queries.length} 条，按耗时排序` : '达到阈值后自动出现'}</span>
+                <strong>需关注查询</strong>
+                <span>{queries.length ? `${queries.length} 条，按耗时排序` : '达到阈值或资源异常后自动出现'}</span>
               </div>
-              <span className="monitor-count">{currentSummary.slow_queries}</span>
+              <span className="monitor-count">{queries.length}</span>
             </div>
             {queries.length ? (
               <div className="monitor-query-list">
@@ -284,6 +309,7 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
                     <code>{elapsed(query.total_ms)}</code>
                     <small>
                       {time(query.finished_at)} · {query.operator ?? 'Statement'}
+                      {query.resource_signals?.length ? ` · ${query.resource_signals.map(signalLabel).join('、')}` : ''}
                     </small>
                   </button>
                 ))}
@@ -291,8 +317,8 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
             ) : (
               <div className="monitor-empty">
                 <Gauge size={24} />
-                <strong>暂无慢查询</strong>
-                <span>当前采样会保留在延迟趋势中。</span>
+                <strong>暂无需关注查询</strong>
+                <span>当前观测会保留在延迟趋势中。</span>
               </div>
             )}
           </section>
@@ -333,6 +359,16 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
                   <span>
                     淘汰 <strong>{selected.cache_evictions}</strong>
                   </span>
+                  {selected.resource_signals?.length ? (
+                    <span>
+                      关注 <strong>{selected.resource_signals.map(signalLabel).join('、')}</strong>
+                    </span>
+                  ) : null}
+                  {selected.latency_regression && selected.baseline_ms != null ? (
+                    <span>
+                      基线 <strong>{elapsed(selected.baseline_ms)}</strong>
+                    </span>
+                  ) : null}
                   {detail?.plan_estimate && (
                     <span title="优化器估算值，单位为 cost，不是毫秒">
                       估算成本 <strong>{detail.plan_estimate.total_cost.toFixed(2)}</strong>
@@ -349,7 +385,7 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
             ) : (
               <div className="monitor-empty detail-empty">
                 <Activity size={24} />
-                <span>选择慢查询查看阶段拆分。</span>
+                <span>选择查询查看阶段拆分。</span>
               </div>
             )}
           </section>

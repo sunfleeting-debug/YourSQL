@@ -537,11 +537,18 @@ def test_performance_monitor_routes_expose_query_and_storage_diagnostics(service
     status, queries_response = client.request("/api/monitor/queries?limit=1")
     assert status == 200
     assert queries_response["data"]["total"] >= 1
+    assert queries_response["data"]["attention_only"] is False
+    status, attention_response = client.request("/api/monitor/queries?attention=1")
+    assert status == 200
+    assert attention_response["data"]["attention_only"] is True
     query_id = f'{task["id"]}:0'
     status, detail_response = client.request(f"/api/monitor/queries/{query_id}")
     assert status == 200
     assert detail_response["data"]["query_id"] == query_id
-    assert detail_response["data"]["stages"]
+    if detail_response["data"]["diagnostic_available"]:
+        assert detail_response["data"]["stages"]
+    else:
+        assert "stages" not in detail_response["data"]
 
 
 def test_storage_replacement_policy_can_be_switched_without_resetting_cache(service) -> None:
