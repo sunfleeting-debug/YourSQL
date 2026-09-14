@@ -577,6 +577,24 @@ def test_performance_monitor_routes_expose_query_and_storage_diagnostics(service
         assert detail_response["data"]["stages"]
     else:
         assert "stages" not in detail_response["data"]
+    status, history_response = client.request(
+        f"/api/monitor/queries/{query_id}/history?limit=10"
+    )
+    assert status == 200
+    assert history_response["data"]["current"]["query_id"] == query_id
+    assert history_response["data"]["items"]
+
+    reader = Client(client.base)
+    reader.login("reader", "reader-password")
+    reader_task = reader.query("SELECT id FROM student")
+    reader_query_id = f'{reader_task["id"]}:0'
+    status, reader_history = reader.request(
+        f"/api/monitor/queries/{reader_query_id}/history"
+    )
+    assert status == 200
+    assert reader_history["data"]["current"]["user"] == "reader"
+    assert all(item["user"] == "reader" for item in reader_history["data"]["items"])
+    assert reader.request("/api/monitor/summary")[0] == 403
 
 
 def test_storage_replacement_policy_can_be_switched_without_resetting_cache(service) -> None:

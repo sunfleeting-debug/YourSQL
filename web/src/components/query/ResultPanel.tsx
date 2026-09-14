@@ -1,11 +1,26 @@
 /** 查询结果、分页结果和结果级执行计划。 */
 
 import { useEffect, useState, useTransition } from 'react'
-import { CheckCircle2, ChevronLeft, ChevronRight, Clipboard, Clock3, Download, FileJson, Play, RefreshCw, Table2, TriangleAlert } from 'lucide-react'
+import {
+  BarChart3,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Clipboard,
+  Clock3,
+  Download,
+  FileJson,
+  Play,
+  RefreshCw,
+  Table2,
+  TriangleAlert
+} from 'lucide-react'
 import { api, elapsed, errorMessage } from '../../api'
 import { csv } from '../../sql'
 import type { JsonValue } from '../../types/common'
+import type { ExecutionStatisticsResponse } from '../../types/statistics'
 import type { History, QueryResult, QueryTask, QueryTaskStatus, ResultViewMode, Stage } from '../../types/query'
+import ExecutionStatistics from './ExecutionStatistics'
 import ExplainResult from './ExplainResult'
 
 export interface ResultPanelProps {
@@ -21,6 +36,7 @@ export interface ResultPanelProps {
 const RESULT_VIEW_OPTIONS: Array<readonly [ResultViewMode, string]> = [
   ['table', '结果'],
   ['messages', '消息'],
+  ['statistics', '统计'],
   ['history', '历史'],
   ['json', 'JSON']
 ]
@@ -43,9 +59,14 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
   const [exporting, setExporting] = useState(false)
   const [error, setError] = useState('')
   const [revision, setRevision] = useState(0)
+  const [statistics, setStatistics] = useState<ExecutionStatisticsResponse | null>(null)
+  const [statisticsLoading, setStatisticsLoading] = useState(false)
+  const [statisticsError, setStatisticsError] = useState('')
+  const [statisticsRevision, setStatisticsRevision] = useState(0)
   const [isModePending, startModeTransition] = useTransition()
   const id = task?.id
   const resultCount = task?.results.length ?? 0
+  const queryId = id && resultCount ? `${id}:${index}` : null
   useEffect(() => {
     setOffset(0)
     onPipelineStages([])
@@ -69,6 +90,23 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
       })
     return () => controller.abort()
   }, [id, index, offset, pageSize, resultCount, revision])
+
+  useEffect(() => {
+    setStatistics(null)
+    setStatisticsError('')
+    if (mode !== 'statistics' || !queryId) return
+    const controller = new AbortController()
+    setStatisticsLoading(true)
+    api<ExecutionStatisticsResponse>(`/api/monitor/queries/${encodeURIComponent(queryId)}/history?limit=30`, undefined, controller.signal)
+      .then(value => setStatistics(value))
+      .catch(requestError => {
+        if (!controller.signal.aborted) setStatisticsError(errorMessage(requestError))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setStatisticsLoading(false)
+      })
+    return () => controller.abort()
+  }, [mode, queryId, statisticsRevision])
 
   function switchMode(nextMode: ResultViewMode) {
     if (nextMode === mode || isModePending) return
@@ -120,7 +158,8 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
         <div className="tab-strip">
           {RESULT_VIEW_OPTIONS.map(([value, label]) => (
             <button key={value} className={mode === value ? 'active' : ''} disabled={isModePending} onClick={() => switchMode(value)}>
-              {value === 'history' && <Clock3 size={12} />} {label}
+              {value === 'history' && <Clock3 size={12} />}
+              {value === 'statistics' && <BarChart3 size={12} />} {label}
               {value === 'history' && history && <span className="tab-badge">{history.total}</span>}
             </button>
           ))}
@@ -145,7 +184,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
           正在切换结果视图…
         </div>
       )}
-      {resultCount > 0 && mode !== 'history' && (
+      {resultCount > 0 && mode !== 'history' && mode !== 'statistics' && (
         <div className="result-toolbar">
           <label>
             语句结果{' '}
@@ -189,6 +228,13 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
           <RefreshCw className="spin" />
           <span>正在读取执行结果…</span>
         </div>
+      ) : mode === 'statistics' ? (
+        <ExecutionStatistics
+          data={statistics}
+          loading={statisticsLoading}
+          error={statisticsError}
+          onRetry={() => setStatisticsRevision(value => value + 1)}
+        />
       ) : mode === 'history' ? (
         <HistoryInline history={history} inspect={onHistory} />
       ) : !task ? (
@@ -287,7 +333,7 @@ export default function ResultPanel({ task, index, onIndex, notify, history, onH
           </table>
         </div>
       )}
-      {result && (
+      {result && mode !== 'statistics' && (
         <footer className="result-footer">
           <span>
             共 {result.total_rows} 行{result.truncated && <b className="warning-text"> · 保留 {result.retained_rows} 行（已截断）</b>}

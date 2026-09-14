@@ -6,7 +6,7 @@ export type QueryTaskStatus = 'queued' | 'running' | 'success' | 'error' | 'canc
 export type QueryResultStatus = 'success' | 'error'
 export type StageStatus = 'success' | 'error' | 'unsupported' | 'partial'
 export type ColumnTypeSource = 'schema' | 'runtime'
-export type ResultViewMode = 'table' | 'messages' | 'history' | 'json'
+export type ResultViewMode = 'table' | 'messages' | 'statistics' | 'history' | 'json'
 
 export interface Source {
   start: number

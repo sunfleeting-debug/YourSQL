@@ -56,6 +56,9 @@ def test_performance_monitor_aggregates_and_persists_slow_queries(
         assert "stages" not in slow_queries["items"][0]
         assert list(tmp_path.glob("performance-*.jsonl"))
         assert monitor.detail("slow")["plan"] == {"operator": "SeqScan"}
+        history = monitor.history("slow")
+        assert history["current"]["query_id"] == "slow"
+        assert [item["query_id"] for item in history["items"]] == ["fast", "slow"]
     finally:
         monitor.close()
 
@@ -98,6 +101,35 @@ def test_performance_monitor_strips_normal_query_diagnostics() -> None:
         assert [item["query_id"] for item in attention["items"]] == [
             "resource-heavy"
         ]
+    finally:
+        monitor.close()
+
+
+def test_performance_monitor_history_groups_same_sql_only() -> None:
+    """历史统计只应包含同一 SQL 指纹的轻量执行记录。"""
+    monitor = PerformanceMonitor(diagnostic_sample_rate=0)
+    try:
+        for query_id, sql in (
+            ("first", "SELECT id FROM orders WHERE id = ?"),
+            ("other", "SELECT id FROM customers WHERE id = ?"),
+            ("second", "SELECT id FROM orders WHERE id = ?"),
+        ):
+            monitor.record(
+                {
+                    "query_id": query_id,
+                    "sql": sql,
+                    "status": "success",
+                    "finished_at": f"2026-09-14T00:00:0{len(query_id)}+00:00",
+                    "total_ms": 20,
+                    "stages": [{"name": "execution"}],
+                    "plan": {"operator": "SeqScan"},
+                }
+            )
+
+        history = monitor.history("second")
+
+        assert [item["query_id"] for item in history["items"]] == ["first", "second"]
+        assert all("stages" not in item and "plan" not in item for item in history["items"])
     finally:
         monitor.close()
 

@@ -1197,6 +1197,21 @@ class Workbench:
             session.connection.authorize("SECURITY")
             return self.monitor.detail(query_id)
 
+    def monitoring_history(
+        self, session: WebSession, query_id: str, *, limit: int
+    ) -> JsonObject:
+        """【前端特供】返回同一 SQL 的历史执行统计序列。"""
+        with self.connection(session):
+            task_id, separator, raw_index = query_id.rpartition(":")
+            if not separator or not raw_index.isdigit():
+                raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
+            self.task(session, task_id, result_index=int(raw_index))
+            return self.monitor.history(
+                query_id,
+                limit=limit,
+                user=session.connection.user.name,
+            )
+
     def close(self) -> None:
         """关闭资源并释放关联状态。"""
         with self._lock:

@@ -198,6 +198,39 @@ class PerformanceMonitor:
                     return _copy_json_object(record)
         raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
 
+    def history(
+        self, query_id: str, *, limit: int = 30, user: str | None = None
+    ) -> JsonObject:
+        """【前端特供】返回同一 SQL 指纹的历史执行轻量序列。"""
+        if not 1 <= limit <= 100:
+            raise YourSQLError("查询监控 history limit 应在 1–100 范围内", "BAD_REQUEST")
+        with self._lock:
+            current = next(
+                (
+                    record
+                    for record in self._records
+                    if record.get("query_id") == query_id
+                    and (user is None or record.get("user") == user)
+                ),
+                None,
+            )
+            if current is None:
+                raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
+            fingerprint = current.get("fingerprint")
+            records = [
+                _copy_lightweight_record(record)
+                for record in self._records
+                if record.get("fingerprint") == fingerprint
+                and (user is None or record.get("user") == user)
+            ]
+        records.sort(key=lambda record: str(record.get("finished_at", "")))
+        return {
+            "current": _copy_lightweight_record(current),
+            "items": records[-limit:],
+            "total": len(records),
+            "fingerprint": fingerprint,
+        }
+
     def _update_baseline(
         self, fingerprint: str, total_ms: float
     ) -> tuple[int, float, bool]:
