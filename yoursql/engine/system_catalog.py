@@ -32,6 +32,7 @@ class SystemViewSpec:
 
 
 def _schema(*columns: Column) -> Schema:
+    """构造系统表使用的 Schema。"""
     return Schema.from_iterable(columns)
 
 
@@ -126,24 +127,28 @@ class _UserRecord:
 
 
 def _text(value: object, context: str) -> str:
+    """从系统表行中读取文本字段。"""
     if not isinstance(value, str) or not value.strip():
         raise CatalogError(f"内部权限表中的{context}无效")
     return value
 
 
 def _bool(value: object, context: str) -> bool:
+    """从系统表行中读取布尔字段。"""
     if not isinstance(value, bool):
         raise CatalogError(f"内部权限表中的{context}必须是 BOOLEAN")
     return value
 
 
 def _privilege_parts(privilege: str) -> tuple[str, str | None]:
+    """拆分权限键中的动作和对象部分。"""
     normalized = privilege.upper().strip()
     action, separator, object_name = normalized.partition(" ")
     return action, object_name.strip() if separator and object_name.strip() else None
 
 
 def _join_privilege(privilege: str, object_name: str | None) -> str:
+    """将权限动作和对象重新组合为权限键。"""
     action = privilege.upper().strip()
     return action if object_name is None else f"{action} {object_name.upper().strip()}"
 
@@ -152,14 +157,17 @@ class SystemCatalog:
     """把 RBAC 快照映射到固定的内部堆表，并建立安全的系统视图层。"""
 
     def __init__(self, database: Database) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.database = database
 
     @staticmethod
     def specs() -> tuple[SystemTableSpec, ...]:
+        """返回系统对象的规格定义。"""
         return SYSTEM_TABLE_SPECS
 
     @staticmethod
     def view_specs() -> tuple[SystemViewSpec, ...]:
+        """返回系统视图的规格定义。"""
         return SYSTEM_VIEW_SPECS
 
     def is_admin(self) -> bool:
@@ -215,9 +223,11 @@ class SystemCatalog:
         return changed
 
     def _table(self, name: str) -> TableMetadata:
+        """解析或获取表元数据。"""
         return self.database.catalog.get_table(name, include_system=True)
 
     def _rows(self, name: str, width: int) -> tuple[tuple[object, ...], ...]:
+        """读取指定系统表的当前行。"""
         rows = tuple(
             row for _row_id, row in self.database._heap(self._table(name)).scan()
         )
@@ -324,6 +334,7 @@ class SystemCatalog:
 
     @staticmethod
     def _rbac_rows(rbac: RBAC) -> dict[str, list[tuple[object, ...]]]:
+        """生成用户、角色和权限的系统表行。"""
         users = sorted(rbac.users.values(), key=lambda item: item.name.lower())
         roles = sorted(rbac.roles.values(), key=lambda item: item.name.lower())
         user_rows = [(user.name, user.password_hash) for user in users]

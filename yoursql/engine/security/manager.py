@@ -8,6 +8,7 @@ class SecurityManager:
     """集中暴露权限对象，方便服务层注入。"""
 
     def __init__(self, audit: AuditLog | None = None) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.rbac = RBAC()
         self.audit = audit or AuditLog()
 

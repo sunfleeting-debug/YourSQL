@@ -19,6 +19,7 @@ class DiskManager:
     FORMAT_VERSION = 1
 
     def __init__(self, path: str | os.PathLike[str], *, page_size: int = 4096) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.path = Path(path)
         self.page_size = page_size
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,12 +41,14 @@ class DiskManager:
 
     @property
     def page_count(self) -> int:
+        """返回数据库文件中的页数量。"""
         with self._lock:
             # WHY：BufferedRandom.seek 会隐式刷出待写字节，元数据查看不能触发写盘。
             # 页文件只扩展不收缩，next_page_id 即当前逻辑文件页数。
             return self._next_page_id
 
     def metadata(self) -> dict[str, object]:
+        """返回当前数据库或对象的元数据。"""
         with self._lock:
             return {
                 "page_size": self.page_size,
@@ -56,10 +59,12 @@ class DiskManager:
             }
 
     def _ensure_open(self) -> None:
+        """检查磁盘管理器仍处于打开状态。"""
         if self._closed:
             raise StorageError("数据库文件已经关闭")
 
     def _load_superblock(self) -> None:
+        """读取并校验数据库文件的 superblock。"""
         raw = self._read_raw(0)
         page = Page.from_bytes(raw, page_size=self.page_size)
         if page.page_type is not PageType.SUPERBLOCK:
@@ -87,6 +92,7 @@ class DiskManager:
         )
 
     def _superblock_payload(self) -> bytes:
+        """构造可持久化的 superblock 载荷。"""
         data = {
             "magic": "YOURSQLMS",
             "version": self.FORMAT_VERSION,
@@ -98,6 +104,7 @@ class DiskManager:
         return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     def _read_raw(self, page_id: int) -> bytes:
+        """从数据库文件读取原始页字节。"""
         self._reads += 1
         trace = current_trace.get()
         if trace is not None:
@@ -109,6 +116,7 @@ class DiskManager:
         return raw
 
     def _write_raw(self, page: Page) -> None:
+        """向数据库文件写入原始页字节。"""
         self._writes += 1
         trace = current_trace.get()
         if trace is not None:
@@ -117,11 +125,13 @@ class DiskManager:
         self._file.write(page.to_bytes())
 
     def _write_superblock(self) -> None:
+        """将当前 superblock 写回数据库文件。"""
         self._write_raw(
             Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload())
         )
 
     def register_named_page(self, name: str, page_id: int) -> None:
+        """注册带名称的页并记录其页号。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(page_id)
@@ -129,12 +139,14 @@ class DiskManager:
             self._write_superblock()
 
     def named_page(self, name: str) -> int | None:
+        """按名称查找已注册的页。"""
         with self._lock:
             return self._named_pages.get(name.strip().lower())
 
     def allocate(
         self, page_type: PageType = PageType.FREE, payload: bytes = b""
     ) -> Page:
+        """分配新的数据库页。"""
         with self._lock:
             self._ensure_open()
             if self._free_pages:
@@ -149,6 +161,7 @@ class DiskManager:
             return page
 
     def free(self, page_id: int) -> None:
+        """释放数据库页并回收其页号。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(page_id)
@@ -162,10 +175,12 @@ class DiskManager:
             self._write_superblock()
 
     def _check_page_id(self, page_id: int) -> None:
+        """校验页号是否位于有效范围内。"""
         if page_id < 0 or page_id >= self.page_count:
             raise StorageError(f"页号 {page_id} 越界")
 
     def read(self, page_id: int) -> Page:
+        """读取指定页并恢复为页对象。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(int(page_id))
@@ -174,6 +189,7 @@ class DiskManager:
             )
 
     def write(self, page: Page) -> None:
+        """将页对象写回数据库文件。"""
         with self._lock:
             self._ensure_open()
             if page.page_size != self.page_size:
@@ -212,12 +228,14 @@ class DiskManager:
                 )
 
     def sync(self) -> None:
+        """将文件缓冲区同步到持久化介质。"""
         with self._lock:
             self._ensure_open()
             self._file.flush()
             os.fsync(self._file.fileno())
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         with self._lock:
             if not self._closed:
                 self.sync()
@@ -225,9 +243,11 @@ class DiskManager:
                 self._closed = True
 
     def __enter__(self) -> "DiskManager":
+        """进入上下文管理器并返回当前对象。"""
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """退出上下文管理器并完成资源清理。"""
         self.close()
 
 

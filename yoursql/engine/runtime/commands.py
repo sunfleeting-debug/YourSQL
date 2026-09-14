@@ -111,6 +111,7 @@ class DatabaseCommandMixin:
     # ----- 语句路由、对象定位与权限检查 -----
     @staticmethod
     def _action_for(statement: Statement) -> str:
+        """根据语句类型确定所需的权限动作。"""
         if isinstance(statement, (CreateRole, CreateUser, Grant, Revoke)):
             return "SECURITY"
         if isinstance(statement, ShowGrants):
@@ -131,6 +132,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _object_for(statement: Statement) -> str | None:
+        """根据语句提取受影响的对象名称。"""
         if isinstance(statement, Show):
             return statement.object_name
         if isinstance(statement, (Grant, Revoke)):
@@ -227,6 +229,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _subqueries(node: Node) -> Iterable[Select]:
+        """递归收集语句中的子查询。"""
         for descriptor in fields(node):
             value = getattr(node, descriptor.name)
             values = value if isinstance(value, tuple) else (value,)
@@ -238,6 +241,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _object_names(statement: Statement) -> tuple[str, ...]:
+        """提取语句涉及的对象名称。"""
         if isinstance(statement, Explain):
             return DatabaseCommandMixin._object_names(statement.statement)
         if isinstance(statement, Show) and statement.object_name is not None:
@@ -283,6 +287,7 @@ class DatabaseCommandMixin:
     def _execute_statement(
         self, statement: Statement, bound: BoundStatement, plan: PlanNode
     ) -> ExecutionResult:
+        """按语句类型执行 DDL、DML、DCL 或查询命令。"""
         if isinstance(statement, Explain):
             child = (
                 plan.children[0]
@@ -373,6 +378,7 @@ class DatabaseCommandMixin:
     def _permission_keys(
         privileges: tuple[str, ...], object_name: str | None
     ) -> tuple[str, ...]:
+        """将语句转换为需要检查的权限键集合。"""
         keys: list[str] = []
         for privilege in privileges:
             action = "*" if privilege.upper() in {"ALL", "*"} else privilege.upper()
@@ -382,6 +388,7 @@ class DatabaseCommandMixin:
     def _grant_permissions(
         self, privileges: tuple[str, ...], target_kind: str, target_name: str
     ) -> None:
+        """执行 GRANT 命令并持久化权限变化。"""
         if target_kind.upper() == "ROLE":
             for privilege in privileges:
                 self.rbac.grant(privilege, role=target_name)
@@ -392,6 +399,7 @@ class DatabaseCommandMixin:
     def _revoke_permissions(
         self, privileges: tuple[str, ...], target_kind: str, target_name: str
     ) -> None:
+        """执行 REVOKE 命令并持久化权限变化。"""
         if target_kind.upper() == "ROLE":
             for privilege in privileges:
                 self.rbac.revoke(privilege, role=target_name)
@@ -400,6 +408,7 @@ class DatabaseCommandMixin:
             self.rbac.revoke(privilege, user=target_name)
 
     def _show_grants(self, statement: ShowGrants) -> ExecutionResult:
+        """生成指定主体的权限列表。"""
         target_kind = (statement.target_kind or "USER").upper()
         target_name = statement.target_name or self.session.user.name
         try:
@@ -552,6 +561,7 @@ class DatabaseCommandMixin:
 
     # ----- 表、视图和索引的 DDL -----
     def _create_table(self, statement: CreateTable) -> ExecutionResult:
+        """解析或创建表定义。"""
         if self.catalog.find_table(statement.name) is not None:
             if statement.if_not_exists:
                 return ExecutionResult(message=f"table {statement.name} already exists")
@@ -596,6 +606,7 @@ class DatabaseCommandMixin:
         return ExecutionResult(message=f"CREATE VIEW {view.name}")
 
     def _drop_view(self, statement: DropView) -> ExecutionResult:
+        """删除视图并清理目录定义。"""
         view = self.catalog.find_view(statement.name)
         if view is None:
             if statement.if_exists:
@@ -678,6 +689,7 @@ class DatabaseCommandMixin:
             ) from exc
 
     def _view_expression_type(self, expression: Expr, refs: list[TableRef]) -> DataType:
+        """推断视图表达式的输出数据类型。"""
         if isinstance(expression, ColumnRef):
             relation = self._view_column_relation(expression, refs)
             return relation.schema.column(expression.name).data_type
@@ -731,6 +743,7 @@ class DatabaseCommandMixin:
     def _view_column_relation(
         self, expression: ColumnRef, refs: list[TableRef]
     ) -> TableMetadata | ViewMetadata:
+        """解析视图输出列所属的关系。"""
         if expression.table:
             for ref in refs:
                 if expression.table.lower() in {
@@ -764,6 +777,7 @@ class DatabaseCommandMixin:
         """为手工构造 AST 提供一个可持久化的最小 SQL 渲染器。"""
 
         def render_expr(expression: Expr) -> str:
+            """将表达式渲染为可保存的 SQL 文本。"""
             if isinstance(expression, Literal):
                 return _sql_literal(expression.value)
             if isinstance(expression, Star):
@@ -815,6 +829,7 @@ class DatabaseCommandMixin:
 
     @staticmethod
     def _default_value(definition: ColumnDefinition) -> Value | None:
+        """计算列定义对应的默认值。"""
         if definition.default is None:
             return None
         if not isinstance(definition.default, Literal):
@@ -827,6 +842,7 @@ class DatabaseCommandMixin:
             raise _with_node_location(exc, definition.default) from exc
 
     def _drop_table(self, statement: DropTable) -> ExecutionResult:
+        """删除表及其关联索引和存储页。"""
         table = self.catalog.find_table(statement.name)
         if table is None:
             if statement.if_exists:
@@ -847,6 +863,7 @@ class DatabaseCommandMixin:
 
     # ----- 行级 DML -----
     def _insert(self, statement: Insert, bound: BoundStatement) -> ExecutionResult:
+        """执行插入操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
         insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))
@@ -877,6 +894,7 @@ class DatabaseCommandMixin:
         return ExecutionResult(affected_rows=inserted, message=f"INSERT {inserted}")
 
     def _update(self, statement: Update) -> ExecutionResult:
+        """执行更新操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
         targets: list[tuple[RowId, tuple[object, ...], tuple[object, ...]]] = []
@@ -914,6 +932,7 @@ class DatabaseCommandMixin:
         )
 
     def _delete(self, statement: Delete) -> ExecutionResult:
+        """执行删除操作并维护关联状态。"""
         table = self.catalog.get_table(statement.table)
         heap = self._heap(table)
         targets: list[tuple[RowId, tuple[object, ...]]] = []
@@ -1015,6 +1034,7 @@ class DatabaseCommandMixin:
         *,
         location: tuple[int, int] | None = None,
     ) -> None:
+        """检查插入或更新行是否满足列和唯一性约束。"""
         indexed_unique_columns = {
             metadata.columns[0].lower()
             for metadata in self.catalog.indexes()
@@ -1056,6 +1076,7 @@ class DatabaseCommandMixin:
         *,
         insert: bool,
     ) -> None:
+        """根据行变更维护相关索引条目。"""
         for metadata in self.catalog.indexes():
             if metadata.table_id != table.table_id:
                 continue
@@ -1074,6 +1095,7 @@ class DatabaseCommandMixin:
     def _index_key(
         table: TableMetadata, metadata: IndexMetadata, row: tuple[object, ...]
     ) -> tuple[object, ...]:
+        """从一行数据构造索引键。"""
         return tuple(row[table.schema.index(column)] for column in metadata.columns)
 
     @staticmethod
@@ -1088,6 +1110,7 @@ class DatabaseCommandMixin:
 
     # ----- 索引维护 -----
     def _create_index(self, statement: CreateIndex) -> ExecutionResult:
+        """解析或创建索引定义。"""
         if any(
             index.name.lower() == statement.name.lower()
             for index in self.catalog.indexes()
@@ -1152,6 +1175,7 @@ class DatabaseCommandMixin:
         return ExecutionResult(message=f"CREATE INDEX {statement.name}")
 
     def _drop_index(self, statement: DropIndex) -> ExecutionResult:
+        """删除索引并释放其存储资源。"""
         try:
             metadata = self.catalog.get_index(statement.name)
         except CatalogError:

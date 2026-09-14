@@ -16,6 +16,7 @@ from ..sql.ast import Statement
 
 
 def _json_value(value: object) -> object:
+    """将计划属性转换为可序列化的 JSON 值。"""
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return value.to_dict()
     if isinstance(value, Enum):
@@ -40,9 +41,11 @@ class PlanNode:
 
     @property
     def op(self) -> str:
+        """返回计划节点的算子名称。"""
         return self.kind
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         result: dict[str, object] = {
             "node": self.kind,
             "kind": self.kind,
@@ -54,11 +57,13 @@ class PlanNode:
         return result
 
     def to_json(self, *, indent: int | None = 2) -> str:
+        """将对象转换为 JSON 表示。"""
         return json.dumps(
             self.to_dict(), ensure_ascii=False, indent=indent, sort_keys=True
         )
 
     def explain(self, depth: int = 0) -> str:
+        """生成适合展示的物理计划说明。"""
         prefix = "  " * depth
         details = ", ".join(
             f"{key}={_json_value(value)!r}" for key, value in self.properties.items()

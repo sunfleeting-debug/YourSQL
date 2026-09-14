@@ -39,6 +39,7 @@ QUERY_ID = 6
 
 
 def _schema_columns(benchmark: TPCH) -> list[dict[str, Any]]:
+    """返回基准表的列定义。"""
     return benchmark.get_schema()["lineitem"]["columns"]
 
 
@@ -115,6 +116,7 @@ def _timed_query(execute: Callable[[str], list[tuple[Any, ...]]], query: str, it
 
 
 def _run_yoursql(benchmark: TPCH, data_dir: Path, iterations: int, settle_seconds: float) -> dict[str, Any]:
+    """在 YourSQL 上执行基准查询并收集结果。"""
     db_path = DEFAULT_RESULT_DIR / "tpch_sf001_yoursql.db"
     _remove_database(db_path)
     started = time.perf_counter()
@@ -155,6 +157,7 @@ def _sqlite_type(type_name: str) -> str:
 
 
 def _load_sqlite(connection: sqlite3.Connection, benchmark: TPCH, data_dir: Path) -> int:
+    """加载基准数据并执行 SQLite 查询。"""
     columns = _schema_columns(benchmark)
     column_types = [str(column["type"]) for column in columns]
     create_columns = ", ".join(f'"{column["name"]}" {_sqlite_type(str(column["type"]))}' for column in columns)
@@ -170,6 +173,7 @@ def _load_sqlite(connection: sqlite3.Connection, benchmark: TPCH, data_dir: Path
 
 
 def _run_sqlite(benchmark: TPCH, data_dir: Path, iterations: int, *, in_memory: bool, settle_seconds: float) -> dict[str, Any]:
+    """在 SQLite 上执行基准查询并计时。"""
     db_path = ":memory:" if in_memory else str(DEFAULT_RESULT_DIR / "tpch_sf001_sqlite.db")
     if not in_memory:
         Path(db_path).unlink(missing_ok=True)
@@ -202,6 +206,7 @@ def _run_sqlite(benchmark: TPCH, data_dir: Path, iterations: int, *, in_memory: 
 
 
 def _run_duckdb(benchmark: TPCH, data_dir: Path, iterations: int, *, decimal: bool, settle_seconds: float) -> dict[str, Any]:
+    """在 DuckDB 上执行基准查询并计时。"""
     suffix = "decimal" if decimal else "double"
     db_path = DEFAULT_RESULT_DIR / f"tpch_sf001_duckdb_{suffix}.db"
     db_path.unlink(missing_ok=True)
@@ -261,6 +266,7 @@ def _check_results(results: list[dict[str, Any]]) -> None:
 
 
 def _print_table(results: list[dict[str, Any]]) -> None:
+    """打印不同数据库的基准结果表。"""
     header = f"{'引擎':<24}{'谓词语义':<10}{'装载 s':>10}{'平均 s':>10}{'中位 s':>10}{'最快 s':>10}{'Q6 结果':>18}"
     print(header)
     print("-" * len(header))
@@ -272,6 +278,7 @@ def _print_table(results: list[dict[str, Any]]) -> None:
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)

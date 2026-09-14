@@ -13,6 +13,7 @@ class AuditLog:
     """内存保留事件，同时可追加写入审计文件。"""
 
     def __init__(self, path: str | Path | None = None) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.path = Path(path) if path is not None else None
         self._events: list[dict[str, object]] = []
         self._lock = RLock()
@@ -25,6 +26,7 @@ class AuditLog:
         success: bool = True,
         details: Mapping[str, object] | None = None,
     ) -> None:
+        """向审计日志追加一条事件记录。"""
         event: dict[str, object] = {
             "timestamp": time.time(),
             "action": action,
@@ -42,5 +44,6 @@ class AuditLog:
                     )
 
     def events(self) -> tuple[dict[str, object], ...]:
+        """返回审计日志中的事件快照。"""
         with self._lock:
             return tuple(dict(event) for event in self._events)

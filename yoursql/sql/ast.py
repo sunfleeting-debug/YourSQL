@@ -7,6 +7,7 @@ from ..common.types import DataType
 
 
 def _as_dict(value: object) -> object:
+    """递归将对象转换为可序列化结构。"""
     if isinstance(value, Node):
         return value.to_dict()
     if isinstance(value, tuple):
@@ -57,6 +58,7 @@ class Node:
         return self
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         result: dict[str, object] = {"node": type(self).__name__}
         for item in fields(self):
             result[item.name] = _as_dict(getattr(self, item.name))
@@ -83,6 +85,7 @@ class ColumnRef(Expr):
 
     @property
     def qualified_name(self) -> str:
+        """返回带限定名的对象名称。"""
         return f"{self.table}.{self.name}" if self.table else self.name
 
 
@@ -233,6 +236,7 @@ class TableRef(Node):
 
     @property
     def effective_name(self) -> str:
+        """返回对象实际使用的名称。"""
         return self.alias or self.name
 
 
@@ -267,6 +271,7 @@ class Select(Statement):
 
     @property
     def from_source(self) -> TableRef | None:
+        """从源对象提取对应的关系信息。"""
         return self.from_table
 
 

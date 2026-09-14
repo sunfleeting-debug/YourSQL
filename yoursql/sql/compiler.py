@@ -24,9 +24,11 @@ class CompilationResult:
 
     @property
     def ast(self) -> Statement:
+        """返回编译结果中的 AST。"""
         return self.statement
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         result: dict[str, object] = {
             "tokens": [token.as_dict() for token in self.tokens],
             "ast": self.statement.to_dict(),
@@ -44,6 +46,7 @@ class Compiler:
     def compile(
         self, sql: str, catalog: CatalogProtocol | None = None
     ) -> CompilationResult:
+        """编译输入 SQL 并返回各阶段产物。"""
         tokens = tuple(tokenize(sql))
         statement = Parser(tokens).parse_one()
         bound = Binder(catalog).bind(statement)
@@ -54,6 +57,7 @@ class Compiler:
     def compile_script(
         self, sql: str, catalog: CatalogProtocol | None = None
     ) -> tuple[CompilationResult, ...]:
+        """编译 SQL 脚本并返回各语句结果。"""
         tokens = tuple(tokenize(sql))
         statements = Parser(tokens).parse_script()
         return tuple(
@@ -68,6 +72,7 @@ class Compiler:
 
 
 def compile_sql(sql: str, catalog: CatalogProtocol | None = None) -> CompilationResult:
+    """编译单条 SQL 并返回编译结果。"""
     return Compiler().compile(sql, catalog)
 
 

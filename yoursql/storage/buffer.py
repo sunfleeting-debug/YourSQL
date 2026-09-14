@@ -27,6 +27,7 @@ class BufferPool:
     def __init__(
         self, disk: DiskManager, capacity: int = 64, replacement_policy: str = "lru"
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         if capacity < 1:
             raise ValueError("缓存容量必须为正数")
         policy = replacement_policy.lower()
@@ -47,9 +48,11 @@ class BufferPool:
 
     @property
     def size(self) -> int:
+        """返回对象占用或包含的大小。"""
         return len(self._frames)
 
     def stats(self) -> dict[str, int | float]:
+        """返回对象的统计信息。"""
         total = self._hits + self._misses
         return {
             "capacity": self.capacity,
@@ -74,6 +77,7 @@ class BufferPool:
             return changed
 
     def _touch(self, frame: BufferFrame) -> None:
+        """更新缓存页的访问顺序和相关统计。"""
         self._clock += 1
         frame.last_used = self._clock
 
@@ -119,6 +123,7 @@ class BufferPool:
         self._evictions += 1
 
     def get_page(self, page_id: int, pin: bool = True) -> Page:
+        """按页号读取缓存页。"""
         normalized = int(page_id)
         with self._lock:
             frame = self._frames.get(normalized)
@@ -145,6 +150,7 @@ class BufferPool:
             return page
 
     def put_page(self, page: Page, *, dirty: bool = True) -> None:
+        """将页写入缓存并按需标记为脏页。"""
         with self._lock:
             trace = current_trace.get()
             if trace is not None:
@@ -163,9 +169,11 @@ class BufferPool:
             self._mark_changed(page.page_id)
 
     def pin_page(self, page_id: int) -> Page:
+        """固定指定页，避免其在使用期间被淘汰。"""
         return self.get_page(page_id, pin=True)
 
     def unpin(self, page_id: int, dirty: bool = False) -> None:
+        """解除指定页的固定状态。"""
         with self._lock:
             frame = self._frames.get(int(page_id))
             if frame is None:
@@ -175,6 +183,7 @@ class BufferPool:
             frame.dirty = frame.dirty or dirty
 
     def mark_dirty(self, page_id: int) -> None:
+        """标记页已修改，等待后续刷新。"""
         with self._lock:
             frame = self._frames.get(int(page_id))
             if frame is None:
@@ -182,6 +191,7 @@ class BufferPool:
             frame.dirty = True
 
     def flush_page(self, page_id: int) -> None:
+        """将指定脏页刷新到磁盘。"""
         with self._lock:
             frame = self._frames.get(int(page_id))
             if frame is None:
@@ -191,6 +201,7 @@ class BufferPool:
                 frame.dirty = False
 
     def flush_all(self) -> None:
+        """将全部脏页刷新到磁盘。"""
         with self._lock:
             for page_id in tuple(self._frames):
                 self.flush_page(page_id)
@@ -199,11 +210,13 @@ class BufferPool:
     def new_page(
         self, page_type: PageType = PageType.FREE, payload: bytes = b""
     ) -> Page:
+        """分配并缓存一个新页。"""
         page = self.disk.allocate(page_type, payload)
         self.put_page(page, dirty=False)
         return page
 
     def delete_page(self, page_id: int) -> None:
+        """删除缓存中的指定页。"""
         with self._lock:
             frame = self._frames.get(int(page_id))
             if frame is not None and frame.pin_count:
@@ -213,6 +226,7 @@ class BufferPool:
             self._mark_changed(int(page_id))
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         self.flush_all()
         self._frames.clear()
 
@@ -281,4 +295,5 @@ class BufferPool:
             return self.disk.peek(page_id)
 
     def __contains__(self, page_id: object) -> bool:
+        """判断指定元素是否存在于对象中。"""
         return isinstance(page_id, int) and page_id in self._frames

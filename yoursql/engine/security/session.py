@@ -13,4 +13,5 @@ class Session:
     rbac: RBAC
 
     def authorize(self, action: str, object_name: str | None = None) -> None:
+        """检查当前主体是否拥有所需权限。"""
         self.rbac.check(self.user, action, object_name)

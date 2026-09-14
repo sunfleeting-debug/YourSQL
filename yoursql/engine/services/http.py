@@ -49,10 +49,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
     server: DatabaseHTTPServer
 
     def setup(self) -> None:
+        """初始化 HTTP 请求处理器的响应状态。"""
         super().setup()
         self.connection.settimeout(self.server.settings.request_timeout_seconds)
 
     def log_message(self, format: str, *args: object) -> None:
+        """抑制底层 HTTP 服务器的默认控制台日志。"""
         return None
 
     def _headers(
@@ -62,6 +64,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         length: int,
         extra: dict[str, str] | None = None,
     ) -> None:
+        """构造 JSON 响应所需的通用响应头。"""
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
@@ -98,6 +101,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         envelope: bool = False,
         extra: dict[str, str] | None = None,
     ) -> None:
+        """发送 JSON 响应及其 HTTP 状态码。"""
         if envelope:
             payload = {
                 "ok": status < 400,
@@ -115,6 +119,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             pass
 
     def _origin(self) -> None:
+        """读取并校验当前请求的 Origin。"""
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if (
@@ -130,6 +135,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             raise YourSQLError("拒绝跨站请求", "AUTHORIZATION_ERROR")
 
     def _body(self) -> JsonObject:
+        """读取请求体并解析为 JSON 对象。"""
         if self.headers.get_content_type() != "application/json":
             raise YourSQLError("请使用 application/json", "BAD_REQUEST")
         if self.headers.get("Transfer-Encoding"):
@@ -182,6 +188,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _string(body: JsonObject, name: str, maximum: int = MAX_SQL) -> str:
+        """扫描或读取字符串输入。"""
         value = body.get(name)
         if not isinstance(value, str) or not value.strip() or len(value) > maximum:
             raise YourSQLError(
@@ -193,6 +200,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _integer(
         value: JsonValue | None, default: int, minimum: int, maximum: int
     ) -> int:
+        """从请求体读取受范围限制的整数。"""
         if value is None:
             return default
         if isinstance(value, bool) or not isinstance(value, (str, int)):
@@ -206,6 +214,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return result
 
     def _session(self) -> WebSession:
+        """读取当前请求绑定的工作台会话。"""
         authorization = self.headers.get("Authorization", "")
         if authorization.startswith("Bearer "):
             return self.server.workbench.authenticate(authorization[7:])
@@ -215,6 +224,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return self.server.workbench.authenticate(value.value if value else "")
 
     def do_OPTIONS(self) -> None:
+        """处理 CORS 预检请求。"""
         self.request_id = uuid4().hex
         try:
             self._origin()
@@ -234,21 +244,27 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
 
     def do_GET(self) -> None:
+        """分发 GET 请求。"""
         self._dispatch(False)
 
     def do_POST(self) -> None:
+        """分发 POST 请求。"""
         self._dispatch(True)
 
     def do_DELETE(self) -> None:
+        """分发 DELETE 请求。"""
         self._unsupported_method()
 
     def do_PUT(self) -> None:
+        """分发 PUT 请求。"""
         self._unsupported_method()
 
     def do_PATCH(self) -> None:
+        """分发 PATCH 请求。"""
         self._unsupported_method()
 
     def _unsupported_method(self) -> None:
+        """返回不支持的 HTTP 方法错误。"""
         self.request_id = uuid4().hex
         self._send_json(
             405,
@@ -257,6 +273,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         )
 
     def _dispatch(self, post: bool) -> None:
+        """根据请求路径和方法分发处理逻辑。"""
         self.request_id = uuid4().hex
         route = urlparse(self.path).path
         modern = route.startswith("/api/")
@@ -530,6 +547,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
 
     def _legacy(self, route: str, post: bool) -> None:
+        """处理旧版兼容 REST 路由。"""
         if not post and route == "/health":
             self._send_json(200, self.server.database.health())
         elif not post and route == "/metrics":
@@ -592,6 +610,7 @@ class DatabaseHTTPServer(ThreadingHTTPServer):
         static_dir: Path | None = None,
         settings: RuntimeConfig | None = None,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self._initial_database = database
         self.settings = settings or RuntimeConfig()
         self.max_body_bytes = self.settings.max_request_body_bytes
@@ -612,6 +631,7 @@ class DatabaseHTTPServer(ThreadingHTTPServer):
         return self.workbench.database
 
     def server_close(self) -> None:
+        """关闭 HTTP 服务器并释放关联资源。"""
         self.workbench.close()
         if self.database is not self._initial_database:
             self.database.close()
@@ -632,6 +652,7 @@ class HTTPService:
         static_dir: Path | None = None,
         settings: RuntimeConfig | None = None,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.server = DatabaseHTTPServer(
             (host, port),
             database,
@@ -644,10 +665,12 @@ class HTTPService:
 
     @property
     def address(self) -> tuple[str, int]:
+        """返回 HTTP 服务监听地址。"""
         host, port = self.server.server_address[:2]
         return str(host), int(port)
 
     def start(self) -> None:
+        """启动服务或后台任务。"""
         if self._thread is not None and self._thread.is_alive():
             return
         self._thread = Thread(
@@ -656,6 +679,7 @@ class HTTPService:
         self._thread.start()
 
     def stop(self) -> None:
+        """停止服务并释放运行资源。"""
         self.server.shutdown()
         self.server.server_close()
         if self._thread is not None:
@@ -663,10 +687,12 @@ class HTTPService:
             self._thread = None
 
     def __enter__(self) -> HTTPService:
+        """进入上下文管理器并返回当前对象。"""
         self.start()
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """退出上下文管理器并完成资源清理。"""
         self.stop()
 
 

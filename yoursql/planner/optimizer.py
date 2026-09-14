@@ -59,9 +59,11 @@ class StatisticsStore:
     tables: dict[str, TableStats] = field(default_factory=dict)
 
     def update(self, table_name: str, stats: TableStats) -> None:
+        """更新数据并维护相关索引或页。"""
         self.tables[table_name.lower()] = stats
 
     def get(self, table_name: str) -> TableStats:
+        """按名称或键获取对象；找不到时遵循调用方约定返回默认值。"""
         return self.tables.get(table_name.lower(), TableStats())
 
 
@@ -69,6 +71,7 @@ class PlanCache:
     """按词法规范化 SQL 缓存计划，并以容量淘汰最早项目。"""
 
     def __init__(self, capacity: int = 256) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.capacity = max(1, capacity)
         self._items: dict[str, object] = {}
         self._lock = RLock()
@@ -77,6 +80,7 @@ class PlanCache:
     def key(sql: str) -> str:
         # WHY：不能直接把整段 SQL 转小写，否则字符串字面量大小写变化会
         # 命中同一个计划缓存项，进而复用错误的谓词常量。
+        """根据输入构造稳定的键值。"""
         try:
             tokens = tokenize(sql)
             normalized = " ".join(
@@ -90,20 +94,24 @@ class PlanCache:
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     def get(self, sql: str) -> object | None:
+        """按名称或键获取对象；找不到时遵循调用方约定返回默认值。"""
         with self._lock:
             return self._items.get(self.key(sql))
 
     def put(self, sql: str, plan: object) -> None:
+        """将计划写入缓存，并按容量淘汰旧项目。"""
         with self._lock:
             if len(self._items) >= self.capacity:
                 self._items.pop(next(iter(self._items)))
             self._items[self.key(sql)] = plan
 
     def invalidate(self) -> None:
+        """使相关缓存或计划失效。"""
         with self._lock:
             self._items.clear()
 
     def __len__(self) -> int:
+        """返回对象包含的元素数量。"""
         return len(self._items)
 
 
@@ -117,6 +125,7 @@ class Optimizer:
         *,
         buffer_pool_pages: int = 64,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.statistics = statistics or StatisticsStore()
         self.cache = cache or PlanCache()
         # HOW：随机回表成本取决于“表页数是否超出缓存”，真实池容量由 Database 注入。
@@ -199,6 +208,7 @@ class Optimizer:
     def choose_scan(
         self, table_name: str, *, has_usable_index: bool, selectivity: float = 0.1
     ) -> str:
+        """根据索引可用性和选择率选择扫描方式。"""
         seq = self.estimate_seq_scan(table_name)
         idx = self.estimate_index_scan(table_name, selectivity=selectivity)
         if not has_usable_index:
@@ -294,6 +304,7 @@ class Optimizer:
     def _rewrite(
         self, plan: object, *, index_columns: Mapping[str, Collection[str]]
     ) -> object:
+        """递归重写计划或计划值。"""
         if isinstance(plan, PlanNode):
             return self._rewrite_plan_node(plan, index_columns=index_columns)
         children = getattr(plan, "children", None)
@@ -357,6 +368,7 @@ class Optimizer:
         predicate: object,
         index_columns: Mapping[str, Collection[str]],
     ) -> PlanNode:
+        """为顺序扫描节点选择顺序或索引访问。"""
         if plan.kind != "SeqScan":
             return plan
         table = plan.properties.get("table")
@@ -399,6 +411,7 @@ class Optimizer:
     def _indexable_columns(
         cls, predicate: object, table: str, alias: object
     ) -> tuple[ColumnRef, ...]:
+        """提取谓词中可用于索引访问的列引用。"""
         qualifiers = {table.lower()}
         if isinstance(alias, str):
             qualifiers.add(alias.lower())
@@ -468,6 +481,7 @@ class Optimizer:
         alias: object,
         available: set[str],
     ) -> bool:
+        """判断谓词是否能使用给定索引列。"""
         if isinstance(predicate, BinaryOp) and predicate.operator.upper() == "AND":
             return cls._predicate_uses_index(
                 predicate.left, table, alias, available
@@ -574,6 +588,7 @@ class Optimizer:
 
     @classmethod
     def _rewrite_statement(cls, statement: Statement | None) -> Statement | None:
+        """递归重写语句中的表达式和子查询。"""
         if statement is None:
             return None
         if isinstance(statement, Select):
@@ -633,6 +648,7 @@ class Optimizer:
 
     @classmethod
     def _rewrite_plan_value(cls, value: object) -> object:
+        """递归重写计划属性中的 AST 或计划值。"""
         if isinstance(value, Expr):
             return cls._rewrite_expr(value)
         if isinstance(value, SelectItem):
@@ -657,14 +673,17 @@ class Optimizer:
 
     @classmethod
     def _replace_node(cls, source: Node, **changes: object) -> Node:
+        """复制节点并替换指定字段，同时保留源码位置。"""
         return replace(source, **changes).copy_source_metadata_from(source)
 
     @classmethod
     def _literal(cls, value: object, source: Node) -> Literal:
+        """创建带源码位置的字面量节点。"""
         return Literal(value).copy_source_metadata_from(source)
 
     @staticmethod
     def _and_truth(left: bool | None, right: bool | None) -> bool | None:
+        """按 SQL 三值逻辑计算 AND 的结果。"""
         if left is False or right is False:
             return False
         if left is True and right is True:
@@ -675,6 +694,7 @@ class Optimizer:
     def _simplify_boolean(
         cls, operator: str, left: object, right: object, source: Node
     ) -> Expr | None:
+        """应用安全的布尔恒等式和常量折叠。"""
         if operator not in {"AND", "OR"}:
             return None
         if isinstance(left, Literal) and isinstance(right, Literal):
@@ -712,6 +732,7 @@ class Optimizer:
     def _fold_binary(
         cls, operator: str, left: object, right: object
     ) -> tuple[bool, object]:
+        """预计算可折叠的二元表达式。"""
         if operator == "AND":
             return True, cls._and_truth(
                 left if isinstance(left, bool) else None,
@@ -755,15 +776,18 @@ class Optimizer:
 
     @classmethod
     def _is_true_predicate(cls, expression: Expr) -> bool:
+        """判断表达式是否恒为 TRUE。"""
         return isinstance(expression, Literal) and expression.value is True
 
     @classmethod
     def _is_false_predicate(cls, expression: Expr) -> bool:
         # WHERE 中 UNKNOWN 与 FALSE 一样不会保留记录。
+        """判断表达式是否恒为 FALSE 或 UNKNOWN。"""
         return isinstance(expression, Literal) and expression.value is not True
 
     @classmethod
     def _split_conjunction(cls, predicate: Expr) -> tuple[Expr, ...]:
+        """将 AND 谓词展开为原子条件。"""
         if isinstance(predicate, BinaryOp) and predicate.operator.upper() == "AND":
             return (
                 *cls._split_conjunction(predicate.left),
@@ -773,6 +797,7 @@ class Optimizer:
 
     @staticmethod
     def _combine_conjunction(predicates: Collection[Expr]) -> Expr | None:
+        """将多个原子条件组合为 AND 表达式。"""
         items = tuple(predicates)
         if not items:
             return None
@@ -783,6 +808,7 @@ class Optimizer:
 
     @classmethod
     def _predicate_relations(cls, predicate: Expr) -> set[str] | None:
+        """收集谓词引用的关系名称。"""
         if isinstance(predicate, ColumnRef):
             return {predicate.table.lower()} if predicate.table else set()
         if isinstance(predicate, Subquery):
@@ -829,6 +855,7 @@ class Optimizer:
 
     @classmethod
     def _plan_relations(cls, plan: PlanNode) -> set[str]:
+        """收集计划子树扫描的关系名称。"""
         if plan.kind in {"SeqScan", "IndexScan"}:
             result: set[str] = set()
             table = plan.properties.get("table")
@@ -845,6 +872,7 @@ class Optimizer:
 
     @classmethod
     def _can_push_to(cls, predicate: Expr, relations: set[str]) -> bool:
+        """判断谓词是否只引用指定关系并可下推。"""
         referenced = cls._predicate_relations(predicate)
         if referenced is None:
             return False
@@ -874,6 +902,7 @@ class Optimizer:
         *,
         index_columns: Mapping[str, Collection[str]],
     ) -> tuple[PlanNode, tuple[Expr, ...]]:
+        """将可下推谓词递归放入计划子树。"""
         items = tuple(predicates)
         if not items:
             return plan, ()

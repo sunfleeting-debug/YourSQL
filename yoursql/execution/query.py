@@ -49,7 +49,9 @@ _JOIN_CONTEXT_BYTES = 464
 class _RowLookup(Protocol):
     """扫描前过滤器所需的最小行访问协议。"""
 
-    def get(self, key: str, default: object = None) -> object: ...
+    def get(self, key: str, default: object = None) -> object:
+        """按名称或键获取对象；找不到时遵循调用方约定返回默认值。"""
+        ...
 
 
 class _PlanNodeLike(Protocol):
@@ -87,10 +89,12 @@ class _RowView:
     __slots__ = ("_lookup", "_row")
 
     def __init__(self, lookup: dict[str, int], row: tuple[object, ...]) -> None:
+        """初始化实例所需的状态和依赖。"""
         self._lookup = lookup
         self._row = row
 
     def get(self, key: str, default: object = None) -> object:
+        """按名称或键获取对象；找不到时遵循调用方约定返回默认值。"""
         index = self._lookup.get(key)
         return default if index is None else self._row[index]
 
@@ -165,6 +169,7 @@ class QueryExecutionMixin:
         plan: _PlanNodeLike | None = None,
         allow_system_tables: bool = False,
     ) -> ExecutionResult:
+        """执行 SELECT 的扫描、连接、过滤、聚合、排序和投影阶段。"""
         trace = current_trace.get()
         if trace is not None:
             trace.check()
@@ -201,6 +206,7 @@ class QueryExecutionMixin:
         def _count(
             iterable: Iterable[dict[str, object]],
         ) -> Iterable[dict[str, object]]:
+            """统计输入中的记录数量。"""
             nonlocal scanned
             for item in iterable:
                 scanned += 1
@@ -363,6 +369,7 @@ class QueryExecutionMixin:
         plan: _PlanNodeLike | None = None,
         allow_system_tables: bool = False,
     ) -> Iterable[dict[str, object]]:
+        """惰性产出 SELECT 使用的逐行查询上下文。"""
         if self._plan_contains_kind(plan, "EmptyScan"):
             return []
         needed, row_order = self._needed_context_columns(statement)
@@ -817,6 +824,7 @@ class QueryExecutionMixin:
         bare = tuple(pair[index] for pair in pairs)
 
         def extract(context: dict[str, object]) -> tuple[object, ...]:
+            """从当前输入提取调用方需要的信息。"""
             values = []
             for primary, secondary, plain in zip(keys, fallback, bare, strict=True):
                 value = context.get(primary, _MISSING)
@@ -1182,6 +1190,7 @@ class QueryExecutionMixin:
 
     @staticmethod
     def _plan_contains_kind(plan: _PlanNodeLike | None, kind: str) -> bool:
+        """递归判断计划树是否包含指定算子类型。"""
         if plan is None:
             return False
         return plan.kind == kind or any(
@@ -1193,6 +1202,7 @@ class QueryExecutionMixin:
     def _scan_predicate(
         scan_plan: _PlanNodeLike | None, fallback: Expr | None
     ) -> Expr | None:
+        """提取扫描节点上可直接执行的谓词。"""
         if scan_plan is not None:
             pushed = scan_plan.properties.get("pushed_predicate")
             if isinstance(pushed, Expr):
@@ -1201,6 +1211,7 @@ class QueryExecutionMixin:
 
     @staticmethod
     def _plan_uses_index(plan: _PlanNodeLike) -> bool:
+        """判断计划树是否使用索引访问。"""
         return any(
             node.kind == "IndexScan" for node in QueryExecutionMixin._scan_plans(plan)
         )
@@ -1209,6 +1220,7 @@ class QueryExecutionMixin:
     def _candidate_row_ids(
         self, table: TableMetadata, reference: TableRef, predicate: Expr | None
     ) -> tuple[RowId, ...] | None:
+        """根据扫描计划计算候选行号。"""
         if predicate is None:
             return None
         if isinstance(predicate, BetweenPredicate) and predicate.negated:
@@ -1351,12 +1363,14 @@ class QueryExecutionMixin:
 
     @staticmethod
     def _same_index_value(left: object, right: object) -> bool:
+        """比较两个值是否可作为同一个索引键值。"""
         if left is None or right is None:
             return left is None and right is None
         return compare_values(left, right, "=") is True
 
     @classmethod
     def _compare_index_values(cls, left: object, right: object) -> int:
+        """按索引排序规则比较两个值。"""
         if cls._same_index_value(left, right):
             return 0
         return -1 if compare_values(left, right, "<") is True else 1
@@ -1365,6 +1379,7 @@ class QueryExecutionMixin:
     def _merge_allowed(
         existing: list[object] | None, incoming: list[object]
     ) -> list[object]:
+        """合并两个索引边界时判断端点是否仍然有效。"""
         if existing is None:
             return list(incoming)
         return [
@@ -1382,6 +1397,7 @@ class QueryExecutionMixin:
         existing: tuple[object, bool] | None,
         incoming: tuple[object, bool],
     ) -> tuple[object, bool]:
+        """合并两个下界并保留更严格的边界。"""
         if existing is None:
             return incoming
         comparison = cls._compare_index_values(incoming[0], existing[0])
@@ -1397,6 +1413,7 @@ class QueryExecutionMixin:
         existing: tuple[object, bool] | None,
         incoming: tuple[object, bool],
     ) -> tuple[object, bool]:
+        """合并两个上界并保留更严格的边界。"""
         if existing is None:
             return incoming
         comparison = cls._compare_index_values(incoming[0], existing[0])
@@ -1408,6 +1425,7 @@ class QueryExecutionMixin:
 
     @staticmethod
     def _index_column(column: ColumnRef, reference: TableRef) -> str | None:
+        """判断列引用是否对应目标表的索引列。"""
         if column.table and column.table.lower() not in {
             reference.name.lower(),
             (reference.alias or "").lower(),
@@ -1521,6 +1539,7 @@ class QueryExecutionMixin:
         columns = tuple(column.lower() for column in metadata.columns)
 
         def scan(position: int, prefix: tuple[object, ...]) -> tuple[RowId, ...] | None:
+            """按页和槽顺序扫描输入中的有效记录。"""
             if position >= len(columns):
                 return tree.search(prefix)
             constraint = constraints.get(columns[position])
@@ -1808,6 +1827,7 @@ class QueryExecutionMixin:
         needed: frozenset[str] | None = None,
         row_order: bool = True,
     ) -> dict[str, object]:
+        """为外连接构造一侧列为空的查询上下文。"""
         relation = self.catalog.get_relation(reference.name)
         row = tuple(None for _column in relation.schema)
         return self._table_context(
@@ -1822,6 +1842,7 @@ class QueryExecutionMixin:
     def _merge_context(
         self, left: dict[str, object], right: dict[str, object]
     ) -> dict[str, object]:
+        """合并连接两侧的查询上下文。"""
         merged = {
             key: value
             for key, value in left.items()
@@ -1850,6 +1871,7 @@ class QueryExecutionMixin:
     def _expand_star(
         self, context: dict[str, object], table_name: str | None
     ) -> list[object]:
+        """将 SELECT * 展开为实际列列表。"""
         result: list[object] = []
         row_order = context.get("__row_order__")
         if not isinstance(row_order, list):
@@ -1860,6 +1882,7 @@ class QueryExecutionMixin:
         return result
 
     def _output_names(self, statement: Select) -> list[str]:
+        """计算 SELECT 输出列的名称列表。"""
         names: list[str] = []
         table_refs: list[TableRef] = []
         if statement.from_table is not None:
@@ -1889,6 +1912,7 @@ class QueryExecutionMixin:
         return names
 
     def _uses_index(self, statement: Select) -> bool:
+        """判断查询是否存在可用的索引访问路径。"""
         if statement.from_table is None:
             return False
         relation = self.catalog.find_table(

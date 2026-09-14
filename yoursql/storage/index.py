@@ -103,6 +103,7 @@ def _compare_keys(left: Key, right: Key) -> int:
 def _compare_entries(
     left_key: Key, left_row: RowId, right_key: Key, right_row: RowId
 ) -> int:
+    """比较两个索引条目的键及其排序位置。"""
     result = _compare_keys(left_key, right_key)
     if result:
         return result
@@ -184,6 +185,7 @@ class _IndexNode:
             ]
 
     def payload_at(self, position: int) -> list[object]:
+        """读取指定索引条目的覆盖列载荷。"""
         return self.payloads[position] if position < len(self.payloads) else []
 
     def insert_entry(
@@ -229,6 +231,7 @@ class _IndexNode:
         self.payloads[:0] = other.payloads
 
     def validate(self) -> None:
+        """校验索引页或索引节点的结构完整性。"""
         if self.leaf:
             if len(self.keys) != len(self.row_ids):
                 raise StorageError(f"索引叶页 {self.page_id} 的 key/RowId 数量不一致")
@@ -254,6 +257,7 @@ class _IndexNode:
             raise StorageError(f"索引内部页 {self.page_id} 的分隔键未排序")
 
     def payload(self) -> bytes:
+        """返回索引条目的覆盖列载荷。"""
         self.validate()
         value: dict[str, object] = {
             "version": INDEX_VERSION,
@@ -284,6 +288,7 @@ class _IndexNode:
 
     @classmethod
     def from_page(cls, page: Page) -> "_IndexNode":
+        """从数据库页恢复索引节点。"""
         if page.page_type is not PageType.INDEX:
             raise StorageError(f"页 {page.page_id} 不是 INDEX 页")
         if not page.payload:
@@ -407,6 +412,7 @@ class BPlusTree:
         root_page_id: PageId | int | None = None,
         on_root_change: Callable[[int], None] | None = None,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.unique = bool(unique)
         self._buffer_pool = buffer_pool
         self._persistent = buffer_pool is not None
@@ -441,23 +447,28 @@ class BPlusTree:
 
     @property
     def is_persistent(self) -> bool:
+        """返回当前索引是否使用持久化存储。"""
         return self._persistent
 
     @property
     def root_page_id(self) -> int | None:
+        """返回当前索引根页的页号。"""
         return self._root_page_id
 
     @property
     def page_size(self) -> int:
+        """返回当前索引使用的页大小。"""
         return (
             self._buffer_pool.disk.page_size if self._buffer_pool is not None else 4096
         )
 
     def _ensure_alive(self) -> None:
+        """检查索引仍处于可用状态。"""
         if self._destroyed:
             raise StorageError("索引已经释放")
 
     def _valid_index_page(self, page_id: int) -> bool:
+        """判断页是否为有效的索引页。"""
         if (
             self._buffer_pool is None
             or page_id < 0
@@ -470,10 +481,12 @@ class BPlusTree:
             return False
 
     def _notify_root_change(self) -> None:
+        """通知外部目录索引根页发生变化。"""
         if self._on_root_change is not None and self._root_page_id is not None:
             self._on_root_change(self._root_page_id)
 
     def _read_node(self, page_id: int, *, readonly: bool = False) -> _IndexNode:
+        """读取并解析指定索引节点。"""
         self._ensure_alive()
         if self._buffer_pool is None:
             raise StorageError("内存索引没有物理页")
@@ -486,6 +499,7 @@ class BPlusTree:
             self._buffer_pool.unpin(page_id)
 
     def _write_node(self, node: _IndexNode) -> None:
+        """将索引节点写回存储。"""
         self._ensure_alive()
         if self._buffer_pool is None:
             raise StorageError("内存索引没有物理页")
@@ -499,17 +513,20 @@ class BPlusTree:
     def _new_node(
         self, *, leaf: bool, level: int, parent: int | None = None
     ) -> _IndexNode:
+        """创建并登记新的索引节点。"""
         if self._buffer_pool is None:
             raise StorageError("内存索引没有物理页")
         page = self._buffer_pool.new_page(PageType.INDEX)
         return _IndexNode(page.page_id, leaf=leaf, level=level, parent=parent)
 
     def _delete_page(self, page_id: int) -> None:
+        """删除索引节点占用的页。"""
         if self._buffer_pool is not None and self._valid_index_page(page_id):
             self._buffer_pool.delete_page(page_id)
 
     @staticmethod
     def _node_fits(node: _IndexNode, page_size: int) -> bool:
+        """判断索引节点是否能放入当前页。"""
         try:
             payload_size = len(node.payload())
             usable = page_size - Page.HEADER_SIZE
@@ -540,11 +557,13 @@ class BPlusTree:
         return len(node.payload()) < max(1, usable // 2)
 
     def _empty_root(self) -> _IndexNode:
+        """创建空的索引根节点。"""
         if self._root_page_id is None:
             raise StorageError("索引没有根页")
         return _IndexNode(self._root_page_id, leaf=True)
 
     def _load_max_key(self, page_id: int, *, readonly: bool = False) -> Key:
+        """读取节点中的最大键。"""
         node = self._read_node(page_id, readonly=readonly)
         if node.leaf:
             if not node.keys:
@@ -557,6 +576,7 @@ class BPlusTree:
         return self._load_max_key(node.children[-1], readonly=readonly)
 
     def _load_min_key(self, page_id: int, *, readonly: bool = False) -> Key:
+        """读取节点中的最小键。"""
         node = self._read_node(page_id, readonly=readonly)
         if node.leaf:
             if not node.keys:
@@ -567,6 +587,7 @@ class BPlusTree:
         return self._load_min_key(node.children[0], readonly=readonly)
 
     def _refresh_internal_keys(self, node: _IndexNode) -> None:
+        """刷新内部节点的分隔键。"""
         if node.leaf:
             return
         node.keys = [self._load_max_key(child_id) for child_id in node.children[:-1]]
@@ -595,6 +616,7 @@ class BPlusTree:
             current = node.parent
 
     def _find_leaf(self, target: Key, *, readonly: bool = False) -> _IndexNode:
+        """沿 B+Tree 查找包含目标键的叶节点。"""
         if self._root_page_id is None:
             raise StorageError("索引没有根页")
         node = self._read_node(self._root_page_id, readonly=readonly)
@@ -614,6 +636,7 @@ class BPlusTree:
         return node
 
     def _iter_leaf_nodes(self, *, readonly: bool = False) -> Iterator[_IndexNode]:
+        """按叶节点链顺序遍历索引叶页。"""
         if self._root_page_id is None:
             return
         node = self._read_node(self._root_page_id, readonly=readonly)
@@ -636,6 +659,7 @@ class BPlusTree:
             yield from zip(leaf.keys, leaf.row_ids, strict=True)
 
     def _insert_memory(self, normalized: Key, row_id: RowId) -> None:
+        """向内存索引插入键和值。"""
         values = self._values.setdefault(_memory_key(normalized), set())
         if self.unique and values and row_id not in values:
             raise ExecutionError(f"唯一索引冲突: {normalized!r}")
@@ -648,6 +672,7 @@ class BPlusTree:
         values.add(row_id)
 
     def _delete_memory(self, normalized: Key, row_id: RowId | None) -> None:
+        """从内存索引删除指定键和值。"""
         memory_key = _memory_key(normalized)
         values = self._values.get(memory_key)
         if values is None:
@@ -719,6 +744,7 @@ class BPlusTree:
             return bool(node.keys or node.children)
 
     def _split_position(self, node: _IndexNode, candidates: Iterable[int]) -> int:
+        """计算索引节点的分裂位置。"""
         selected: int | None = None
         middle = len(node.keys) // 2
         ordered = sorted(candidates, key=lambda value: (abs(value - middle), value))
@@ -756,6 +782,7 @@ class BPlusTree:
         return selected
 
     def _split_leaf_and_propagate(self, leaf: _IndexNode) -> None:
+        """分裂叶节点并向父节点传播分隔键。"""
         position = self._split_position(leaf, range(1, len(leaf.keys)))
         leaf.ensure_payloads()
         right = self._new_node(leaf=True, level=leaf.level, parent=leaf.parent)
@@ -788,6 +815,7 @@ class BPlusTree:
             self._split_internal_and_propagate(parent)
 
     def _split_internal_and_propagate(self, node: _IndexNode) -> None:
+        """分裂内部节点并向上层传播分隔键。"""
         if node.leaf:
             raise StorageError("叶页不能使用内部页分裂流程")
         # 内部页按 child 数量切分；分隔键总是从子页最大键重新计算。
@@ -861,6 +889,7 @@ class BPlusTree:
             self._split_internal_and_propagate(parent)
 
     def _create_root(self, left: _IndexNode, right: _IndexNode) -> None:
+        """创建新的根节点并连接原有子节点。"""
         root = self._new_node(leaf=False, level=max(left.level, right.level) + 1)
         root.children = [left.page_id, right.page_id]
         root.keys = [self._load_max_key(left.page_id)]
@@ -875,6 +904,7 @@ class BPlusTree:
     def _find_equal_leaves(
         self, target: Key, *, readonly: bool = False
     ) -> Iterator[_IndexNode]:
+        """查找可能包含相同键的叶节点。"""
         leaf = self._find_leaf(target, readonly=readonly)
         while leaf.prev_page is not None:
             previous = self._read_node(leaf.prev_page, readonly=readonly)
@@ -1176,9 +1206,11 @@ class BPlusTree:
             return tuple(result)
 
     def all_items(self) -> tuple[tuple[Key, RowId], ...]:
+        """遍历索引中的全部键和值。"""
         return self.range_scan()
 
     def _delete_persistent(self, normalized: Key, row_id: RowId | None) -> None:
+        """从持久化索引删除键和值。"""
         if row_id is None:
             # WHY：一个重复键可能横跨多个叶页。先批量清空这些叶页会让父节点
             # 同时看到多个空子页，无法计算分隔键；把剩余条目重新打包可以在
@@ -1420,6 +1452,7 @@ class BPlusTree:
         self._refresh_ancestors(parent.parent)
 
     def _repair_parent_after_removal(self, parent: _IndexNode) -> None:
+        """删除子节点后修复父节点结构。"""
         if parent.parent is None:
             if len(parent.children) == 1:
                 child = self._read_node(parent.children[0])
@@ -1624,6 +1657,7 @@ class BPlusTree:
                 level += 1
 
     def _physical_page_ids_unlocked(self, *, readonly: bool = False) -> tuple[int, ...]:
+        """返回无需再次加锁的索引物理页号。"""
         if self._root_page_id is None:
             return ()
         queue = [self._root_page_id]
@@ -1782,10 +1816,12 @@ class IndexManager:
     """按索引名管理内存或落盘 B+Tree。"""
 
     def __init__(self) -> None:
+        """初始化实例所需的状态和依赖。"""
         self._indexes: dict[str, BPlusTree] = {}
 
     @staticmethod
     def _normalize(name: str) -> str:
+        """将索引键规范化为统一的元组表示。"""
         return name.strip().lower()
 
     def create(
@@ -1797,6 +1833,7 @@ class IndexManager:
         root_page_id: PageId | int | None = None,
         on_root_change: Callable[[int], None] | None = None,
     ) -> BPlusTree:
+        """创建并注册新的索引。"""
         key = self._normalize(name)
         if key in self._indexes:
             raise ExecutionError(f"索引 {name!r} 已存在")
@@ -1810,15 +1847,18 @@ class IndexManager:
         return tree
 
     def drop(self, name: str) -> BPlusTree | None:
+        """删除索引并释放其资源。"""
         return self._indexes.pop(self._normalize(name), None)
 
     def get(self, name: str) -> BPlusTree:
+        """按键查找索引条目。"""
         try:
             return self._indexes[self._normalize(name)]
         except KeyError as exc:
             raise ExecutionError(f"索引 {name!r} 不存在") from exc
 
     def items(self) -> Iterable[tuple[str, BPlusTree]]:
+        """返回索引中的全部条目。"""
         return tuple(self._indexes.items())
 
 

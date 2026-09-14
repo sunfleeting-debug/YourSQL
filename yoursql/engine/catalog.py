@@ -10,18 +10,21 @@ from ..common.types import Column, DataType, PageId, Schema, TableId, TableStats
 
 
 def _value_to_dict(value: Value | None) -> dict[str, object] | None:
+    """将目录中的标量值转换为可持久化的字典值。"""
     if value is None:
         return None
     return {"type": value.data_type.value, "value": value.value}
 
 
 def _value_from_dict(value: Mapping[str, object] | None) -> Value | None:
+    """从持久化字典值恢复目录标量。"""
     if value is None:
         return None
     return Value(DataType.parse(str(value["type"])), value.get("value"))
 
 
 def _column_to_dict(column: Column) -> dict[str, object]:
+    """将列元数据转换为可持久化字典。"""
     return {
         "name": column.name,
         "type": column.data_type.value,
@@ -33,6 +36,7 @@ def _column_to_dict(column: Column) -> dict[str, object]:
 
 
 def _column_from_dict(value: Mapping[str, object]) -> Column:
+    """从字典恢复列元数据。"""
     default = value.get("default")
     default_value = _value_from_dict(default if isinstance(default, Mapping) else None)
     return Column(
@@ -59,6 +63,7 @@ class IndexMetadata:
     payload_columns: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         return {
             "name": self.name,
             "table_id": int(self.table_id),
@@ -73,6 +78,7 @@ class IndexMetadata:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "IndexMetadata":
+        """从字典数据构造对象实例。"""
         root = value.get("root_page_id")
         return cls(
             name=str(value["name"]),
@@ -102,9 +108,11 @@ class TableMetadata:
 
     @property
     def stats(self) -> TableStats:
+        """返回对象的统计信息。"""
         return TableStats(self.row_count, len(self.page_ids))
 
     def to_dict(self, *, compact_system: bool = False) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         result: dict[str, object] = {
             "table_id": int(self.table_id),
             "name": self.name,
@@ -124,6 +132,7 @@ class TableMetadata:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "TableMetadata":
+        """从字典数据构造对象实例。"""
         raw_columns = value.get("columns")
         if raw_columns is None and bool(value.get("system", False)):
             # HOW：紧凑系统表元数据不重复保存固定列定义，加载时复用系统目录规范。
@@ -177,6 +186,7 @@ class ViewMetadata:
     system: bool = False
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         return {
             "name": self.name,
             "columns": [_column_to_dict(column) for column in self.schema],
@@ -186,6 +196,7 @@ class ViewMetadata:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "ViewMetadata":
+        """从字典数据构造对象实例。"""
         raw_columns = value.get("columns", [])
         if not isinstance(raw_columns, list):
             raise CatalogError("目录中的 view columns 不是数组")
@@ -210,6 +221,7 @@ class Catalog:
     VERSION = 3
 
     def __init__(self) -> None:
+        """初始化实例所需的状态和依赖。"""
         self._tables: dict[str, TableMetadata] = {}
         self._views: dict[str, ViewMetadata] = {}
         self._indexes: dict[str, IndexMetadata] = {}
@@ -217,9 +229,11 @@ class Catalog:
 
     @staticmethod
     def _key(name: str) -> str:
+        """根据输入生成稳定的内部键。"""
         return name.strip().lower()
 
     def __len__(self) -> int:
+        """返回对象包含的元素数量。"""
         return sum(not table.system for table in self._tables.values())
 
     def tables(self, *, include_system: bool = False) -> tuple[TableMetadata, ...]:
@@ -245,9 +259,11 @@ class Catalog:
         return tuple(sorted(self._views.values(), key=lambda item: item.name.lower()))
 
     def indexes(self) -> tuple[IndexMetadata, ...]:
+        """返回目录中已注册的索引元数据。"""
         return tuple(sorted(self._indexes.values(), key=lambda item: item.name.lower()))
 
     def get_table(self, name: str, *, include_system: bool = False) -> TableMetadata:
+        """按名称获取表元数据；不存在时抛出目录错误。"""
         table = self._tables.get(self._key(name))
         if table is None or (table.system and not include_system):
             raise CatalogError(f"表 {name!r} 不存在")
@@ -256,6 +272,7 @@ class Catalog:
     def find_table(
         self, name: str, *, include_system: bool = False
     ) -> TableMetadata | None:
+        """按名称查找表元数据，不存在时返回空值。"""
         table = self._tables.get(self._key(name))
         return (
             table
@@ -264,12 +281,14 @@ class Catalog:
         )
 
     def get_view(self, name: str) -> ViewMetadata:
+        """按名称获取视图元数据；不存在时抛出目录错误。"""
         view = self._views.get(self._key(name))
         if view is None:
             raise CatalogError(f"视图 {name!r} 不存在")
         return view
 
     def find_view(self, name: str) -> ViewMetadata | None:
+        """按名称查找视图元数据，不存在时返回空值。"""
         return self._views.get(self._key(name))
 
     def get_relation(self, name: str) -> TableMetadata | ViewMetadata:
@@ -291,6 +310,7 @@ class Catalog:
         table_id: TableId | None = None,
         system: bool = False,
     ) -> TableMetadata:
+        """校验并注册新的表元数据。"""
         key = self._key(name)
         if not key:
             raise CatalogError("表名不能为空")
@@ -312,6 +332,7 @@ class Catalog:
         *,
         system: bool = False,
     ) -> ViewMetadata:
+        """校验并注册新的视图定义。"""
         key = self._key(name)
         if not key:
             raise CatalogError("视图名不能为空")
@@ -324,12 +345,14 @@ class Catalog:
         return view
 
     def drop_view(self, name: str) -> ViewMetadata:
+        """删除指定视图并返回其元数据。"""
         view = self._views.pop(self._key(name), None)
         if view is None:
             raise CatalogError(f"视图 {name!r} 不存在")
         return view
 
     def drop_table(self, name: str) -> TableMetadata:
+        """删除指定表及其关联元数据。"""
         table = self._tables.pop(self._key(name), None)
         if table is None:
             raise CatalogError(f"表 {name!r} 不存在")
@@ -341,6 +364,7 @@ class Catalog:
         return table
 
     def create_index(self, index: IndexMetadata) -> IndexMetadata:
+        """校验并注册新的索引元数据。"""
         key = self._key(index.name)
         if key in self._indexes:
             raise CatalogError(f"索引 {index.name!r} 已存在")
@@ -359,6 +383,7 @@ class Catalog:
         return index
 
     def drop_index(self, name: str) -> IndexMetadata:
+        """删除指定索引并释放其资源。"""
         index = self._indexes.pop(self._key(name), None)
         if index is None:
             raise CatalogError(f"索引 {name!r} 不存在")
@@ -373,15 +398,18 @@ class Catalog:
         return index
 
     def get_index(self, name: str) -> IndexMetadata:
+        """按名称获取索引元数据；不存在时抛出目录错误。"""
         index = self._indexes.get(self._key(name))
         if index is None:
             raise CatalogError(f"索引 {name!r} 不存在")
         return index
 
     def find_index(self, name: str) -> IndexMetadata | None:
+        """按名称查找索引元数据，不存在时返回空值。"""
         return self._indexes.get(self._key(name))
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         return {
             "version": self.VERSION,
             "next_table_id": self._next_table_id,
@@ -395,6 +423,7 @@ class Catalog:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "Catalog":
+        """从字典数据构造对象实例。"""
         catalog = cls()
         version = int(value.get("version", 1))
         if version > cls.VERSION:

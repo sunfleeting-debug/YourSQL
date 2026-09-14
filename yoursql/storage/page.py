@@ -39,11 +39,13 @@ SLOT_DELETED = 1
 
 
 def _page_type_code(page_type: PageType) -> int:
+    """将页类型转换为页头使用的数值编码。"""
     values = tuple(PageType)
     return values.index(page_type) + 1
 
 
 def _page_type_from_code(code: int) -> PageType:
+    """将页头编码恢复为页类型。"""
     values = tuple(PageType)
     if code < 1 or code > len(values):
         raise StorageError(f"未知页类型编码 {code}")
@@ -61,6 +63,7 @@ class Page:
     payload: bytes = b""
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         self.page_id = int(self.page_id)
         if self.page_id < 0:
             raise StorageError("page_id 不能为负数")
@@ -75,9 +78,11 @@ class Page:
 
     @property
     def free_space(self) -> int:
+        """返回当前页可用于写入的空间大小。"""
         return self.page_size - HEADER_SIZE - len(self.payload)
 
     def to_bytes(self) -> bytes:
+        """将对象序列化为字节串。"""
         checksum = zlib.crc32(self.payload) & 0xFFFFFFFF
         header = PAGE_HEADER.pack(
             PAGE_MAGIC,
@@ -97,6 +102,7 @@ class Page:
 
     @classmethod
     def from_bytes(cls, raw: bytes, *, page_size: int | None = None) -> "Page":
+        """从字节串恢复对象实例。"""
         if page_size is None:
             page_size = len(raw)
         if len(raw) != page_size:
@@ -129,6 +135,7 @@ class Page:
     def empty(
         cls, page_id: int, page_size: int = 4096, page_type: PageType = PageType.FREE
     ) -> "Page":
+        """创建指定大小的空页。"""
         return cls(page_id=page_id, page_size=page_size, page_type=page_type)
 
 
@@ -144,6 +151,7 @@ class SlottedPage:
         entries: list[tuple[int, int, bool]] | None = None,
         _payload: bytes | None = None,
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.page_id = int(page_id)
         self.page_size = int(page_size)
         self.slots: list[bytes | None] = list(slots or [])
@@ -162,10 +170,12 @@ class SlottedPage:
 
     @property
     def _payload_capacity(self) -> int:
+        """返回页载荷区域可容纳的最大字节数。"""
         return self.page_size - HEADER_SIZE
 
     @classmethod
     def from_page(cls, page: Page) -> "SlottedPage":
+        """从完整数据库页恢复槽式页。"""
         if page.page_type is not PageType.HEAP:
             raise StorageError(f"页 {page.page_id} 不是 HEAP 页")
         if not page.payload:
@@ -176,6 +186,7 @@ class SlottedPage:
 
     @classmethod
     def _from_binary(cls, page: Page) -> "SlottedPage":
+        """从二进制页载荷解析槽目录和记录。"""
         capacity = page.page_size - HEADER_SIZE
         if len(page.payload) != capacity:
             raise StorageError(f"HEAP 页 {page.page_id} 双向槽式负载长度错误")
@@ -308,6 +319,7 @@ class SlottedPage:
     def _active_ranges(
         self, entries: list[tuple[int, int, bool]], directory_end: int
     ) -> list[tuple[int, int]]:
+        """收集未删除记录的物理范围，并检查范围是否重叠。"""
         ranges: list[tuple[int, int]] = []
         for record_offset, record_length, deleted in entries:
             if deleted or record_length == 0:
@@ -415,11 +427,13 @@ class SlottedPage:
         self, slots: list[bytes | None] | None = None
     ) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
         # 带候选 slots 的调用按候选布局试算，不改变当前页的物理记录位置。
+        """根据当前或候选槽状态构造二进制页布局。"""
         if slots is not None:
             return self._compact_binary(slots)
         return self._current_binary()
 
     def _set_compact(self, slots: list[bytes | None] | None = None) -> None:
+        """压缩槽式页并更新当前记录布局。"""
         selected = list(self.slots if slots is None else slots)
         payload, entries, _layout = self._compact_binary(selected)
         self.slots = selected
@@ -427,6 +441,7 @@ class SlottedPage:
         self._entries = entries
 
     def _ensure_binary(self) -> None:
+        """确保页已拥有可用的二进制布局缓存。"""
         if self._payload is None or len(self._entries) != len(self.slots):
             self._set_compact()
 
@@ -436,6 +451,7 @@ class SlottedPage:
         directory_end: int,
         entries: list[tuple[int, int, bool]],
     ) -> int | None:
+        """在空闲片段中为记录分配物理位置。"""
         if record_length <= 0 or record_length > 0xFFFF:
             raise StorageError("记录长度非法")
         for start, end in reversed(self._free_extents(entries, directory_end)):
@@ -460,6 +476,7 @@ class SlottedPage:
     def _place_record(
         self, slot_id: int, record: bytes, *, append_slot: bool = False
     ) -> int:
+        """把记录写入指定槽并更新其物理范围。"""
         self._ensure_binary()
         if not isinstance(record, bytes):
             raise TypeError("record 必须是 bytes")
@@ -499,6 +516,7 @@ class SlottedPage:
 
     @property
     def free_space(self) -> int:
+        """返回当前页可用于写入的空间大小。"""
         self._ensure_binary()
         directory_end = SLOTTED_HEADER_SIZE + len(self._entries) * SLOT_ENTRY_SIZE
         return sum(
@@ -507,6 +525,7 @@ class SlottedPage:
         )
 
     def insert(self, record: bytes) -> int:
+        """插入记录并返回新槽编号。"""
         if not isinstance(record, bytes):
             raise TypeError("record 必须是 bytes")
         for index, value in enumerate(self.slots):
@@ -515,11 +534,13 @@ class SlottedPage:
         return self._place_record(len(self.slots), record, append_slot=True)
 
     def get(self, slot_id: int) -> bytes | None:
+        """读取指定键或槽中的对象；找不到时返回空值。"""
         if slot_id < 0 or slot_id >= len(self.slots):
             raise StorageError(f"槽号 {slot_id} 越界")
         return self.slots[slot_id]
 
     def update(self, slot_id: int, record: bytes) -> None:
+        """更新已有记录并维护相关页或索引。"""
         if slot_id < 0 or slot_id >= len(self.slots) or self.slots[slot_id] is None:
             raise StorageError(f"槽号 {slot_id} 不存在")
         if not isinstance(record, bytes):
@@ -557,6 +578,7 @@ class SlottedPage:
         self._entries[slot_id] = (offset, len(record), False)
 
     def delete(self, slot_id: int) -> None:
+        """删除指定槽中的记录并保留槽编号。"""
         if slot_id < 0 or slot_id >= len(self.slots):
             raise StorageError(f"槽号 {slot_id} 越界")
         if self.slots[slot_id] is None:
@@ -649,12 +671,14 @@ class SlottedPage:
         }
 
     def to_page(self) -> Page:
+        """将槽式页转换为完整数据库页。"""
         payload, entries, _layout = self._build_binary()
         self._payload = bytearray(payload)
         self._entries = entries
         return Page(self.page_id, self.page_size, PageType.HEAP, payload)
 
     def live_slots(self) -> tuple[tuple[int, bytes], ...]:
+        """遍历当前页中仍然有效的记录槽。"""
         return tuple(
             (index, value)
             for index, value in enumerate(self.slots)

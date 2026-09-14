@@ -12,12 +12,14 @@ from ...common.errors import AuthorizationError
 
 
 def _hash_password(password: str, salt: bytes | None = None) -> str:
+    """使用随机盐对密码进行哈希编码。"""
     chosen = salt or secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), chosen, 120_000)
     return f"{chosen.hex()}${digest.hex()}"
 
 
 def _verify_password(password: str, encoded: str) -> bool:
+    """校验密码与已编码凭据是否匹配。"""
     try:
         salt_text, digest_text = encoded.split("$", 1)
         actual = _hash_password(password, bytes.fromhex(salt_text)).split("$", 1)[1]
@@ -46,6 +48,7 @@ class RBAC:
     SERIALIZATION_VERSION = 1
 
     def __init__(self) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.roles: dict[str, Role] = {}
         self.users: dict[str, User] = {}
         self.create_role("admin")
@@ -54,9 +57,11 @@ class RBAC:
 
     @staticmethod
     def _key(name: str) -> str:
+        """根据输入生成稳定的内部键。"""
         return name.strip().lower()
 
     def create_role(self, name: str) -> Role:
+        """创建并注册新的角色。"""
         key = self._key(name)
         if not key or key in self.roles:
             raise AuthorizationError(f"角色 {name!r} 已存在或为空")
@@ -67,6 +72,7 @@ class RBAC:
     def create_user(
         self, name: str, password: str, *, roles: Iterable[str] = ()
     ) -> User:
+        """创建并注册新的用户。"""
         key = self._key(name)
         if not key or key in self.users:
             raise AuthorizationError(f"用户 {name!r} 已存在或为空")
@@ -79,6 +85,7 @@ class RBAC:
         return user
 
     def authenticate(self, name: str, password: str) -> User:
+        """校验凭据并返回认证后的主体。"""
         user = self.users.get(self._key(name))
         if user is None or not _verify_password(password, user.password_hash):
             raise AuthorizationError("用户名或密码错误")
@@ -87,6 +94,7 @@ class RBAC:
     def grant(
         self, privilege: str, *, user: str | None = None, role: str | None = None
     ) -> None:
+        """授予指定主体相应权限。"""
         if (user is None) == (role is None):
             raise AuthorizationError("GRANT 必须指定一个用户或角色")
         target = (
@@ -104,6 +112,7 @@ class RBAC:
     def revoke(
         self, privilege: str, *, user: str | None = None, role: str | None = None
     ) -> None:
+        """撤销指定主体的相应权限。"""
         if (user is None) == (role is None):
             raise AuthorizationError("REVOKE 必须指定一个用户或角色")
         target = (
@@ -251,6 +260,7 @@ class RBAC:
 
     @staticmethod
     def _read_strings(value: object, context: str) -> set[str]:
+        """从映射中读取并校验字符串集合。"""
         if not isinstance(value, list):
             raise AuthorizationError(f"权限目录中的{context}不是数组")
         result: set[str] = set()
@@ -261,6 +271,7 @@ class RBAC:
         return result
 
     def check(self, user: User, action: str, object_name: str | None = None) -> None:
+        """检查输入或内部状态是否满足约束。"""
         action_key = action.upper()
         candidates = {action_key, "*"}
         if object_name:

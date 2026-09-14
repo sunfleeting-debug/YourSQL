@@ -23,6 +23,7 @@ class TableHeap:
     def __init__(
         self, buffer_pool: BufferPool, page_ids: list[int] | None = None
     ) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.buffer_pool = buffer_pool
         self.page_ids: list[int] = [int(page_id) for page_id in (page_ids or [])]
 
@@ -34,12 +35,14 @@ class TableHeap:
 
     @staticmethod
     def _encode(row: tuple[object, ...]) -> bytes:
+        """将内部数据编码为存储字节串。"""
         return json.dumps(list(row), ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
 
     @staticmethod
     def _decode(raw: bytes) -> tuple[object, ...]:
+        """将存储字节串解码为内部数据。"""
         try:
             value = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
@@ -49,6 +52,7 @@ class TableHeap:
         return tuple(value)
 
     def _read_slotted(self, page_id: int) -> SlottedPage:
+        """读取页并解析为槽式页。"""
         page = self.buffer_pool.get_page(page_id, pin=True)
         try:
             return SlottedPage.from_page(page)
@@ -56,9 +60,11 @@ class TableHeap:
             self.buffer_pool.unpin(page_id)
 
     def _write_slotted(self, slotted: SlottedPage) -> None:
+        """将槽式页序列化后写回缓存。"""
         self.buffer_pool.put_page(slotted.to_page(), dirty=True)
 
     def insert(self, row: tuple[object, ...]) -> RowId:
+        """插入数据并维护相关索引或页。"""
         encoded = self._encode(row)
         # HOW：新记录优先尝试尾页，避免大表插入时逐行扫描所有已满页。
         # WHY：TPC-H lineitem 这类批量导入会把 O(行数 × 页数) 放大到不可接受。
@@ -106,6 +112,7 @@ class TableHeap:
             )
 
         def flush() -> None:
+            """将暂存数据刷新到下一级存储。"""
             nonlocal pending, used, free_slots
             if page_id is None or not pending:
                 return
@@ -134,6 +141,7 @@ class TableHeap:
         return row_ids
 
     def read(self, row_id: RowId) -> tuple[object, ...] | None:
+        """读取数据并按调用方要求返回。"""
         page_id = int(row_id.page_id)
         if page_id not in self.page_ids:
             return None
@@ -142,6 +150,7 @@ class TableHeap:
         return None if raw is None else self._decode(raw)
 
     def update(self, row_id: RowId, row: tuple[object, ...]) -> None:
+        """更新数据并维护相关索引或页。"""
         page_id = int(row_id.page_id)
         if page_id not in self.page_ids:
             raise StorageError("RowId 不属于当前堆表")
@@ -150,6 +159,7 @@ class TableHeap:
         self._write_slotted(slotted)
 
     def delete(self, row_id: RowId) -> bool:
+        """删除指定数据并维护相关状态。"""
         page_id = int(row_id.page_id)
         if page_id not in self.page_ids:
             return False
@@ -161,13 +171,16 @@ class TableHeap:
         return True
 
     def scan(self) -> Iterator[tuple[RowId, tuple[object, ...]]]:
+        """按页和槽顺序扫描输入中的有效记录。"""
         for page_id in tuple(self.page_ids):
             slotted = self._read_slotted(page_id)
             for slot_id, raw in slotted.live_slots():
                 yield RowId(PageId(page_id), slot_id), self._decode(raw)
 
     def count(self) -> int:
+        """统计堆表当前的有效记录数。"""
         return sum(1 for _row_id, _row in self.scan())
 
     def close(self) -> None:
+        """关闭资源并释放关联状态。"""
         self.buffer_pool.flush_all()

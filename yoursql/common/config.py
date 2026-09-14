@@ -45,11 +45,13 @@ def load_dotenv(path: str | Path = ".env") -> Path | None:
 
 
 def _env_text(name: str, default: str) -> str:
+    """读取字符串环境变量，并在未设置时返回默认值。"""
     value = os.getenv(name)
     return default if value is None or not value.strip() else value.strip()
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """读取布尔环境变量，并接受常见的 true/false 写法。"""
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
@@ -64,6 +66,7 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_int(
     name: str, default: int, *, minimum: int = 1, maximum: int | None = None
 ) -> int:
+    """读取整数环境变量，并校验范围和默认值。"""
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
@@ -78,6 +81,7 @@ def _env_int(
 
 
 def _env_float(name: str, default: float, *, minimum: float = 0.001) -> float:
+    """读取浮点环境变量，并校验最小值。"""
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
@@ -91,6 +95,7 @@ def _env_float(name: str, default: float, *, minimum: float = 0.001) -> float:
 
 
 def _env_optional_int(name: str, default: int | None = None) -> int | None:
+    """读取可选整数环境变量；空值表示未启用限制。"""
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
@@ -98,6 +103,7 @@ def _env_optional_int(name: str, default: int | None = None) -> int | None:
 
 
 def _env_origins(name: str = "YOURSQL_ALLOWED_ORIGINS") -> tuple[str, ...]:
+    """读取并规范化允许的跨域来源列表。"""
     value = os.getenv(name, "")
     return tuple(origin.strip() for origin in value.split(",") if origin.strip())
 
@@ -127,6 +133,7 @@ class DatabaseConfig:
         )
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         if self.page_size < 512 or self.page_size & (self.page_size - 1):
             raise ValueError("page_size 必须是不小于 512 的二次幂")
         if self.buffer_pool_size < 1:
@@ -201,6 +208,7 @@ class RuntimeConfig:
         return config
 
     def __post_init__(self) -> None:
+        """完成数据类初始化后的派生状态设置。"""
         if not self.database_path.strip():
             raise ValueError("database_path 不能为空")
         if not self.host.strip():

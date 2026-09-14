@@ -162,10 +162,12 @@ class Token:
 
     @property
     def type(self) -> TokenKind:
+        """返回 Token 的词种。"""
         return self.kind
 
     @property
     def value(self) -> SqlValue | str:
+        """返回 Token 的解码值或原始值。"""
         return (
             self.literal
             if self.kind
@@ -182,25 +184,32 @@ class Token:
 
     @property
     def text(self) -> str:
+        """返回 Token 的源文本。"""
         return self.lexeme
 
     @property
     def position(self) -> tuple[int, int]:
+        """返回 Token 的行列位置。"""
         return self.line, self.column
 
     def as_tuple(self) -> tuple[TokenKind, str, int, int]:
+        """返回对象的元组表示。"""
         return self.kind, self.lexeme, self.line, self.column
 
     def __iter__(self) -> Iterator[object]:
+        """返回对象的迭代器。"""
         return iter(self.as_tuple())
 
     def __getitem__(self, index: int | slice) -> object:
+        """按键或下标读取对象中的元素。"""
         return self.as_tuple()[index]
 
     def __len__(self) -> int:
+        """返回对象包含的元素数量。"""
         return 4
 
     def as_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         data: dict[str, object] = {
             "kind": self.kind.value,
             "lexeme": self.lexeme,
@@ -248,6 +257,7 @@ class Lexer:
     }
 
     def __init__(self, source: str | None = None) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.source = "" if source is None else source
         if not isinstance(self.source, str):
             raise TypeError("SQL 源码必须是字符串")
@@ -256,9 +266,11 @@ class Lexer:
         self._column = 1
 
     def __iter__(self) -> Iterator[Token]:
+        """返回对象的迭代器。"""
         return iter(self.tokenize())
 
     def tokenize(self, source: str | None = None) -> list[Token]:
+        """扫描输入文本并产出 Token 流。"""
         if source is not None:
             if not isinstance(source, str):
                 raise TypeError("SQL 源码必须是字符串")
@@ -312,10 +324,12 @@ class Lexer:
     scan = tokenize
 
     def _peek(self, offset: int = 0) -> str:
+        """查看当前位置的输入项而不推进位置。"""
         index = self._index + offset
         return self.source[index] if index < len(self.source) else ""
 
     def _advance(self, count: int = 1) -> str:
+        """消费当前输入项并返回它，同时推进当前位置。"""
         consumed = ""
         for _ in range(count):
             char = self._peek()
@@ -335,16 +349,19 @@ class Lexer:
         return consumed
 
     def _newline(self) -> None:
+        """处理换行并更新词法扫描位置。"""
         char = self._advance()
         if char == "\r" and self._peek() == "\n":
             self._advance()
 
     def _line_comment(self) -> None:
+        """跳过当前行注释。"""
         self._advance(2)
         while self._peek() not in {"", "\r", "\n"}:
             self._advance()
 
     def _block_comment(self) -> None:
+        """跳过块注释并保留源码位置。"""
         line, column = self._line, self._column
         self._advance(2)
         while self._peek():
@@ -360,6 +377,7 @@ class Lexer:
         )
 
     def _identifier(self, spelling: str, line: int, column: int) -> Token:
+        """扫描标识符或关键字 Token。"""
         self._advance(len(spelling))
         upper = spelling.upper()
         if upper == "TRUE":
@@ -371,6 +389,7 @@ class Lexer:
         return Token(KEYWORDS.get(upper, TokenKind.IDENTIFIER), spelling, line, column)
 
     def _number(self, line: int, column: int) -> Token:
+        """扫描整数或浮点数字面量。"""
         match = _NUMBER_RE.match(self.source, self._index)
         if match is None:
             raise LexerError("非法数字", line=line, column=column)
@@ -385,6 +404,7 @@ class Lexer:
         return Token(TokenKind.INTEGER, spelling, line, column, int(spelling))
 
     def _string(self, line: int, column: int) -> Token:
+        """扫描或读取字符串输入。"""
         start = self._index
         self._advance()
         value: list[str] = []
@@ -421,6 +441,7 @@ class Lexer:
         )
 
     def _quoted_identifier(self, quote: str, line: int, column: int) -> Token:
+        """扫描双引号包围的标识符。"""
         start = self._index
         self._advance()
         value: list[str] = []
@@ -443,10 +464,12 @@ class Lexer:
 
 
 def tokenize(source: str) -> list[Token]:
+    """扫描输入文本并产出 Token 流。"""
     return Lexer(source).tokenize()
 
 
 def lex(source: str) -> list[Token]:
+    """对 SQL 文本执行词法分析。"""
     return tokenize(source)
 
 

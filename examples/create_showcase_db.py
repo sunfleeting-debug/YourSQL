@@ -163,6 +163,7 @@ def _schema(db: Database) -> None:
 
 
 def _departments() -> Iterable[tuple[object, ...]]:
+    """生成演示部门数据行。"""
     for identifier in range(1, 13):
         yield (
             identifier,
@@ -175,6 +176,7 @@ def _departments() -> Iterable[tuple[object, ...]]:
 
 
 def _warehouses() -> Iterable[tuple[object, ...]]:
+    """生成演示仓库数据行。"""
     for identifier in range(1, 25):
         yield (
             identifier,
@@ -187,6 +189,7 @@ def _warehouses() -> Iterable[tuple[object, ...]]:
 
 
 def _customers() -> Iterable[tuple[object, ...]]:
+    """生成演示客户数据行。"""
     for identifier in range(1, CUSTOMER_COUNT + 1):
         segment = SEGMENTS[(identifier * 7) % len(SEGMENTS)]
         city = CITIES[(identifier * 11) % len(CITIES)]
@@ -204,6 +207,7 @@ def _customers() -> Iterable[tuple[object, ...]]:
 
 
 def _products() -> Iterable[tuple[object, ...]]:
+    """生成演示产品数据行。"""
     for identifier in range(1, PRODUCT_COUNT + 1):
         category = CATEGORIES[(identifier * 5) % len(CATEGORIES)]
         price = round(19.5 + (identifier % 125) * 7.35 + (identifier % 10) * 0.19, 2)
@@ -223,6 +227,7 @@ def _products() -> Iterable[tuple[object, ...]]:
 
 
 def _orders() -> Iterable[tuple[object, ...]]:
+    """生成演示订单数据行。"""
     for identifier in range(1, ORDER_COUNT + 1):
         status = ORDER_STATUSES[(identifier * 3) % len(ORDER_STATUSES)]
         shipped = None if status in {"pending", "cancelled"} else f"202{identifier % 5}-{identifier % 12 + 1:02d}-{identifier % 25 + 2:02d}"
@@ -241,6 +246,7 @@ def _orders() -> Iterable[tuple[object, ...]]:
 
 
 def _order_items() -> Iterable[tuple[object, ...]]:
+    """生成演示订单明细数据行。"""
     item_id = 1
     for order_id in range(1, ORDER_COUNT + 1):
         item_count = 2 + (order_id * 13) % 4
@@ -265,6 +271,7 @@ def _order_items() -> Iterable[tuple[object, ...]]:
 
 
 def _tickets() -> Iterable[tuple[object, ...]]:
+    """生成演示工单数据行。"""
     for identifier in range(1, TICKET_COUNT + 1):
         status = TICKET_STATUSES[(identifier * 5) % len(TICKET_STATUSES)]
         resolved = None if status in {"open", "pending"} else f"202{identifier % 5}-{identifier % 12 + 1:02d}-{identifier % 25 + 2:02d}"
@@ -284,6 +291,7 @@ def _tickets() -> Iterable[tuple[object, ...]]:
 
 
 def _events() -> Iterable[tuple[object, ...]]:
+    """生成演示事件数据行。"""
     for identifier in range(1, EVENT_COUNT + 1):
         event_type = EVENT_TYPES[(identifier * 7) % len(EVENT_TYPES)]
         yield (
@@ -299,6 +307,7 @@ def _events() -> Iterable[tuple[object, ...]]:
 
 
 def _reviews() -> Iterable[tuple[object, ...]]:
+    """生成演示评价数据行。"""
     for identifier in range(1, REVIEW_COUNT + 1):
         rating = (identifier * 7) % 5 + 1
         yield (
@@ -426,6 +435,7 @@ def build(path: Path, *, force: bool = False) -> dict[str, object]:
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--force", action="store_true", help="重建默认 data/showcase_v2.db")

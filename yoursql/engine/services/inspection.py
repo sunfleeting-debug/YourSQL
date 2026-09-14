@@ -49,6 +49,7 @@ def _is_admin(database: Database) -> bool:
 
 
 def _table_for_page(database: Database, page_id: int) -> TableMetadata | None:
+    """根据页号查找所属的表元数据。"""
     for table in database.catalog.tables(include_system=True):
         if page_id in {int(item) for item in table.page_ids}:
             return table
@@ -93,6 +94,7 @@ def page_header(
     *,
     index_pages: Mapping[int, list[tuple[str, TableMetadata | None]]] | None = None,
 ) -> JsonObject:
+    """构造工作台展示用的页头摘要。"""
     result: JsonObject = {
         "page_id": page.page_id,
         "type": page.page_type.value,
@@ -284,6 +286,7 @@ def storage_index_snapshot(database: Database, limit: int) -> JsonObject:
 def inspect_page(
     database: Database, page_id: int, offset: int, limit: int
 ) -> JsonObject:
+    """读取并返回指定页的只读检查信息。"""
     authorize_storage(database)
     if page_id >= database.disk.page_count:
         raise YourSQLError("页不存在", "NOT_FOUND")
@@ -433,6 +436,7 @@ def inspect_page(
 
 
 def inspect_index(database: Database, name: str, offset: int, limit: int) -> JsonObject:
+    """读取并返回指定索引的只读检查信息。"""
     authorize_storage(database)
     metadata = database.catalog.get_index(name)
     return {

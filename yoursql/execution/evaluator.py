@@ -173,6 +173,7 @@ class ExpressionEvaluator:
         )
 
     def _fold_constants(self, expression: Expr | None) -> Expr | None:
+        """递归折叠可在执行前计算的常量表达式。"""
         if expression is None:
             return None
         folded, _constant, _value = self._fold_node(expression)

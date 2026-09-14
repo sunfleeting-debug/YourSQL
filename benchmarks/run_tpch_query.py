@@ -22,6 +22,7 @@ DEFAULT_DATA_DIR = ROOT / "benchmarks" / "third_party" / "tpch_sf001"
 
 
 def main() -> None:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--query", type=int, required=True)

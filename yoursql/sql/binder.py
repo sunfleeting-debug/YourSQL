@@ -43,9 +43,13 @@ class TableProtocol(Protocol):
 class CatalogProtocol(Protocol):
     """Binder 需要的最小目录读接口。"""
 
-    def get_table(self, name: str) -> TableProtocol: ...
+    def get_table(self, name: str) -> TableProtocol:
+        """按名称获取表元数据。"""
+        ...
 
-    def get_relation(self, name: str) -> TableProtocol: ...
+    def get_relation(self, name: str) -> TableProtocol:
+        """按名称获取表或视图的关系元数据。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,7 @@ class BoundStatement:
     insert_indexes: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
+        """将对象转换为可序列化的字典。"""
         return {
             "statement": self.statement.to_dict(),
             "output_columns": list(self.output_columns),
@@ -68,10 +73,12 @@ class Binder:
     """完成表列存在性、值数量和字面量类型检查。"""
 
     def __init__(self, catalog: CatalogProtocol | None = None) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.catalog = catalog
 
     def bind(self, statement: Statement) -> BoundStatement:
         # 编译器可以在没有 Catalog 的情况下先生成 AST/计划；真正执行前再做语义绑定。
+        """将 AST 绑定到目录元数据并完成语义检查。"""
         if self.catalog is None:
             return BoundStatement(statement)
         if isinstance(statement, CreateTable):
@@ -118,6 +125,7 @@ class Binder:
         return BoundStatement(statement)
 
     def _bind_create_table(self, statement: CreateTable) -> None:
+        """绑定 CREATE TABLE 的列和约束定义。"""
         seen: set[str] = set()
         for column in statement.columns:
             key = column.name.lower()
@@ -139,6 +147,7 @@ class Binder:
                     raise self._located_error(exc.message, column.default) from exc
 
     def _bind_insert(self, statement: Insert) -> BoundStatement:
+        """绑定 INSERT 的目标表、列和值。"""
         table = self._table(statement.table, statement, "table")
         schema: Schema = table.schema
         indexes: list[int] = []
@@ -177,6 +186,7 @@ class Binder:
         return BoundStatement(statement, insert_indexes=tuple(indexes))
 
     def _bind_select(self, statement: Select) -> BoundStatement:
+        """绑定 SELECT 的关系、列引用和输出列。"""
         relations = self._relations(self._all_table_refs(statement))
         for item in statement.items:
             self._bind_expression(item.expression, relations)
@@ -214,6 +224,7 @@ class Binder:
         return BoundStatement(statement, tuple(output))
 
     def _all_table_refs(self, statement: Select) -> tuple[TableRef, ...]:
+        """收集 SELECT 中包含的全部表引用。"""
         refs: list[TableRef] = []
         if statement.from_table is not None:
             refs.append(statement.from_table)
@@ -221,6 +232,7 @@ class Binder:
         return tuple(refs)
 
     def _relations(self, refs: tuple[TableRef, ...]) -> tuple[tuple[str, Schema], ...]:
+        """解析表引用并返回关系名与 Schema。"""
         relations: list[tuple[str, Schema]] = []
         for ref in refs:
             table = self._relation(ref.name, ref)
@@ -231,6 +243,7 @@ class Binder:
     def _relation(
         self, name: str, node: Node | None = None, key: str | None = None
     ) -> TableProtocol:
+        """按名称解析表或视图关系。"""
         if self.catalog is None:
             return _SchemaHolder(Schema.from_iterable(()))
         try:
@@ -248,6 +261,7 @@ class Binder:
     def _table(
         self, name: str, node: Node | None = None, key: str | None = None
     ) -> TableProtocol:
+        """解析或获取表元数据。"""
         if self.catalog is None:
             return _SchemaHolder(Schema.from_iterable(()))
         try:
@@ -263,6 +277,7 @@ class Binder:
         schema: Schema,
         statement: Update | None = None,
     ) -> None:
+        """绑定 UPDATE 的列赋值表达式。"""
         for index, (name, expression) in enumerate(assignments):
             try:
                 schema.column(name)
@@ -275,6 +290,7 @@ class Binder:
     def _bind_expression(
         self, expression: Expr | None, relations: tuple[tuple[str, Schema], ...]
     ) -> None:
+        """递归绑定表达式中的列引用和子查询。"""
         if expression is None or isinstance(expression, (Literal, Star)):
             return
         if isinstance(expression, ColumnRef):
@@ -310,6 +326,7 @@ class Binder:
     def _resolve_column(
         self, expression: ColumnRef, relations: tuple[tuple[str, Schema], ...]
     ) -> None:
+        """根据限定名或裸列名解析列位置。"""
         if not relations:
             raise self._located_error(
                 f"列 {expression.qualified_name!r} 没有可绑定的表", expression
@@ -360,6 +377,7 @@ class Binder:
 
     @staticmethod
     def _expression_name(expression: Expr) -> str:
+        """为表达式生成可展示的输出列名。"""
         if isinstance(expression, FunctionCall):
             return expression.name.lower()
         if isinstance(expression, UnaryOp):
@@ -373,4 +391,5 @@ class _SchemaHolder:
     """无目录编译时的空占位；带目录绑定会走真实表。"""
 
     def __init__(self, schema: Schema) -> None:
+        """初始化实例所需的状态和依赖。"""
         self.schema = schema

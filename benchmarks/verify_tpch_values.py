@@ -32,10 +32,12 @@ def normalize(value: object) -> object:
 
 
 def canonical(rows: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    """将结果行转换为稳定的可比较表示。"""
     return sorted(tuple(normalize(value) for value in row) for row in rows)
 
 
 def main() -> int:
+    """解析命令行参数并启动当前脚本任务。"""
     parser = argparse.ArgumentParser(description="TPC-H 结果逐值对拍（YourSQL vs SQLite）")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
