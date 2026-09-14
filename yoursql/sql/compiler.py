@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..common.errors import ParserError
 from .ast import Statement
 from .binder import Binder, BoundStatement, CatalogProtocol
 from .lexer import Token, tokenize
 from .parser import Parser
-from .plan import PlanNode, plan_from_statement
+from ..planner.logical import LogicalPlanNode, plan_from_statement
+from ..planner.physical import PhysicalPlanNode
 
 
 @dataclass(frozen=True)
@@ -19,8 +19,8 @@ class CompilationResult:
     tokens: tuple[Token, ...]
     statement: Statement
     bound: BoundStatement
-    plan: PlanNode
-    optimized_plan: PlanNode | None = None
+    plan: LogicalPlanNode
+    optimized_plan: PhysicalPlanNode | None = None
 
     @property
     def ast(self) -> Statement:
@@ -41,17 +41,28 @@ class CompilationResult:
 class Compiler:
     """不修改 Catalog 的 SQL 编译入口。"""
 
-    def compile(self, sql: str, catalog: CatalogProtocol | None = None) -> CompilationResult:
+    def compile(
+        self, sql: str, catalog: CatalogProtocol | None = None
+    ) -> CompilationResult:
         tokens = tuple(tokenize(sql))
         statement = Parser(tokens).parse_one()
         bound = Binder(catalog).bind(statement)
-        return CompilationResult(tokens, statement, bound, plan_from_statement(statement))
+        return CompilationResult(
+            tokens, statement, bound, plan_from_statement(statement)
+        )
 
-    def compile_script(self, sql: str, catalog: CatalogProtocol | None = None) -> tuple[CompilationResult, ...]:
+    def compile_script(
+        self, sql: str, catalog: CatalogProtocol | None = None
+    ) -> tuple[CompilationResult, ...]:
         tokens = tuple(tokenize(sql))
         statements = Parser(tokens).parse_script()
         return tuple(
-            CompilationResult(tokens, statement, (bound := Binder(catalog).bind(statement)), plan_from_statement(statement))
+            CompilationResult(
+                tokens,
+                statement,
+                Binder(catalog).bind(statement),
+                plan_from_statement(statement),
+            )
             for statement in statements
         )
 

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
-from typing import Any
-
+from dataclasses import dataclass, fields
 from ..common.types import DataType
 
 

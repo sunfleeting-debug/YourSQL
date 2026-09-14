@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 from yoursql.sql.lexer import tokenize
 from yoursql.sql.parser import Parser
 

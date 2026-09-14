@@ -74,11 +74,17 @@ class DiskManager:
             raise StorageError("数据库文件版本过高")
         stored_size = int(data.get("page_size", self.page_size))
         if stored_size != self.page_size:
-            raise StorageError(f"页大小不匹配，文件为 {stored_size}，配置为 {self.page_size}")
+            raise StorageError(
+                f"页大小不匹配，文件为 {stored_size}，配置为 {self.page_size}"
+            )
         self._next_page_id = max(1, int(data.get("next_page_id", 1)))
         self._free_pages = {int(value) for value in data.get("free_pages", [])}
         raw_named = data.get("named_pages", {})
-        self._named_pages = {str(key): int(value) for key, value in raw_named.items()} if isinstance(raw_named, Mapping) else {}
+        self._named_pages = (
+            {str(key): int(value) for key, value in raw_named.items()}
+            if isinstance(raw_named, Mapping)
+            else {}
+        )
 
     def _superblock_payload(self) -> bytes:
         data = {
@@ -111,7 +117,9 @@ class DiskManager:
         self._file.write(page.to_bytes())
 
     def _write_superblock(self) -> None:
-        self._write_raw(Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload()))
+        self._write_raw(
+            Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload())
+        )
 
     def register_named_page(self, name: str, page_id: int) -> None:
         with self._lock:
@@ -124,7 +132,9 @@ class DiskManager:
         with self._lock:
             return self._named_pages.get(name.strip().lower())
 
-    def allocate(self, page_type: PageType = PageType.FREE, payload: bytes = b"") -> Page:
+    def allocate(
+        self, page_type: PageType = PageType.FREE, payload: bytes = b""
+    ) -> Page:
         with self._lock:
             self._ensure_open()
             if self._free_pages:
@@ -159,7 +169,9 @@ class DiskManager:
         with self._lock:
             self._ensure_open()
             self._check_page_id(int(page_id))
-            return Page.from_bytes(self._read_raw(int(page_id)), page_size=self.page_size)
+            return Page.from_bytes(
+                self._read_raw(int(page_id)), page_size=self.page_size
+            )
 
     def write(self, page: Page) -> None:
         with self._lock:
@@ -172,8 +184,12 @@ class DiskManager:
     def io_stats(self) -> dict[str, int]:
         """返回进程内页 I/O 计数；调试读取单独排除。"""
         with self._lock:
-            return {"page_reads": self._reads, "page_writes": self._writes,
-                    "bytes_read": self._reads * self.page_size, "bytes_written": self._writes * self.page_size}
+            return {
+                "page_reads": self._reads,
+                "page_writes": self._writes,
+                "bytes_read": self._reads * self.page_size,
+                "bytes_written": self._writes * self.page_size,
+            }
 
     def peek(self, page_id: int) -> Page:
         """只读调试页，恢复文件游标且不改变正常读写计数。"""
@@ -181,7 +197,9 @@ class DiskManager:
             self._ensure_open()
             self._check_page_id(page_id)
             if page_id == 0:
-                return Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload())
+                return Page(
+                    0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload()
+                )
             # WHY：正常读写走 BufferedRandom，未 flush 的写入独立句柄看不到；页面被缓冲池淘汰后
             # 再经此路径读取会拿到旧内容（实测 33 页索引 + 32 帧缓冲池会把叶页读成空页）。
             # flush 不改变逻辑游标也不计入 I/O 统计，仍然保持“只读调试”语义。
@@ -189,7 +207,9 @@ class DiskManager:
             # 独立只读句柄不会移动 BufferedRandom 游标，也不会触发隐式 flush。
             with self.path.open("rb") as stream:
                 stream.seek(page_id * self.page_size)
-                return Page.from_bytes(stream.read(self.page_size), page_size=self.page_size)
+                return Page.from_bytes(
+                    stream.read(self.page_size), page_size=self.page_size
+                )
 
     def sync(self) -> None:
         with self._lock:

@@ -61,7 +61,9 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} 必须是 true/false")
 
 
-def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
+def _env_int(
+    name: str, default: int, *, minimum: int = 1, maximum: int | None = None
+) -> int:
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
@@ -116,8 +118,12 @@ class DatabaseConfig:
         return cls(
             page_size=_env_int("YOURSQL_PAGE_SIZE", cls.page_size, minimum=512),
             buffer_pool_size=_env_int("YOURSQL_BUFFER_POOL_SIZE", cls.buffer_pool_size),
-            replacement_policy=_env_text("YOURSQL_REPLACEMENT_POLICY", cls.replacement_policy),
-            max_varchar_length=_env_int("YOURSQL_MAX_VARCHAR_LENGTH", cls.max_varchar_length),
+            replacement_policy=_env_text(
+                "YOURSQL_REPLACEMENT_POLICY", cls.replacement_policy
+            ),
+            max_varchar_length=_env_int(
+                "YOURSQL_MAX_VARCHAR_LENGTH", cls.max_varchar_length
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -178,14 +184,20 @@ class RuntimeConfig:
             max_sessions=_env_int("YOURSQL_MAX_SESSIONS", 64),
             max_tasks=_env_int("YOURSQL_MAX_TASKS", 32),
             history_entries=_env_int("YOURSQL_HISTORY_ENTRIES", 200),
-            result_retention_bytes=_env_int("YOURSQL_RESULT_RETENTION_BYTES", 2_000_000),
+            result_retention_bytes=_env_int(
+                "YOURSQL_RESULT_RETENTION_BYTES", 2_000_000
+            ),
             trace_max_steps=_env_optional_int("YOURSQL_TRACE_MAX_STEPS"),
             database_config=DatabaseConfig.from_environment(),
         )
         if config.default_query_timeout_seconds > config.max_query_timeout_seconds:
-            raise ValueError("YOURSQL_QUERY_TIMEOUT_SECONDS 不能大于 YOURSQL_MAX_QUERY_TIMEOUT_SECONDS")
+            raise ValueError(
+                "YOURSQL_QUERY_TIMEOUT_SECONDS 不能大于 YOURSQL_MAX_QUERY_TIMEOUT_SECONDS"
+            )
         if config.default_result_rows > config.max_result_rows:
-            raise ValueError("YOURSQL_DEFAULT_RESULT_ROWS 不能大于 YOURSQL_MAX_RESULT_ROWS")
+            raise ValueError(
+                "YOURSQL_DEFAULT_RESULT_ROWS 不能大于 YOURSQL_MAX_RESULT_ROWS"
+            )
         return config
 
     def __post_init__(self) -> None:
@@ -214,14 +226,18 @@ class RuntimeConfig:
             "history_entries": self.history_entries,
             "result_retention_bytes": self.result_retention_bytes,
         }
-        invalid = next((name for name, value in positive_limits.items() if value <= 0), None)
+        invalid = next(
+            (name for name, value in positive_limits.items() if value <= 0), None
+        )
         if invalid is not None:
             raise ValueError(f"{invalid} 必须为正数")
         if self.trace_max_steps is not None and self.trace_max_steps < 1:
             raise ValueError("trace_max_steps 必须为正数或 None")
 
 
-def configure_logging(level: int = logging.WARNING, log_file: str | Path | None = None) -> logging.Logger:
+def configure_logging(
+    level: int = logging.WARNING, log_file: str | Path | None = None
+) -> logging.Logger:
     """配置一次包级日志器并返回它。"""
 
     logger = logging.getLogger("yoursql")
@@ -230,6 +246,8 @@ def configure_logging(level: int = logging.WARNING, log_file: str | Path | None 
         handler: logging.Handler = logging.StreamHandler()
         if log_file is not None:
             handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
         logger.addHandler(handler)
     return logger

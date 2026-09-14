@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import re
-from typing import Any, Iterator
+from typing import Iterator
 
+from ..common.contracts import SqlValue
 from ..common.errors import LexerError
 
 
@@ -157,15 +158,27 @@ class Token:
     lexeme: str
     line: int
     column: int
-    literal: Any = None
+    literal: SqlValue = None
 
     @property
     def type(self) -> TokenKind:
         return self.kind
 
     @property
-    def value(self) -> Any:
-        return self.literal if self.kind in {TokenKind.STRING, TokenKind.INTEGER, TokenKind.FLOAT, TokenKind.BOOLEAN, TokenKind.NULL, TokenKind.QUOTED_IDENTIFIER} else self.lexeme
+    def value(self) -> SqlValue | str:
+        return (
+            self.literal
+            if self.kind
+            in {
+                TokenKind.STRING,
+                TokenKind.INTEGER,
+                TokenKind.FLOAT,
+                TokenKind.BOOLEAN,
+                TokenKind.NULL,
+                TokenKind.QUOTED_IDENTIFIER,
+            }
+            else self.lexeme
+        )
 
     @property
     def text(self) -> str:
@@ -188,8 +201,20 @@ class Token:
         return 4
 
     def as_dict(self) -> dict[str, object]:
-        data: dict[str, object] = {"kind": self.kind.value, "lexeme": self.lexeme, "line": self.line, "column": self.column}
-        if self.kind in {TokenKind.STRING, TokenKind.INTEGER, TokenKind.FLOAT, TokenKind.BOOLEAN, TokenKind.NULL, TokenKind.QUOTED_IDENTIFIER}:
+        data: dict[str, object] = {
+            "kind": self.kind.value,
+            "lexeme": self.lexeme,
+            "line": self.line,
+            "column": self.column,
+        }
+        if self.kind in {
+            TokenKind.STRING,
+            TokenKind.INTEGER,
+            TokenKind.FLOAT,
+            TokenKind.BOOLEAN,
+            TokenKind.NULL,
+            TokenKind.QUOTED_IDENTIFIER,
+        }:
             data["value"] = self.literal
         return data
 
@@ -277,7 +302,9 @@ class Lexer:
                 self._advance()
                 result.append(Token(self._ONE_CHAR[char], char, line, column))
                 continue
-            raise LexerError(f"非法字符 {char!r}", line=line, column=column, character=char)
+            raise LexerError(
+                f"非法字符 {char!r}", line=line, column=column, character=char
+            )
         result.append(Token(TokenKind.EOF, "", self._line, self._column))
         return result
 
@@ -297,7 +324,10 @@ class Lexer:
             consumed += char
             self._index += 1
             # WHY：字符串和引用标识符也允许换行，位置必须始终按原始源码推进。
-            if char == "\r" or (char == "\n" and (self._index < 2 or self.source[self._index - 2] != "\r")):
+            if char == "\r" or (
+                char == "\n"
+                and (self._index < 2 or self.source[self._index - 2] != "\r")
+            ):
                 self._line += 1
                 self._column = 1
             elif char != "\n":
@@ -325,7 +355,9 @@ class Lexer:
                 self._newline()
             else:
                 self._advance()
-        raise LexerError("块注释未闭合，期望 */", line=line, column=column, expected="*/")
+        raise LexerError(
+            "块注释未闭合，期望 */", line=line, column=column, expected="*/"
+        )
 
     def _identifier(self, spelling: str, line: int, column: int) -> Token:
         self._advance(len(spelling))
@@ -363,13 +395,30 @@ class Lexer:
                     self._advance()
                     value.append("'")
                     continue
-                return Token(TokenKind.STRING, self.source[start : self._index], line, column, "".join(value))
+                return Token(
+                    TokenKind.STRING,
+                    self.source[start : self._index],
+                    line,
+                    column,
+                    "".join(value),
+                )
             if char == "\\" and self._peek():
                 escaped = self._advance()
-                value.append({"n": "\n", "r": "\r", "t": "\t", "0": "\0", "\\": "\\", "'": "'"}.get(escaped, escaped))
+                value.append(
+                    {
+                        "n": "\n",
+                        "r": "\r",
+                        "t": "\t",
+                        "0": "\0",
+                        "\\": "\\",
+                        "'": "'",
+                    }.get(escaped, escaped)
+                )
             else:
                 value.append(char)
-        raise LexerError("字符串未闭合，期望单引号", line=line, column=column, expected="'")
+        raise LexerError(
+            "字符串未闭合，期望单引号", line=line, column=column, expected="'"
+        )
 
     def _quoted_identifier(self, quote: str, line: int, column: int) -> Token:
         start = self._index
@@ -382,7 +431,13 @@ class Lexer:
                     self._advance()
                     value.append(quote)
                     continue
-                return Token(TokenKind.QUOTED_IDENTIFIER, self.source[start : self._index], line, column, "".join(value))
+                return Token(
+                    TokenKind.QUOTED_IDENTIFIER,
+                    self.source[start : self._index],
+                    line,
+                    column,
+                    "".join(value),
+                )
             value.append(char)
         raise LexerError("引用标识符未闭合", line=line, column=column, expected=quote)
 

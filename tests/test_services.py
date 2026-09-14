@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from yoursql.engine.database import Database
-from yoursql.engine.http import HTTPService
-from yoursql.engine.ssh import SSHStdioServer
+from yoursql.engine.runtime.database import Database
+from yoursql.engine.services.http import DatabaseHTTPServer, HTTPService
+from yoursql.engine.services.ssh import SSHStdioServer
 
 
 def test_http_health_metrics_and_sql(tmp_path: Path) -> None:
@@ -19,6 +19,17 @@ def test_http_health_metrics_and_sql(tmp_path: Path) -> None:
             assert json.load(response)["message"] == "CREATE TABLE t"
         with urlopen(base + "/metrics") as response:
             assert json.load(response)["catalog"]["tables"] == 1
+
+
+def test_workbench_static_directory_matches_vite_output(tmp_path: Path) -> None:
+    """默认静态目录应与 web/vite.config.ts 和 package-data 使用同一个包根目录。"""
+
+    with Database(tmp_path / "static-path.db") as database:
+        server = DatabaseHTTPServer(("127.0.0.1", 0), database)
+        try:
+            assert server.static_dir == Path(__file__).parents[1] / "yoursql" / "workbench_static"
+        finally:
+            server.server_close()
 
 
 def test_ssh_stdio_json_lines(tmp_path: Path) -> None:

@@ -9,8 +9,9 @@ import sys
 from collections.abc import Iterable
 from typing import TextIO
 
-from ..common.errors import YourSQLError
-from .database import Database
+from ...common import JsonObject
+from ...common.errors import YourSQLError
+from ..runtime.database import Database
 
 
 class SSHAdapterError(RuntimeError):
@@ -20,7 +21,12 @@ class SSHAdapterError(RuntimeError):
 class SSHStdioServer:
     """每行读取 SQL，每行返回一份 JSON ExecutionResult。"""
 
-    def __init__(self, database: Database, stdin: TextIO | None = None, stdout: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        stdin: TextIO | None = None,
+        stdout: TextIO | None = None,
+    ) -> None:
         self.database = database
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
@@ -48,7 +54,9 @@ class SSHCommandClient:
     def __init__(self, executable: str = "ssh") -> None:
         self.executable = executable
 
-    def execute(self, destination: str, sql: str, *, remote_command: str = "yoursql --stdio") -> dict[str, object]:
+    def execute(
+        self, destination: str, sql: str, *, remote_command: str = "yoursql --stdio"
+    ) -> JsonObject:
         if shutil.which(self.executable) is None:
             raise SSHAdapterError(f"未找到外部 SSH 程序: {self.executable}")
         completed = subprocess.run(
@@ -59,7 +67,9 @@ class SSHCommandClient:
             check=False,
         )
         if completed.returncode != 0:
-            raise SSHAdapterError(completed.stderr.strip() or f"ssh exit code {completed.returncode}")
+            raise SSHAdapterError(
+                completed.stderr.strip() or f"ssh exit code {completed.returncode}"
+            )
         try:
             value = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:

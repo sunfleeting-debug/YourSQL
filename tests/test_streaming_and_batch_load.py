@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 
 def _seed_orders(database: Database, rows: int = 400) -> None:

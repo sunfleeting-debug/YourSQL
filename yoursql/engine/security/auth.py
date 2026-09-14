@@ -8,7 +8,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
-from ..common.errors import AuthorizationError
+from ...common.errors import AuthorizationError
 
 
 def _hash_password(password: str, salt: bytes | None = None) -> str:
@@ -64,7 +64,9 @@ class RBAC:
         self.roles[key] = role
         return role
 
-    def create_user(self, name: str, password: str, *, roles: Iterable[str] = ()) -> User:
+    def create_user(
+        self, name: str, password: str, *, roles: Iterable[str] = ()
+    ) -> User:
         key = self._key(name)
         if not key or key in self.users:
             raise AuthorizationError(f"用户 {name!r} 已存在或为空")
@@ -82,10 +84,16 @@ class RBAC:
             raise AuthorizationError("用户名或密码错误")
         return user
 
-    def grant(self, privilege: str, *, user: str | None = None, role: str | None = None) -> None:
+    def grant(
+        self, privilege: str, *, user: str | None = None, role: str | None = None
+    ) -> None:
         if (user is None) == (role is None):
             raise AuthorizationError("GRANT 必须指定一个用户或角色")
-        target = self.users.get(self._key(user)) if user is not None else self.roles.get(self._key(role or ""))
+        target = (
+            self.users.get(self._key(user))
+            if user is not None
+            else self.roles.get(self._key(role or ""))
+        )
         if target is None:
             raise AuthorizationError("授权目标不存在")
         if user is not None:
@@ -93,10 +101,16 @@ class RBAC:
         else:
             target.privileges.add(privilege.upper())
 
-    def revoke(self, privilege: str, *, user: str | None = None, role: str | None = None) -> None:
+    def revoke(
+        self, privilege: str, *, user: str | None = None, role: str | None = None
+    ) -> None:
         if (user is None) == (role is None):
             raise AuthorizationError("REVOKE 必须指定一个用户或角色")
-        target = self.users.get(self._key(user)) if user is not None else self.roles.get(self._key(role or ""))
+        target = (
+            self.users.get(self._key(user))
+            if user is not None
+            else self.roles.get(self._key(role or ""))
+        )
         if target is None:
             raise AuthorizationError("撤权目标不存在")
         privilege_key = privilege.upper()
@@ -123,7 +137,9 @@ class RBAC:
             raise AuthorizationError("角色不存在")
         return role
 
-    def privileges_for(self, *, user: str | None = None, role: str | None = None) -> tuple[str, ...]:
+    def privileges_for(
+        self, *, user: str | None = None, role: str | None = None
+    ) -> tuple[str, ...]:
         """返回用户或角色的有效权限集合。"""
 
         if (user is None) == (role is None):
@@ -146,7 +162,9 @@ class RBAC:
             "version": self.SERIALIZATION_VERSION,
             "roles": [
                 {"name": role.name, "privileges": sorted(role.privileges)}
-                for role in sorted(self.roles.values(), key=lambda item: item.name.lower())
+                for role in sorted(
+                    self.roles.values(), key=lambda item: item.name.lower()
+                )
             ],
             "users": [
                 {
@@ -155,7 +173,9 @@ class RBAC:
                     "roles": sorted(user.roles),
                     "direct_privileges": sorted(user.direct_privileges),
                 }
-                for user in sorted(self.users.values(), key=lambda item: item.name.lower())
+                for user in sorted(
+                    self.users.values(), key=lambda item: item.name.lower()
+                )
             ],
         }
 
@@ -187,14 +207,20 @@ class RBAC:
             if not isinstance(name, str):
                 raise AuthorizationError("权限目录中的角色名无效")
             role = rbac.create_role(name)
-            role.privileges = cls._read_strings(raw_role.get("privileges", []), "角色权限")
+            role.privileges = cls._read_strings(
+                raw_role.get("privileges", []), "角色权限"
+            )
 
         for raw_user in raw_users:
             if not isinstance(raw_user, Mapping):
                 raise AuthorizationError("权限目录中的用户项不是对象")
             name = raw_user.get("name")
             password_hash = raw_user.get("password_hash")
-            if not isinstance(name, str) or not isinstance(password_hash, str) or not password_hash:
+            if (
+                not isinstance(name, str)
+                or not isinstance(password_hash, str)
+                or not password_hash
+            ):
                 raise AuthorizationError("权限目录中的用户凭据无效")
             key = rbac._key(name)
             if not key or key in rbac.users:
@@ -202,16 +228,24 @@ class RBAC:
             roles = rbac._read_strings(raw_user.get("roles", []), "用户角色")
             missing = roles.difference(rbac.roles)
             if missing:
-                raise AuthorizationError(f"权限目录中的角色不存在: {', '.join(sorted(missing))}")
+                raise AuthorizationError(
+                    f"权限目录中的角色不存在: {', '.join(sorted(missing))}"
+                )
             rbac.users[key] = User(
                 name=name,
                 password_hash=password_hash,
                 roles=roles,
-                direct_privileges=cls._read_strings(raw_user.get("direct_privileges", []), "用户权限"),
+                direct_privileges=cls._read_strings(
+                    raw_user.get("direct_privileges", []), "用户权限"
+                ),
             )
 
         admin_role = rbac.roles.get("admin")
-        if rbac.users.get("admin") is None or admin_role is None or "*" not in admin_role.privileges:
+        if (
+            rbac.users.get("admin") is None
+            or admin_role is None
+            or "*" not in admin_role.privileges
+        ):
             raise AuthorizationError("权限目录缺少有效的 admin 引导账号")
         return rbac
 
@@ -230,7 +264,9 @@ class RBAC:
         action_key = action.upper()
         candidates = {action_key, "*"}
         if object_name:
-            candidates.update({f"{action_key} {object_name.upper()}", f"* {object_name.upper()}"})
+            candidates.update(
+                {f"{action_key} {object_name.upper()}", f"* {object_name.upper()}"}
+            )
         privileges = set(user.direct_privileges)
         for role_name in user.roles:
             role = self.roles.get(role_name)
@@ -238,4 +274,6 @@ class RBAC:
                 privileges.update(role.privileges)
         if not candidates.intersection(privileges):
             target = f" on {object_name}" if object_name else ""
-            raise AuthorizationError(f"用户 {user.name!r} 缺少 {action_key}{target} 权限")
+            raise AuthorizationError(
+                f"用户 {user.name!r} 缺少 {action_key}{target} 权限"
+            )

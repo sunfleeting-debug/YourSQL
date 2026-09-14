@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from yoursql.common import YourSQLError
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 from yoursql.sql.ast import BinaryOp, ColumnRef, Literal
 from yoursql.sql.lexer import tokenize
 from yoursql.sql.parser import Parser

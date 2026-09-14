@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Mapping
+from typing import Mapping
 
 from ..common.errors import CatalogError
 from ..common.types import Column, DataType, PageId, Schema, TableId, TableStats, Value
@@ -65,7 +65,9 @@ class IndexMetadata:
             "columns": list(self.columns),
             "unique": self.unique,
             "index_type": self.index_type,
-            "root_page_id": None if self.root_page_id is None else int(self.root_page_id),
+            "root_page_id": None
+            if self.root_page_id is None
+            else int(self.root_page_id),
             "payload_columns": list(self.payload_columns),
         }
 
@@ -79,7 +81,9 @@ class IndexMetadata:
             unique=bool(value.get("unique", False)),
             index_type=str(value.get("index_type", "btree")),
             root_page_id=None if root is None else PageId(int(root)),
-            payload_columns=tuple(str(item) for item in value.get("payload_columns", [])),
+            payload_columns=tuple(
+                str(item) for item in value.get("payload_columns", [])
+            ),
         )
 
 
@@ -101,9 +105,13 @@ class TableMetadata:
         return TableStats(self.row_count, len(self.page_ids))
 
     def to_dict(self, *, compact_system: bool = False) -> dict[str, object]:
-        result: dict[str, object] = {"table_id": int(self.table_id), "name": self.name,
-                                     "page_ids": [int(page_id) for page_id in self.page_ids],
-                                     "row_count": self.row_count, "system": self.system}
+        result: dict[str, object] = {
+            "table_id": int(self.table_id),
+            "name": self.name,
+            "page_ids": [int(page_id) for page_id in self.page_ids],
+            "row_count": self.row_count,
+            "system": self.system,
+        }
         if self.first_page_id is not None and (not compact_system or not self.page_ids):
             result["first_page_id"] = int(self.first_page_id)
         if self.indexes:
@@ -122,7 +130,14 @@ class TableMetadata:
             from .system_catalog import SYSTEM_TABLE_SPECS
 
             table_name = str(value["name"]).lower()
-            spec = next((item for item in SYSTEM_TABLE_SPECS if item.name.lower() == table_name), None)
+            spec = next(
+                (
+                    item
+                    for item in SYSTEM_TABLE_SPECS
+                    if item.name.lower() == table_name
+                ),
+                None,
+            )
             if spec is None:
                 raise CatalogError(f"未知的内部表 {table_name!r}")
             schema = spec.schema
@@ -130,7 +145,11 @@ class TableMetadata:
             raw_columns = [] if raw_columns is None else raw_columns
             if not isinstance(raw_columns, list):
                 raise CatalogError("目录中的 columns 不是数组")
-            columns = [_column_from_dict(item) for item in raw_columns if isinstance(item, Mapping)]
+            columns = [
+                _column_from_dict(item)
+                for item in raw_columns
+                if isinstance(item, Mapping)
+            ]
             schema = Schema.from_iterable(columns)
         first = value.get("first_page_id")
         raw_page_ids = [PageId(int(page_id)) for page_id in value.get("page_ids", [])]
@@ -170,7 +189,9 @@ class ViewMetadata:
         raw_columns = value.get("columns", [])
         if not isinstance(raw_columns, list):
             raise CatalogError("目录中的 view columns 不是数组")
-        columns = [_column_from_dict(item) for item in raw_columns if isinstance(item, Mapping)]
+        columns = [
+            _column_from_dict(item) for item in raw_columns if isinstance(item, Mapping)
+        ]
         try:
             schema = Schema.from_iterable(columns)
         except ValueError as exc:
@@ -178,7 +199,9 @@ class ViewMetadata:
         definition_sql = value.get("definition_sql")
         if not isinstance(definition_sql, str) or not definition_sql.strip():
             raise CatalogError("目录中的视图查询定义无效")
-        return cls(str(value["name"]), schema, definition_sql, bool(value.get("system", False)))
+        return cls(
+            str(value["name"]), schema, definition_sql, bool(value.get("system", False))
+        )
 
 
 class Catalog:
@@ -202,13 +225,19 @@ class Catalog:
     def tables(self, *, include_system: bool = False) -> tuple[TableMetadata, ...]:
         """返回用户表；内部调用可显式要求包含系统表。"""
 
-        selected = (table for table in self._tables.values() if include_system or not table.system)
+        selected = (
+            table
+            for table in self._tables.values()
+            if include_system or not table.system
+        )
         return tuple(sorted(selected, key=lambda item: int(item.table_id)))
 
     def system_tables(self) -> tuple[TableMetadata, ...]:
         """返回内部系统表，供启动恢复和只读检查使用。"""
 
-        return tuple(table for table in self.tables(include_system=True) if table.system)
+        return tuple(
+            table for table in self.tables(include_system=True) if table.system
+        )
 
     def views(self) -> tuple[ViewMetadata, ...]:
         """返回逻辑视图；视图不计入物理表数量。"""
@@ -224,9 +253,15 @@ class Catalog:
             raise CatalogError(f"表 {name!r} 不存在")
         return table
 
-    def find_table(self, name: str, *, include_system: bool = False) -> TableMetadata | None:
+    def find_table(
+        self, name: str, *, include_system: bool = False
+    ) -> TableMetadata | None:
         table = self._tables.get(self._key(name))
-        return table if table is not None and (include_system or not table.system) else None
+        return (
+            table
+            if table is not None and (include_system or not table.system)
+            else None
+        )
 
     def get_view(self, name: str) -> ViewMetadata:
         view = self._views.get(self._key(name))
@@ -309,7 +344,10 @@ class Catalog:
         key = self._key(index.name)
         if key in self._indexes:
             raise CatalogError(f"索引 {index.name!r} 已存在")
-        table = next((item for item in self._tables.values() if item.table_id == index.table_id), None)
+        table = next(
+            (item for item in self._tables.values() if item.table_id == index.table_id),
+            None,
+        )
         if table is None:
             raise CatalogError(f"表 ID {int(index.table_id)} 不存在")
         if not index.columns:
@@ -324,9 +362,14 @@ class Catalog:
         index = self._indexes.pop(self._key(name), None)
         if index is None:
             raise CatalogError(f"索引 {name!r} 不存在")
-        table = next((item for item in self._tables.values() if item.table_id == index.table_id), None)
+        table = next(
+            (item for item in self._tables.values() if item.table_id == index.table_id),
+            None,
+        )
         if table is not None:
-            table.indexes = [item for item in table.indexes if self._key(item) != self._key(name)]
+            table.indexes = [
+                item for item in table.indexes if self._key(item) != self._key(name)
+            ]
         return index
 
     def get_index(self, name: str) -> IndexMetadata:
@@ -363,7 +406,9 @@ class Catalog:
             if isinstance(raw_table, Mapping):
                 table = TableMetadata.from_dict(raw_table)
                 catalog._tables[catalog._key(table.name)] = table
-                catalog._next_table_id = max(catalog._next_table_id, int(table.table_id) + 1)
+                catalog._next_table_id = max(
+                    catalog._next_table_id, int(table.table_id) + 1
+                )
         raw_views = value.get("views", [])
         if not isinstance(raw_views, list):
             raise CatalogError("目录中的 views 不是数组")

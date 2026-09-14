@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 
 RowT = TypeVar("RowT")
@@ -36,6 +36,8 @@ class Executor(Generic[OutT]):
 
 
 class ValuesExecutor(Executor[RowT]):
+    """从可迭代输入逐行产出数据；也作为物化算子的公共基类。"""
+
     def __init__(self, rows: Iterable[RowT]) -> None:
         self._source = rows
         self._iterator: Iterator[RowT] | None = None
@@ -44,10 +46,14 @@ class ValuesExecutor(Executor[RowT]):
         self._iterator = iter(self._source)
 
     def next(self) -> RowT | None:
-        if self._iterator is None:
+        iterator = self._iterator
+        if iterator is None:
             self.open()
+            iterator = self._iterator
+        if iterator is None:
+            return None
         try:
-            return next(self._iterator)  # type: ignore[arg-type]
+            return next(iterator)
         except StopIteration:
             return None
 
@@ -57,7 +63,11 @@ class SeqScanExecutor(ValuesExecutor[RowT]):
 
 
 class FilterExecutor(Executor[RowT]):
-    def __init__(self, child: Executor[RowT], predicate: Callable[[RowT], bool]) -> None:
+    """只产出满足谓词的输入行。"""
+
+    def __init__(
+        self, child: Executor[RowT], predicate: Callable[[RowT], bool]
+    ) -> None:
         self.child = child
         self.predicate = predicate
 
@@ -77,7 +87,11 @@ class FilterExecutor(Executor[RowT]):
 
 
 class ProjectExecutor(Executor[OutT]):
-    def __init__(self, child: Executor[RowT], projection: Callable[[RowT], OutT]) -> None:
+    """对每行应用投影函数，并产出新的行类型。"""
+
+    def __init__(
+        self, child: Executor[RowT], projection: Callable[[RowT], OutT]
+    ) -> None:
         self.child, self.projection = child, projection
 
     def open(self) -> None:
@@ -92,7 +106,15 @@ class ProjectExecutor(Executor[OutT]):
 
 
 class SortExecutor(ValuesExecutor[RowT]):
-    def __init__(self, child: Executor[RowT], key: Callable[[RowT], object], *, reverse: bool = False) -> None:
+    """物化子节点后按键排序；适用于需要全量数据的排序阶段。"""
+
+    def __init__(
+        self,
+        child: Executor[RowT],
+        key: Callable[[RowT], object],
+        *,
+        reverse: bool = False,
+    ) -> None:
         self.child, self.key, self.reverse = child, key, reverse
         super().__init__(())
 
@@ -102,7 +124,11 @@ class SortExecutor(ValuesExecutor[RowT]):
 
 
 class LimitExecutor(Executor[RowT]):
-    def __init__(self, child: Executor[RowT], limit: int | None, offset: int = 0) -> None:
+    """跳过 offset 后，最多从子节点返回 limit 行。"""
+
+    def __init__(
+        self, child: Executor[RowT], limit: int | None, offset: int = 0
+    ) -> None:
         self.child, self.limit, self.offset = child, limit, offset
         self._seen = 0
         self._returned = 0
@@ -129,14 +155,26 @@ class LimitExecutor(Executor[RowT]):
 
 
 class NestedLoopJoinExecutor(ValuesExecutor[tuple[RowT, OutT]]):
-    def __init__(self, left: Executor[RowT], right: Executor[OutT], predicate: Callable[[RowT, OutT], bool]) -> None:
+    """物化两侧并枚举满足谓词的行对，作为基准连接实现。"""
+
+    def __init__(
+        self,
+        left: Executor[RowT],
+        right: Executor[OutT],
+        predicate: Callable[[RowT, OutT], bool],
+    ) -> None:
         self.left, self.right, self.predicate = left, right, predicate
         super().__init__(())
 
     def open(self) -> None:
         left_rows = list(self.left)
         right_rows = list(self.right)
-        self._source = [(left, right) for left in left_rows for right in right_rows if self.predicate(left, right)]
+        self._source = [
+            (left, right)
+            for left in left_rows
+            for right in right_rows
+            if self.predicate(left, right)
+        ]
         self._iterator = iter(self._source)
 
 

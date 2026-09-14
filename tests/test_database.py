@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from yoursql.common import AuthorizationError, BinderError, CatalogError, ExecutionError
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 
 def test_course_core_sql_and_restart_persistence(tmp_path: Path) -> None:

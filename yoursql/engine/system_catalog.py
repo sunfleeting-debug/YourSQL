@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING
 
 from ..common.errors import CatalogError
 from ..common.types import Column, DataType, PageId, Schema
-from .auth import RBAC
+from .security.auth import RBAC
 from .catalog import TableMetadata
 
 if TYPE_CHECKING:
-    from .database import Database
+    from .runtime.database import Database
 
 
 @dataclass(frozen=True)
@@ -195,14 +195,22 @@ class SystemCatalog:
         for spec in SYSTEM_VIEW_SPECS:
             view = self.database.catalog.find_view(spec.name)
             if view is None:
-                if self.database.catalog.find_table(spec.name, include_system=True) is not None:
+                if (
+                    self.database.catalog.find_table(spec.name, include_system=True)
+                    is not None
+                ):
                     raise CatalogError(f"{spec.name} 已被表占用，无法初始化系统视图")
-                self.database.catalog.create_view(spec.name, spec.schema, spec.definition_sql, system=True)
+                self.database.catalog.create_view(
+                    spec.name, spec.schema, spec.definition_sql, system=True
+                )
                 changed = True
                 continue
             if not view.system:
                 raise CatalogError(f"{spec.name} 已被普通视图占用，无法初始化系统视图")
-            if view.schema != spec.schema or view.definition_sql.strip() != spec.definition_sql:
+            if (
+                view.schema != spec.schema
+                or view.definition_sql.strip() != spec.definition_sql
+            ):
                 raise CatalogError(f"系统视图 {spec.name} 的定义不匹配")
         return changed
 
@@ -210,7 +218,9 @@ class SystemCatalog:
         return self.database.catalog.get_table(name, include_system=True)
 
     def _rows(self, name: str, width: int) -> tuple[tuple[object, ...], ...]:
-        rows = tuple(row for _row_id, row in self.database._heap(self._table(name)).scan())
+        rows = tuple(
+            row for _row_id, row in self.database._heap(self._table(name)).scan()
+        )
         for row in rows:
             if len(row) != width:
                 raise CatalogError(f"内部表 {name} 的记录列数错误")
@@ -220,7 +230,9 @@ class SystemCatalog:
         """从内部表恢复 RBAC；四张表全空时返回 None 供新库初始化。"""
 
         expected = {spec.name for spec in SYSTEM_TABLE_SPECS}
-        existing = {table.name.lower() for table in self.database.catalog.system_tables()}
+        existing = {
+            table.name.lower() for table in self.database.catalog.system_tables()
+        }
         if not expected.issubset(existing):
             raise CatalogError("内部权限表未初始化")
 
@@ -285,23 +297,30 @@ class SystemCatalog:
                     raise CatalogError(f"内部权限表引用了不存在的用户 {grantee_name!r}")
                 target.direct_privileges.add(effective)
             else:
-                raise CatalogError(f"内部权限表中的授权主体类型 {grantee_type!r} 不支持")
+                raise CatalogError(
+                    f"内部权限表中的授权主体类型 {grantee_type!r} 不支持"
+                )
             _text(row[4], "授权者")
             _bool(row[5], "grant_option")
 
-        return RBAC.from_dict({
-            "version": 1,
-            "roles": [{"name": role.name, "privileges": sorted(role.privileges)} for role in roles.values()],
-            "users": [
-                {
-                    "name": user.name,
-                    "password_hash": user.password_hash,
-                    "roles": sorted(user.roles),
-                    "direct_privileges": sorted(user.direct_privileges),
-                }
-                for user in users.values()
-            ],
-        })
+        return RBAC.from_dict(
+            {
+                "version": 1,
+                "roles": [
+                    {"name": role.name, "privileges": sorted(role.privileges)}
+                    for role in roles.values()
+                ],
+                "users": [
+                    {
+                        "name": user.name,
+                        "password_hash": user.password_hash,
+                        "roles": sorted(user.roles),
+                        "direct_privileges": sorted(user.direct_privileges),
+                    }
+                    for user in users.values()
+                ],
+            }
+        )
 
     @staticmethod
     def _rbac_rows(rbac: RBAC) -> dict[str, list[tuple[object, ...]]]:
@@ -315,14 +334,27 @@ class SystemCatalog:
         for user in users:
             for role_key in sorted(user.roles):
                 role = rbac.roles.get(role_key)
-                member_rows.append(("USER", user.name, role.name if role else role_key, True, True, True))
+                member_rows.append(
+                    (
+                        "USER",
+                        user.name,
+                        role.name if role else role_key,
+                        True,
+                        True,
+                        True,
+                    )
+                )
             for privilege in sorted(user.direct_privileges):
                 action, object_name = _privilege_parts(privilege)
-                privilege_rows.append(("USER", user.name, action, object_name, "admin", False))
+                privilege_rows.append(
+                    ("USER", user.name, action, object_name, "admin", False)
+                )
         for role in roles:
             for privilege in sorted(role.privileges):
                 action, object_name = _privilege_parts(privilege)
-                privilege_rows.append(("ROLE", role.name, action, object_name, "admin", False))
+                privilege_rows.append(
+                    ("ROLE", role.name, action, object_name, "admin", False)
+                )
         return {
             "_sys_users": user_rows,
             "_sys_roles": role_rows,

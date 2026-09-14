@@ -55,9 +55,20 @@ class Parser:
     """将 Token 流转换为 AST，并在错误中保留出错位置。"""
 
     def __init__(self, source_or_tokens: str | Iterable[Token]) -> None:
-        self.tokens = Lexer(source_or_tokens).tokenize() if isinstance(source_or_tokens, str) else list(source_or_tokens)
+        self.tokens = (
+            Lexer(source_or_tokens).tokenize()
+            if isinstance(source_or_tokens, str)
+            else list(source_or_tokens)
+        )
         if not self.tokens or self.tokens[-1].kind is not TokenKind.EOF:
-            self.tokens.append(Token(TokenKind.EOF, "", self.tokens[-1].line if self.tokens else 1, self.tokens[-1].column if self.tokens else 1))
+            self.tokens.append(
+                Token(
+                    TokenKind.EOF,
+                    "",
+                    self.tokens[-1].line if self.tokens else 1,
+                    self.tokens[-1].column if self.tokens else 1,
+                )
+            )
         self.position = 0
         self._in_insert_values = False
 
@@ -112,8 +123,12 @@ class Parser:
         if self._match(TokenKind.GRANTS):
             if self._match(TokenKind.FOR):
                 target_kind, target_name, target_token = self._principal_with_token()
-                statement = self._located(ShowGrants(target_kind, target_name), show_token)
-                statement.with_named_source_location("target", target_token.line, target_token.column)
+                statement = self._located(
+                    ShowGrants(target_kind, target_name), show_token
+                )
+                statement.with_named_source_location(
+                    "target", target_token.line, target_token.column
+                )
                 return statement
             return self._located(ShowGrants(), show_token)
         if self._match(TokenKind.TABLES):
@@ -136,7 +151,10 @@ class Parser:
                 name, token = self._name_with_token("视图名")
                 return self._located(Show("CREATE_VIEW", name), token)
             self._error("SHOW CREATE 后需要 TABLE 或 VIEW", "TABLE/VIEW")
-        self._error("SHOW 后需要对象类型", "TABLES/VIEWS/COLUMNS/INDEX/CREATE TABLE/CREATE VIEW/GRANTS")
+        self._error(
+            "SHOW 后需要对象类型",
+            "TABLES/VIEWS/COLUMNS/INDEX/CREATE TABLE/CREATE VIEW/GRANTS",
+        )
 
     def _show_object_name(self, context: str) -> tuple[str, Token]:
         if not (self._match(TokenKind.FROM) or self._match(TokenKind.IN)):
@@ -168,8 +186,12 @@ class Parser:
         start = self.position
         query = self._select()
         # HOW：Token 不保留注释，但保留词素；用空格重建可再次解析的规范定义。
-        definition_sql = " ".join(token.lexeme for token in self.tokens[start:self.position])
-        return self._located(CreateView(name, query, definition_sql, if_not_exists), name_token)
+        definition_sql = " ".join(
+            token.lexeme for token in self.tokens[start : self.position]
+        )
+        return self._located(
+            CreateView(name, query, definition_sql, if_not_exists), name_token
+        )
 
     def _create_user(self) -> CreateUser:
         name, name_token = self._name_with_token("用户名")
@@ -185,7 +207,9 @@ class Parser:
             roles.append(self._name("角色名"))
             while self._match(TokenKind.COMMA):
                 roles.append(self._name("角色名"))
-        return self._located(CreateUser(name, str(password.literal), tuple(roles)), name_token)
+        return self._located(
+            CreateUser(name, str(password.literal), tuple(roles)), name_token
+        )
 
     def _grant(self) -> Grant:
         token = self._expect(TokenKind.GRANT, "GRANT")
@@ -193,8 +217,12 @@ class Parser:
         object_name = self._privilege_object()
         self._expect(TokenKind.TO, "TO")
         target_kind, target_name, target_token = self._principal_with_token()
-        statement = self._located(Grant(privileges, object_name, target_kind, target_name), token)
-        statement.with_named_source_location("target", target_token.line, target_token.column)
+        statement = self._located(
+            Grant(privileges, object_name, target_kind, target_name), token
+        )
+        statement.with_named_source_location(
+            "target", target_token.line, target_token.column
+        )
         return statement
 
     def _revoke(self) -> Revoke:
@@ -203,8 +231,12 @@ class Parser:
         object_name = self._privilege_object()
         self._expect(TokenKind.FROM, "FROM")
         target_kind, target_name, target_token = self._principal_with_token()
-        statement = self._located(Revoke(privileges, object_name, target_kind, target_name), token)
-        statement.with_named_source_location("target", target_token.line, target_token.column)
+        statement = self._located(
+            Revoke(privileges, object_name, target_kind, target_name), token
+        )
+        statement.with_named_source_location(
+            "target", target_token.line, target_token.column
+        )
         return statement
 
     def _privilege_list(self) -> tuple[str, ...]:
@@ -230,7 +262,11 @@ class Parser:
             TokenKind.QUOTED_IDENTIFIER,
         }:
             self._advance()
-            return str(token.literal if token.kind is TokenKind.QUOTED_IDENTIFIER else token.lexeme).upper()
+            return str(
+                token.literal
+                if token.kind is TokenKind.QUOTED_IDENTIFIER
+                else token.lexeme
+            ).upper()
         self._error("GRANT/REVOKE 后需要权限名", "SELECT/INSERT/UPDATE/DELETE/ALL")
 
     def _privilege_object(self) -> str | None:
@@ -280,15 +316,31 @@ class Parser:
         self._expect(TokenKind.RPAREN, "')'")
         if table_primary:
             primary_set = {name.lower() for name in table_primary}
-            columns = [self._replace_column(column, primary_key=True, nullable=False) if column.name.lower() in primary_set else column for column in columns]
+            columns = [
+                self._replace_column(column, primary_key=True, nullable=False)
+                if column.name.lower() in primary_set
+                else column
+                for column in columns
+            ]
         if table_unique:
             unique_set = {name.lower() for name in table_unique}
-            columns = [self._replace_column(column, unique=True) if column.name.lower() in unique_set else column for column in columns]
-        statement = self._located(CreateTable(name, tuple(columns), if_not_exists), name_token)
+            columns = [
+                self._replace_column(column, unique=True)
+                if column.name.lower() in unique_set
+                else column
+                for column in columns
+            ]
+        statement = self._located(
+            CreateTable(name, tuple(columns), if_not_exists), name_token
+        )
         for index, token in enumerate(primary_tokens):
-            statement.with_named_source_location(f"primary:{index}", token.line, token.column)
+            statement.with_named_source_location(
+                f"primary:{index}", token.line, token.column
+            )
         for index, token in enumerate(unique_tokens):
-            statement.with_named_source_location(f"unique:{index}", token.line, token.column)
+            statement.with_named_source_location(
+                f"unique:{index}", token.line, token.column
+            )
         return statement
 
     def _column_definition(self) -> ColumnDefinition:
@@ -298,9 +350,18 @@ class Parser:
             self._error("列定义需要类型", "INT/VARCHAR/FLOAT/BOOLEAN")
         self._advance()
         try:
-            data_type = DataType.parse(type_token.literal if type_token.kind is TokenKind.QUOTED_IDENTIFIER else type_token.lexeme)
+            data_type = DataType.parse(
+                type_token.literal
+                if type_token.kind is TokenKind.QUOTED_IDENTIFIER
+                else type_token.lexeme
+            )
         except BinderError as exc:
-            raise BinderError(exc.message, line=type_token.line, column=type_token.column, **exc.details) from exc
+            raise BinderError(
+                exc.message,
+                line=type_token.line,
+                column=type_token.column,
+                **exc.details,
+            ) from exc
         if self._match(TokenKind.LPAREN):
             if not self._at(TokenKind.INTEGER):
                 self._error("类型长度需要整数", "INTEGER")
@@ -323,7 +384,10 @@ class Parser:
                 default = self._expression()
             else:
                 break
-        return self._located(ColumnDefinition(name, data_type, nullable, primary_key, unique, default), name_token)
+        return self._located(
+            ColumnDefinition(name, data_type, nullable, primary_key, unique, default),
+            name_token,
+        )
 
     def _create_index(self, unique: bool) -> CreateIndex:
         if_not_exists = self._if_not_exists()
@@ -333,15 +397,30 @@ class Parser:
         named_columns = self._name_list_with_tokens()
         include: tuple[str, ...] = ()
         # HOW：INCLUDE 不是保留字，按标识符文本匹配，保证 `include` 仍可作列名。
-        if self._current().kind is TokenKind.IDENTIFIER and self._current().lexeme.lower() == "include":
+        if (
+            self._current().kind is TokenKind.IDENTIFIER
+            and self._current().lexeme.lower() == "include"
+        ):
             self._advance()
             include = tuple(item[0] for item in self._name_list_with_tokens())
         statement = self._located(
-            CreateIndex(name, table, tuple(item[0] for item in named_columns), unique, if_not_exists, include), name_token
+            CreateIndex(
+                name,
+                table,
+                tuple(item[0] for item in named_columns),
+                unique,
+                if_not_exists,
+                include,
+            ),
+            name_token,
         )
-        statement.with_named_source_location("table", table_token.line, table_token.column)
+        statement.with_named_source_location(
+            "table", table_token.line, table_token.column
+        )
         for index, (_column, token) in enumerate(named_columns):
-            statement.with_named_source_location(f"column:{index}", token.line, token.column)
+            statement.with_named_source_location(
+                f"column:{index}", token.line, token.column
+            )
         return statement
 
     def _drop(self) -> Statement:
@@ -364,7 +443,9 @@ class Parser:
         self._expect(TokenKind.INSERT, "INSERT")
         self._match(TokenKind.INTO)
         table, table_token = self._name_with_token("表名")
-        named_columns = self._name_list_with_tokens() if self._at(TokenKind.LPAREN) else []
+        named_columns = (
+            self._name_list_with_tokens() if self._at(TokenKind.LPAREN) else []
+        )
         columns = tuple(item[0] for item in named_columns)
         self._expect(TokenKind.VALUES, "VALUES")
         values: list[tuple[Expr, ...]] = []
@@ -388,11 +469,17 @@ class Parser:
         finally:
             self._in_insert_values = False
         statement = self._located(Insert(table, tuple(values), columns), table_token)
-        statement.with_named_source_location("table", table_token.line, table_token.column)
+        statement.with_named_source_location(
+            "table", table_token.line, table_token.column
+        )
         for index, (_column, token) in enumerate(named_columns):
-            statement.with_named_source_location(f"column:{index}", token.line, token.column)
+            statement.with_named_source_location(
+                f"column:{index}", token.line, token.column
+            )
         for index, token in enumerate(row_tokens):
-            statement.with_named_source_location(f"row:{index}", token.line, token.column)
+            statement.with_named_source_location(
+                f"row:{index}", token.line, token.column
+            )
         return statement
 
     def _select(self) -> Select:
@@ -400,11 +487,19 @@ class Parser:
         if self._match(TokenKind.UNION):
             union_all = self._match(TokenKind.ALL)
             self._expect(TokenKind.SELECT, "SELECT")
-            return replace(first, union=self._select_core(already_consumed_select=True), union_all=union_all)
+            return replace(
+                first,
+                union=self._select_core(already_consumed_select=True),
+                union_all=union_all,
+            )
         return first
 
     def _select_core(self, *, already_consumed_select: bool = False) -> Select:
-        select_token = self.tokens[self.position - 1] if already_consumed_select else self._current()
+        select_token = (
+            self.tokens[self.position - 1]
+            if already_consumed_select
+            else self._current()
+        )
         if not already_consumed_select:
             self._expect(TokenKind.SELECT, "SELECT")
         distinct = self._match(TokenKind.DISTINCT)
@@ -414,7 +509,10 @@ class Parser:
             alias: str | None = None
             if self._match(TokenKind.AS):
                 alias = self._name("别名")
-            elif self._current().kind in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
+            elif self._current().kind in {
+                TokenKind.IDENTIFIER,
+                TokenKind.QUOTED_IDENTIFIER,
+            }:
                 alias = self._name("别名")
             item = SelectItem(expression, alias)
             if expression.source_location is not None:
@@ -469,12 +567,31 @@ class Parser:
         offset = 0
         if self._match(TokenKind.OFFSET):
             offset = self._integer_literal("OFFSET")
-        return self._located(Select(tuple(items), from_table, tuple(joins), where, tuple(group_by), having, tuple(order_by), limit, offset, distinct), select_token)
+        return self._located(
+            Select(
+                tuple(items),
+                from_table,
+                tuple(joins),
+                where,
+                tuple(group_by),
+                having,
+                tuple(order_by),
+                limit,
+                offset,
+                distinct,
+            ),
+            select_token,
+        )
 
     def _join_type(self) -> str | None:
         if self._match(TokenKind.JOIN):
             return "INNER"
-        for kind, name in ((TokenKind.INNER, "INNER"), (TokenKind.LEFT, "LEFT"), (TokenKind.RIGHT, "RIGHT"), (TokenKind.FULL, "FULL")):
+        for kind, name in (
+            (TokenKind.INNER, "INNER"),
+            (TokenKind.LEFT, "LEFT"),
+            (TokenKind.RIGHT, "RIGHT"),
+            (TokenKind.FULL, "FULL"),
+        ):
             if self._match(kind):
                 self._match(TokenKind.OUTER)
                 self._expect(TokenKind.JOIN, "JOIN")
@@ -487,7 +604,10 @@ class Parser:
         alias = None
         if self._match(TokenKind.AS):
             alias = self._name("表别名")
-        elif self._current().kind in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
+        elif self._current().kind in {
+            TokenKind.IDENTIFIER,
+            TokenKind.QUOTED_IDENTIFIER,
+        }:
             alias = self._name("表别名")
         return self._located(TableRef(name, alias), name_token)
 
@@ -506,9 +626,13 @@ class Parser:
                 break
         where = self._expression() if self._match(TokenKind.WHERE) else None
         statement = self._located(Update(table, tuple(assignments), where), table_token)
-        statement.with_named_source_location("table", table_token.line, table_token.column)
+        statement.with_named_source_location(
+            "table", table_token.line, table_token.column
+        )
         for index, token in enumerate(assignment_tokens):
-            statement.with_named_source_location(f"assignment:{index}", token.line, token.column)
+            statement.with_named_source_location(
+                f"assignment:{index}", token.line, token.column
+            )
         return statement
 
     def _delete(self) -> Delete:
@@ -517,7 +641,9 @@ class Parser:
         table, table_token = self._name_with_token("表名")
         where = self._expression() if self._match(TokenKind.WHERE) else None
         statement = self._located(Delete(table, where), table_token)
-        statement.with_named_source_location("table", table_token.line, table_token.column)
+        statement.with_named_source_location(
+            "table", table_token.line, table_token.column
+        )
         return statement
 
     def _expression(self) -> Expr:
@@ -527,19 +653,25 @@ class Parser:
         expression = self._and()
         while self._at(TokenKind.OR):
             operator = self._advance()
-            expression = self._located(BinaryOp(expression, "OR", self._and()), operator)
+            expression = self._located(
+                BinaryOp(expression, "OR", self._and()), operator
+            )
         return expression
 
     def _and(self) -> Expr:
         expression = self._not()
         while self._at(TokenKind.AND):
             operator = self._advance()
-            expression = self._located(BinaryOp(expression, "AND", self._not()), operator)
+            expression = self._located(
+                BinaryOp(expression, "AND", self._not()), operator
+            )
         return expression
 
     def _not(self) -> Expr:
         if self._match(TokenKind.NOT):
-            return self._located(UnaryOp("NOT", self._not()), self.tokens[self.position - 1])
+            return self._located(
+                UnaryOp("NOT", self._not()), self.tokens[self.position - 1]
+            )
         return self._comparison()
 
     def _comparison(self) -> Expr:
@@ -550,7 +682,11 @@ class Parser:
             self._expect(TokenKind.NULL, "NULL")
             return self._located(IsNull(expression, negated), operator)
         negated = False
-        if self._at(TokenKind.NOT) and self._peek(1).kind in {TokenKind.IN, TokenKind.BETWEEN, TokenKind.LIKE}:
+        if self._at(TokenKind.NOT) and self._peek(1).kind in {
+            TokenKind.IN,
+            TokenKind.BETWEEN,
+            TokenKind.LIKE,
+        }:
             self._advance()
             negated = True
         if self._at(TokenKind.IN):
@@ -562,16 +698,25 @@ class Parser:
             else:
                 values = self._expression_list(allow_empty=False)
             self._expect(TokenKind.RPAREN, "')'")
-            return self._located(InPredicate(expression, tuple(values), negated), operator)
+            return self._located(
+                InPredicate(expression, tuple(values), negated), operator
+            )
         if self._at(TokenKind.BETWEEN):
             operator = self._advance()
             lower = self._additive()
             self._expect(TokenKind.AND, "AND")
             upper = self._additive()
-            return self._located(BetweenPredicate(expression, lower, upper, negated), operator)
+            return self._located(
+                BetweenPredicate(expression, lower, upper, negated), operator
+            )
         if self._at(TokenKind.LIKE):
             operator = self._advance()
-            return self._located(BinaryOp(expression, "NOT LIKE" if negated else "LIKE", self._additive()), operator)
+            return self._located(
+                BinaryOp(
+                    expression, "NOT LIKE" if negated else "LIKE", self._additive()
+                ),
+                operator,
+            )
         comparisons = (
             (TokenKind.EQ, "="),
             (TokenKind.EQEQ, "="),
@@ -585,21 +730,37 @@ class Parser:
         for kind, operator in comparisons:
             if self._at(kind):
                 operator_token = self._advance()
-                return self._located(BinaryOp(expression, operator, self._additive()), operator_token)
+                return self._located(
+                    BinaryOp(expression, operator, self._additive()), operator_token
+                )
         return expression
 
     def _additive(self) -> Expr:
         expression = self._multiplicative()
-        while self._current().kind in {TokenKind.PLUS, TokenKind.MINUS, TokenKind.CONCAT}:
+        while self._current().kind in {
+            TokenKind.PLUS,
+            TokenKind.MINUS,
+            TokenKind.CONCAT,
+        }:
             operator_token = self._advance()
-            expression = self._located(BinaryOp(expression, operator_token.lexeme, self._multiplicative()), operator_token)
+            expression = self._located(
+                BinaryOp(expression, operator_token.lexeme, self._multiplicative()),
+                operator_token,
+            )
         return expression
 
     def _multiplicative(self) -> Expr:
         expression = self._unary()
-        while self._current().kind in {TokenKind.STAR, TokenKind.SLASH, TokenKind.PERCENT}:
+        while self._current().kind in {
+            TokenKind.STAR,
+            TokenKind.SLASH,
+            TokenKind.PERCENT,
+        }:
             operator_token = self._advance()
-            expression = self._located(BinaryOp(expression, operator_token.lexeme, self._unary()), operator_token)
+            expression = self._located(
+                BinaryOp(expression, operator_token.lexeme, self._unary()),
+                operator_token,
+            )
         return expression
 
     def _unary(self) -> Expr:
@@ -613,7 +774,13 @@ class Parser:
 
     def _primary(self) -> Expr:
         token = self._current()
-        if token.kind is TokenKind.INTEGER or token.kind is TokenKind.FLOAT or token.kind is TokenKind.STRING or token.kind is TokenKind.BOOLEAN or token.kind is TokenKind.NULL:
+        if (
+            token.kind is TokenKind.INTEGER
+            or token.kind is TokenKind.FLOAT
+            or token.kind is TokenKind.STRING
+            or token.kind is TokenKind.BOOLEAN
+            or token.kind is TokenKind.NULL
+        ):
             self._advance()
             return self._located(Literal(token.literal), token)
         if token.kind is TokenKind.QUESTION:
@@ -628,7 +795,11 @@ class Parser:
                 "STRING",
             )
         if token.kind in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
-            name = token.literal if token.kind is TokenKind.QUOTED_IDENTIFIER else token.lexeme
+            name = (
+                token.literal
+                if token.kind is TokenKind.QUOTED_IDENTIFIER
+                else token.lexeme
+            )
             self._advance()
             if self._match(TokenKind.LPAREN):
                 distinct = self._match(TokenKind.DISTINCT)
@@ -702,10 +873,14 @@ class Parser:
         if token.kind not in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
             self._error(f"{context}不合法", "IDENTIFIER")
         self._advance()
-        return str(token.literal if token.kind is TokenKind.QUOTED_IDENTIFIER else token.lexeme), token
+        return str(
+            token.literal if token.kind is TokenKind.QUOTED_IDENTIFIER else token.lexeme
+        ), token
 
     @staticmethod
-    def _replace_column(column: ColumnDefinition, **changes: object) -> ColumnDefinition:
+    def _replace_column(
+        column: ColumnDefinition, **changes: object
+    ) -> ColumnDefinition:
         """应用表级约束并保留列定义原有的源码位置。"""
 
         updated = replace(column, **changes)
@@ -740,7 +915,13 @@ class Parser:
 
     def _error(self, message: str, expected: str) -> None:
         token = self._current()
-        raise ParserError(message, line=token.line, column=token.column, expected=expected, found=token.lexeme or token.kind.value)
+        raise ParserError(
+            message,
+            line=token.line,
+            column=token.column,
+            expected=expected,
+            found=token.lexeme or token.kind.value,
+        )
 
     @staticmethod
     def _located(node: NodeType, token: Token) -> NodeType:

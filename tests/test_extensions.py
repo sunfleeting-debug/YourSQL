@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from yoursql.common import PageId, RowId, TableStats
-from yoursql.engine.optimizer import Optimizer, PlanCache, StatisticsStore
+from yoursql.planner.optimizer import Optimizer, PlanCache, StatisticsStore
 from yoursql.storage import BPlusTree, BufferPool, DiskManager
 
 

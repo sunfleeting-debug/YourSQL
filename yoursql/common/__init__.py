@@ -1,6 +1,7 @@
 """跨层共享的类型、配置和异常。"""
 
 from .config import DatabaseConfig, RuntimeConfig, configure_logging, load_dotenv
+from .contracts import JsonObject, JsonPrimitive, JsonValue, SqlRow, SqlValue
 from .errors import (
     AuthorizationError,
     BinderError,
@@ -35,12 +36,17 @@ __all__ = [
     "RuntimeConfig",
     "ExecutionError",
     "ExecutionResult",
+    "JsonObject",
+    "JsonPrimitive",
+    "JsonValue",
     "LexerError",
     "YourSQLError",
     "PageId",
     "ParserError",
     "RowId",
     "Schema",
+    "SqlRow",
+    "SqlValue",
     "StorageError",
     "TableId",
     "TableStats",

@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Iterable, Iterator, Mapping
 
+from .contracts import JsonObject, SqlValue
 from .errors import BinderError
 
 
@@ -16,7 +17,9 @@ class DataType(str, Enum):
     INT = "INT"  # 整数
     FLOAT = "FLOAT"  # 浮点数
     BOOLEAN = "BOOLEAN"  # 布尔（列可含 NULL）
-    VARCHAR = "VARCHAR"  # UTF-8 变长字符串，长度上限见 DatabaseConfig.max_varchar_length
+    VARCHAR = (
+        "VARCHAR"  # UTF-8 变长字符串，长度上限见 DatabaseConfig.max_varchar_length
+    )
     NULL = "NULL"  # 未定型字面量或空值
 
     @classmethod
@@ -69,14 +72,14 @@ class Value:
     """携带 SQL 类型和值的轻量包装。"""
 
     data_type: DataType
-    value: Any
+    value: SqlValue
 
     @classmethod
     def null(cls) -> "Value":
         return cls(DataType.NULL, None)
 
     @classmethod
-    def infer(cls, value: Any) -> "Value":
+    def infer(cls, value: object) -> "Value":
         if value is None:
             return cls.null()
         if isinstance(value, bool):
@@ -92,7 +95,12 @@ class Value:
             return Value(target, None)
         if self.data_type is target:
             return self
-        if target is DataType.INT and self.data_type is DataType.FLOAT and math.isfinite(float(self.value)) and float(self.value).is_integer():
+        if (
+            target is DataType.INT
+            and self.data_type is DataType.FLOAT
+            and math.isfinite(float(self.value))
+            and float(self.value).is_integer()
+        ):
             return Value(target, int(self.value))
         if target is DataType.FLOAT and self.data_type is DataType.INT:
             return Value(target, float(self.value))
@@ -106,7 +114,7 @@ class Value:
                 return Value(target, False)
         raise BinderError(f"不能把 {self.data_type.value} 转换为 {target.value}")
 
-    def unwrap(self) -> Any:
+    def unwrap(self) -> SqlValue:
         return self.value
 
     def __hash__(self) -> int:
@@ -166,18 +174,30 @@ class Schema:
     def names(self) -> tuple[str, ...]:
         return tuple(column.name for column in self.columns)
 
-    def validate_row(self, row: Iterable[Any], *, partial: bool = False) -> tuple[Any, ...]:
+    def validate_row(
+        self, row: Iterable[object], *, partial: bool = False
+    ) -> tuple[SqlValue, ...]:
         values = tuple(row)
         if len(values) > len(self.columns):
-            raise BinderError(f"需要 {len(self.columns)} 个值，实际得到 {len(values)} 个")
+            raise BinderError(
+                f"需要 {len(self.columns)} 个值，实际得到 {len(values)} 个"
+            )
         if not partial:
             missing = self.columns[len(values) :]
-            required = [column.name for column in missing if column.default is None and not column.nullable]
+            required = [
+                column.name
+                for column in missing
+                if column.default is None and not column.nullable
+            ]
             if required:
                 raise BinderError(f"缺少必填列: {', '.join(required)}")
-        result: list[Any] = []
+        result: list[SqlValue] = []
         for index, column in enumerate(self.columns):
-            value = values[index] if index < len(values) else (column.default.unwrap() if column.default is not None else None)
+            value = (
+                values[index]
+                if index < len(values)
+                else (column.default.unwrap() if column.default is not None else None)
+            )
             typed = Value.infer(value)
             if typed.data_type is DataType.NULL:
                 if not column.nullable and column.default is None:
@@ -200,13 +220,13 @@ class ExecutionResult:
     """上层 CLI、HTTP 和 Python API 共用的结构化结果。"""
 
     columns: tuple[str, ...] = ()
-    rows: list[tuple[Any, ...]] = field(default_factory=list)
+    rows: list[tuple[SqlValue, ...]] = field(default_factory=list)
     affected_rows: int = 0
     message: str | None = None
-    plan: dict[str, Any] | None = None
-    stats: dict[str, Any] = field(default_factory=dict)
+    plan: JsonObject | None = None
+    stats: JsonObject = field(default_factory=dict)
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> JsonObject:
         return {
             "columns": list(self.columns),
             "rows": [list(row) for row in self.rows],
@@ -220,7 +240,7 @@ class ExecutionResult:
         return bool(self.rows) or self.affected_rows > 0
 
 
-def compare_values(left: Any, right: Any, operator: str) -> bool | None:
+def compare_values(left: SqlValue, right: SqlValue, operator: str) -> bool | None:
     """执行 SQL 三值逻辑中的比较；NULL 比较结果为 UNKNOWN。"""
 
     if left is None or right is None:
@@ -243,7 +263,7 @@ def compare_values(left: Any, right: Any, operator: str) -> bool | None:
     raise ValueError(f"不支持的比较运算符 {operator}")
 
 
-def sql_truth(value: Any) -> bool:
+def sql_truth(value: SqlValue) -> bool:
     """WHERE/HAVING 只有 TRUE 才通过，FALSE/UNKNOWN 都过滤。"""
 
     return value is True

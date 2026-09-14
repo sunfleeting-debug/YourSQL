@@ -30,7 +30,10 @@ class ExecutionTrace:
         if monotonic() > self.deadline:
             raise YourSQLError("查询超过执行期限", "TIMEOUT")
         if self.max_steps is not None and self.steps > self.max_steps:
-            raise YourSQLError(f"查询超过 {self.max_steps} 次扫描/连接/投影步骤，请缩小查询范围", "RESOURCE_LIMIT")
+            raise YourSQLError(
+                f"查询超过 {self.max_steps} 次扫描/连接/投影步骤，请缩小查询范围",
+                "RESOURCE_LIMIT",
+            )
 
     def step(self) -> None:
         self.steps += 1
@@ -43,4 +46,6 @@ class ExecutionTrace:
             self.dropped_events += 1
 
 
-current_trace: ContextVar[ExecutionTrace | None] = ContextVar("yoursql_execution_trace", default=None)
+current_trace: ContextVar[ExecutionTrace | None] = ContextVar(
+    "yoursql_execution_trace", default=None
+)

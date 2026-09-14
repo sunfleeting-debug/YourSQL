@@ -24,7 +24,9 @@ class BufferFrame:
 class BufferPool:
     """缓存磁盘页并记录命中、缺页和淘汰统计。"""
 
-    def __init__(self, disk: DiskManager, capacity: int = 64, replacement_policy: str = "lru") -> None:
+    def __init__(
+        self, disk: DiskManager, capacity: int = 64, replacement_policy: str = "lru"
+    ) -> None:
         if capacity < 1:
             raise ValueError("缓存容量必须为正数")
         policy = replacement_policy.lower()
@@ -84,7 +86,11 @@ class BufferPool:
     def _eviction_order_locked(self) -> list[int]:
         """返回当前可淘汰页的优先级；列表首项下一次最先被淘汰。"""
 
-        candidates = [(page_id, frame) for page_id, frame in self._frames.items() if frame.pin_count == 0]
+        candidates = [
+            (page_id, frame)
+            for page_id, frame in self._frames.items()
+            if frame.pin_count == 0
+        ]
         if self.replacement_policy == "fifo":
             candidates.sort(key=lambda item: (item[1].loaded_order, item[0]))
         else:
@@ -133,7 +139,9 @@ class BufferPool:
                 self._evict_one()
             self._clock += 1
             page = self.disk.read(normalized)
-            self._frames[normalized] = BufferFrame(page, 1 if pin else 0, False, self._clock, self._clock)
+            self._frames[normalized] = BufferFrame(
+                page, 1 if pin else 0, False, self._clock, self._clock
+            )
             return page
 
     def put_page(self, page: Page, *, dirty: bool = True) -> None:
@@ -188,7 +196,9 @@ class BufferPool:
                 self.flush_page(page_id)
             self.disk.sync()
 
-    def new_page(self, page_type: PageType = PageType.FREE, payload: bytes = b"") -> Page:
+    def new_page(
+        self, page_type: PageType = PageType.FREE, payload: bytes = b""
+    ) -> Page:
         page = self.disk.allocate(page_type, payload)
         self.put_page(page, dirty=False)
         return page
@@ -211,26 +221,55 @@ class BufferPool:
         from itertools import islice
 
         with self._lock:
-            return {"stats": self.stats(), "policy": self.replacement_policy,
-                    "frames": [{"page_id": page_id, "type": frame.page.page_type.value,
-                                "pin_count": frame.pin_count, "dirty": frame.dirty,
-                                "loaded_order": frame.loaded_order, "last_used": frame.last_used}
-                               for page_id, frame in islice(self._frames.items(), offset, offset + limit)],
-                     "eviction_order": self._eviction_order_locked(),
-                     "total": len(self._frames), "offset": offset, "limit": limit,
-                     "revision": self._revision}
+            return {
+                "stats": self.stats(),
+                "policy": self.replacement_policy,
+                "frames": [
+                    {
+                        "page_id": page_id,
+                        "type": frame.page.page_type.value,
+                        "pin_count": frame.pin_count,
+                        "dirty": frame.dirty,
+                        "loaded_order": frame.loaded_order,
+                        "last_used": frame.last_used,
+                    }
+                    for page_id, frame in islice(
+                        self._frames.items(), offset, offset + limit
+                    )
+                ],
+                "eviction_order": self._eviction_order_locked(),
+                "total": len(self._frames),
+                "offset": offset,
+                "limit": limit,
+                "revision": self._revision,
+            }
 
     def changes_since(self, revision: int) -> dict[str, object]:
         """返回指定游标之后发生变化的页号，不读取磁盘也不触碰替换状态。"""
 
         with self._lock:
             if revision >= self._revision:
-                return {"revision": self._revision, "changed_page_ids": [], "truncated": False}
-            first_revision = self._change_log[0][0] if self._change_log else self._revision + 1
+                return {
+                    "revision": self._revision,
+                    "changed_page_ids": [],
+                    "truncated": False,
+                }
+            first_revision = (
+                self._change_log[0][0] if self._change_log else self._revision + 1
+            )
             truncated = revision < first_revision - 1
-            page_ids = list(dict.fromkeys(page_id for item_revision, page_id in self._change_log
-                                         if item_revision > revision))
-            return {"revision": self._revision, "changed_page_ids": page_ids, "truncated": truncated}
+            page_ids = list(
+                dict.fromkeys(
+                    page_id
+                    for item_revision, page_id in self._change_log
+                    if item_revision > revision
+                )
+            )
+            return {
+                "revision": self._revision,
+                "changed_page_ids": page_ids,
+                "truncated": truncated,
+            }
 
     def peek_page(self, page_id: int) -> Page:
         """复制缓存最新页或只读磁盘页，保持缓存与 I/O 指标不变。"""

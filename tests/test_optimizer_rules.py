@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 
 from yoursql.common import ExecutionError
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 from yoursql.sql.ast import BinaryOp, Literal
-from yoursql.sql.plan import PlanNode
+from yoursql.planner.physical import PlanNode
 
 
 def _scan_nodes(plan: PlanNode | None) -> list[PlanNode]:

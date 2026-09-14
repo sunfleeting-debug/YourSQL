@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..common.errors import BinderError
-from ..common.types import DataType, Schema, Value
+from ..common.types import Schema, Value
 from .ast import (
     BetweenPredicate,
     BinaryOp,
-    ColumnDefinition,
     ColumnRef,
     CreateIndex,
     CreateView,
@@ -22,7 +21,6 @@ from .ast import (
     InPredicate,
     Insert,
     IsNull,
-    JoinClause,
     Literal,
     Node,
     Select,
@@ -45,11 +43,9 @@ class TableProtocol(Protocol):
 class CatalogProtocol(Protocol):
     """Binder 需要的最小目录读接口。"""
 
-    def get_table(self, name: str) -> TableProtocol:
-        ...
+    def get_table(self, name: str) -> TableProtocol: ...
 
-    def get_relation(self, name: str) -> TableProtocol:
-        ...
+    def get_relation(self, name: str) -> TableProtocol: ...
 
 
 @dataclass(frozen=True)
@@ -91,11 +87,15 @@ class Binder:
         if isinstance(statement, Update):
             table = self._table(statement.table, statement, "table")
             self._bind_assignments(statement.assignments, table.schema, statement)
-            self._bind_expression(statement.where, self._relations((TableRef(statement.table),)))
+            self._bind_expression(
+                statement.where, self._relations((TableRef(statement.table),))
+            )
             return BoundStatement(statement)
         if isinstance(statement, Delete):
             table = self._table(statement.table, statement, "table")
-            self._bind_expression(statement.where, self._relations((TableRef(statement.table),)))
+            self._bind_expression(
+                statement.where, self._relations((TableRef(statement.table),))
+            )
             return BoundStatement(statement)
         if isinstance(statement, CreateIndex):
             table = self._table(statement.table, statement, "table")
@@ -103,14 +103,18 @@ class Binder:
                 try:
                     table.schema.column(column)
                 except BinderError as exc:
-                    raise self._located_error(exc.message, statement, f"column:{index}") from exc
+                    raise self._located_error(
+                        exc.message, statement, f"column:{index}"
+                    ) from exc
             return BoundStatement(statement)
         if isinstance(statement, Show):
             if statement.object_name is not None:
                 self._relation(statement.object_name, statement)
             return BoundStatement(statement)
         if isinstance(statement, Explain):
-            return BoundStatement(statement, self.bind(statement.statement).output_columns)
+            return BoundStatement(
+                statement, self.bind(statement.statement).output_columns
+            )
         return BoundStatement(statement)
 
     def _bind_create_table(self, statement: CreateTable) -> None:
@@ -122,7 +126,11 @@ class Binder:
             seen.add(key)
         primary_count = sum(column.primary_key for column in statement.columns)
         if primary_count > 1:
-            raise self._located_error("暂不支持多列 PRIMARY KEY，请使用 CREATE UNIQUE INDEX", statement, "primary:1")
+            raise self._located_error(
+                "暂不支持多列 PRIMARY KEY，请使用 CREATE UNIQUE INDEX",
+                statement,
+                "primary:1",
+            )
         for column in statement.columns:
             if column.default is not None and isinstance(column.default, Literal):
                 try:
@@ -139,21 +147,31 @@ class Binder:
             for position, column in enumerate(statement.columns):
                 key = column.lower()
                 if key in seen:
-                    raise self._located_error(f"INSERT 列 {column!r} 重复", statement, f"column:{position}")
+                    raise self._located_error(
+                        f"INSERT 列 {column!r} 重复", statement, f"column:{position}"
+                    )
                 seen.add(key)
                 try:
                     indexes.append(schema.index(column))
                 except BinderError as exc:
-                    raise self._located_error(exc.message, statement, f"column:{position}") from exc
+                    raise self._located_error(
+                        exc.message, statement, f"column:{position}"
+                    ) from exc
         else:
             indexes = list(range(len(schema)))
         for row_index, row in enumerate(statement.values):
             if len(row) != len(indexes):
-                raise self._located_error(f"INSERT 需要 {len(indexes)} 个值，实际得到 {len(row)} 个", statement, f"row:{row_index}")
+                raise self._located_error(
+                    f"INSERT 需要 {len(indexes)} 个值，实际得到 {len(row)} 个",
+                    statement,
+                    f"row:{row_index}",
+                )
             for position, expression in enumerate(row):
                 if isinstance(expression, Literal):
                     try:
-                        Value.infer(expression.value).coerce(schema.columns[indexes[position]].data_type)
+                        Value.infer(expression.value).coerce(
+                            schema.columns[indexes[position]].data_type
+                        )
                     except BinderError as exc:
                         raise self._located_error(exc.message, expression) from exc
         return BoundStatement(statement, insert_indexes=tuple(indexes))
@@ -168,7 +186,11 @@ class Binder:
         self._bind_expression(statement.having, relations)
         aliases = {item.alias.lower() for item in statement.items if item.alias}
         for item in statement.order_by:
-            if isinstance(item.expression, ColumnRef) and item.expression.table is None and item.expression.name.lower() in aliases:
+            if (
+                isinstance(item.expression, ColumnRef)
+                and item.expression.table is None
+                and item.expression.name.lower() in aliases
+            ):
                 continue
             self._bind_expression(item.expression, relations)
         if statement.union is not None:
@@ -177,8 +199,14 @@ class Binder:
         for item in statement.items:
             if isinstance(item.expression, Star):
                 for alias, schema in relations:
-                    if item.expression.table is None or item.expression.table.lower() == alias.lower():
-                        output.extend(f"{alias}.{name}" if len(relations) > 1 else name for name in schema.names())
+                    if (
+                        item.expression.table is None
+                        or item.expression.table.lower() == alias.lower()
+                    ):
+                        output.extend(
+                            f"{alias}.{name}" if len(relations) > 1 else name
+                            for name in schema.names()
+                        )
             elif isinstance(item.expression, ColumnRef):
                 output.append(item.alias or item.expression.name)
             else:
@@ -200,18 +228,26 @@ class Binder:
             relations.append((alias, table.schema))
         return tuple(relations)
 
-    def _relation(self, name: str, node: Node | None = None, key: str | None = None) -> TableProtocol:
+    def _relation(
+        self, name: str, node: Node | None = None, key: str | None = None
+    ) -> TableProtocol:
         if self.catalog is None:
             return _SchemaHolder(Schema.from_iterable(()))
         try:
             get_relation = getattr(self.catalog, "get_relation", None)
-            return get_relation(name) if get_relation is not None else self.catalog.get_table(name)
+            return (
+                get_relation(name)
+                if get_relation is not None
+                else self.catalog.get_table(name)
+            )
         except Exception as exc:
             if isinstance(exc, BinderError):
                 raise
             raise self._located_error(f"表或视图 {name!r} 不存在", node, key) from exc
 
-    def _table(self, name: str, node: Node | None = None, key: str | None = None) -> TableProtocol:
+    def _table(
+        self, name: str, node: Node | None = None, key: str | None = None
+    ) -> TableProtocol:
         if self.catalog is None:
             return _SchemaHolder(Schema.from_iterable(()))
         try:
@@ -221,15 +257,24 @@ class Binder:
                 raise
             raise self._located_error(f"表 {name!r} 不存在", node, key) from exc
 
-    def _bind_assignments(self, assignments: tuple[tuple[str, Expr], ...], schema: Schema, statement: Update | None = None) -> None:
+    def _bind_assignments(
+        self,
+        assignments: tuple[tuple[str, Expr], ...],
+        schema: Schema,
+        statement: Update | None = None,
+    ) -> None:
         for index, (name, expression) in enumerate(assignments):
             try:
                 schema.column(name)
             except BinderError as exc:
-                raise self._located_error(exc.message, statement, f"assignment:{index}") from exc
+                raise self._located_error(
+                    exc.message, statement, f"assignment:{index}"
+                ) from exc
             self._bind_expression(expression, (("", schema),))
 
-    def _bind_expression(self, expression: Expr | None, relations: tuple[tuple[str, Schema], ...]) -> None:
+    def _bind_expression(
+        self, expression: Expr | None, relations: tuple[tuple[str, Schema], ...]
+    ) -> None:
         if expression is None or isinstance(expression, (Literal, Star)):
             return
         if isinstance(expression, ColumnRef):
@@ -262,29 +307,53 @@ class Binder:
             self._bind_expression(expression.lower, relations)
             self._bind_expression(expression.upper, relations)
 
-    def _resolve_column(self, expression: ColumnRef, relations: tuple[tuple[str, Schema], ...]) -> None:
+    def _resolve_column(
+        self, expression: ColumnRef, relations: tuple[tuple[str, Schema], ...]
+    ) -> None:
         if not relations:
-            raise self._located_error(f"列 {expression.qualified_name!r} 没有可绑定的表", expression)
+            raise self._located_error(
+                f"列 {expression.qualified_name!r} 没有可绑定的表", expression
+            )
         if expression.table:
-            matching = [(alias, schema) for alias, schema in relations if alias.lower() == expression.table.lower()]
+            matching = [
+                (alias, schema)
+                for alias, schema in relations
+                if alias.lower() == expression.table.lower()
+            ]
             if not matching:
-                raise self._located_error(f"表或别名 {expression.table!r} 不存在", expression)
+                raise self._located_error(
+                    f"表或别名 {expression.table!r} 不存在", expression
+                )
             try:
                 matching[0][1].column(expression.name)
             except BinderError as exc:
                 raise self._located_error(exc.message, expression) from exc
             return
-        matches = [schema for _alias, schema in relations if any(column.name.lower() == expression.name.lower() for column in schema)]
+        matches = [
+            schema
+            for _alias, schema in relations
+            if any(column.name.lower() == expression.name.lower() for column in schema)
+        ]
         if not matches:
             raise self._located_error(f"列 {expression.name!r} 不存在", expression)
         if len(matches) > 1:
-            raise self._located_error(f"列 {expression.name!r} 存在歧义，请使用表名限定", expression)
+            raise self._located_error(
+                f"列 {expression.name!r} 存在歧义，请使用表名限定", expression
+            )
 
     @staticmethod
-    def _located_error(message: str, node: Node | None, key: str | None = None) -> BinderError:
+    def _located_error(
+        message: str, node: Node | None, key: str | None = None
+    ) -> BinderError:
         """把语义错误绑定到触发它的 AST 节点；无位置节点继续走旧兜底。"""
 
-        location = node.source_location_for(key) if node is not None and key is not None else node.source_location if node is not None else None
+        location = (
+            node.source_location_for(key)
+            if node is not None and key is not None
+            else node.source_location
+            if node is not None
+            else None
+        )
         if location is None:
             return BinderError(message)
         return BinderError(message, line=location[0], column=location[1])
@@ -294,7 +363,9 @@ class Binder:
         if isinstance(expression, FunctionCall):
             return expression.name.lower()
         if isinstance(expression, UnaryOp):
-            return f"{expression.operator} {Binder._expression_name(expression.operand)}"
+            return (
+                f"{expression.operator} {Binder._expression_name(expression.operand)}"
+            )
         return type(expression).__name__.lower()
 
 

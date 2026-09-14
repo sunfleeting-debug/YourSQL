@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import operator as py_operator
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
@@ -35,24 +36,22 @@ from ..sql.ast import (
     Update,
 )
 from ..sql.lexer import tokenize
-from ..sql.plan import PlanNode, plan_from_statement
+from .cost import (
+    DECODE_ROW_COST,
+    INDEX_ENTRY_COST,
+    INDEX_ONLY_ENTRY_COST,
+    RANDOM_PAGE_COST,
+    SEQ_PAGE_COST,
+    CostEstimate,
+)
+from .logical import plan_from_statement
+from .physical import PlanNode, PhysicalPlanNode, as_physical
 
 
 # HOW：小表直接走索引的收益有限，但不值得为其引入额外的计划探测逻辑。
 _SMALL_TABLE_ROW_THRESHOLD = 128
 # WHY：索引命中大量记录时还要逐行回表；超过该比例时顺序扫描通常更稳定。
 _INDEX_SELECTIVITY_THRESHOLD = 0.20
-
-# HOW：页级代价常数由本机实测标定（TPC-H SF0.01，16 KB 页）：
-#   顺序读一页（含槽目录解析）≈ 30 µs；顺序扫描每行解码 ≈ 4.2 µs；
-#   索引回表每行（页缓存大量未命中 + 记录解码）≈ 98.6 µs；索引项遍历每行 ≈ 8.6 µs。
-# 这些常数只用于“索引 vs 顺序扫描”的相对比较，不代表毫秒数。
-SEQ_PAGE_COST = 30e-6
-DECODE_ROW_COST = 4.2e-6
-INDEX_ENTRY_COST = 8.6e-6
-RANDOM_PAGE_COST = 94e-6
-# 覆盖索引直读的每条目成本（实测：叶子链扫 9,504 条约 44 ms，含索引页 JSON 解析）。
-INDEX_ONLY_ENTRY_COST = 4.6e-6
 
 
 @dataclass
@@ -64,13 +63,6 @@ class StatisticsStore:
 
     def get(self, table_name: str) -> TableStats:
         return self.tables.get(table_name.lower(), TableStats())
-
-
-@dataclass(frozen=True)
-class CostEstimate:
-    startup_cost: float
-    total_cost: float
-    rows: int
 
 
 class PlanCache:
@@ -134,7 +126,11 @@ class Optimizer:
         """随机回表单行成本：记录解码 + 未命中缓存部分的随机取页。"""
 
         pages = max(1, page_count)
-        miss_ratio = 0.0 if pages <= self.buffer_pool_pages else 1.0 - self.buffer_pool_pages / pages
+        miss_ratio = (
+            0.0
+            if pages <= self.buffer_pool_pages
+            else 1.0 - self.buffer_pool_pages / pages
+        )
         return DECODE_ROW_COST + RANDOM_PAGE_COST * miss_ratio
 
     def estimate_seq_scan(self, table_name: str) -> CostEstimate:
@@ -168,7 +164,11 @@ class Optimizer:
 
         if plan.kind == "SeqScan":
             table = plan.properties.get("table")
-            return self.estimate_seq_scan(table) if isinstance(table, str) else CostEstimate(0.0, 0.0, 0)
+            return (
+                self.estimate_seq_scan(table)
+                if isinstance(table, str)
+                else CostEstimate(0.0, 0.0, 0)
+            )
         if plan.kind == "IndexScan":
             table = plan.properties.get("table")
             if not isinstance(table, str):
@@ -196,22 +196,31 @@ class Optimizer:
             rows = sum(child.rows for child in children)
         return CostEstimate(startup_cost, total_cost, rows)
 
-    def choose_scan(self, table_name: str, *, has_usable_index: bool, selectivity: float = 0.1) -> str:
+    def choose_scan(
+        self, table_name: str, *, has_usable_index: bool, selectivity: float = 0.1
+    ) -> str:
         seq = self.estimate_seq_scan(table_name)
         idx = self.estimate_index_scan(table_name, selectivity=selectivity)
         if not has_usable_index:
             return "SeqScan"
         rows = self.statistics.get(table_name).row_count
         # HOW：先用固定选择性做保守决策；大表的宽索引扫描不应仅因存在索引就被选中。
-        if rows > _SMALL_TABLE_ROW_THRESHOLD and selectivity > _INDEX_SELECTIVITY_THRESHOLD:
+        if (
+            rows > _SMALL_TABLE_ROW_THRESHOLD
+            and selectivity > _INDEX_SELECTIVITY_THRESHOLD
+        ):
             return "SeqScan"
         # HOW：小表或高选择性场景再用页级代价（顺序页/解码行/随机回表）做最终判断。
         candidate_rows = max(1, int(rows * selectivity)) if rows else 1
-        if rows > _SMALL_TABLE_ROW_THRESHOLD and not self.should_use_index(table_name, candidate_rows):
+        if rows > _SMALL_TABLE_ROW_THRESHOLD and not self.should_use_index(
+            table_name, candidate_rows
+        ):
             return "SeqScan"
         return "IndexScan" if idx.total_cost < seq.total_cost else "SeqScan"
 
-    def should_use_index(self, table_name: str, candidate_rows: int, *, index_cached: bool = False) -> bool:
+    def should_use_index(
+        self, table_name: str, candidate_rows: int, *, index_cached: bool = False
+    ) -> bool:
         """按页级代价判断是否值得走索引回表。
 
         WHY：顺序扫描与随机回表的单行成本差一个数量级（实测 4.2 µs/行 vs 98.6 µs/行），
@@ -250,37 +259,48 @@ class Optimizer:
 
     def optimize(
         self,
-        plan: object,
+        plan: PlanNode,
         *,
         sql: str | None = None,
         index_columns: Mapping[str, Collection[str]] | None = None,
-    ) -> object:
+    ) -> PhysicalPlanNode:
         """按当前统计信息和索引元数据改写计划。"""
 
         if sql is not None:
             cached = self.cache.get(sql)
             if cached is not None:
+                if not isinstance(cached, PhysicalPlanNode):
+                    raise TypeError("计划缓存包含非物理计划")
                 return cached
-        statement = plan.statement if isinstance(plan, PlanNode) else None
-        rewritten_statement = self._rewrite_statement(statement) if statement is not None else None
+        statement = plan.statement
+        rewritten_statement = (
+            self._rewrite_statement(statement) if statement is not None else None
+        )
         base_plan = plan
         if rewritten_statement is not None and rewritten_statement != statement:
             # HOW：先用折叠后的 AST 重建计划，再做访问路径和谓词下推，确保
             # 计划属性、实际执行语句和索引边界使用同一份表达式。
             base_plan = plan_from_statement(rewritten_statement)
         optimized = self._rewrite(base_plan, index_columns=index_columns or {})
-        if isinstance(optimized, PlanNode) and rewritten_statement is not None:
+        if not isinstance(optimized, PlanNode):
+            raise TypeError("优化器未返回计划节点")
+        if rewritten_statement is not None:
             optimized = replace(optimized, statement=rewritten_statement)
+        optimized = as_physical(optimized)
         if sql is not None:
             self.cache.put(sql, optimized)
         return optimized
 
-    def _rewrite(self, plan: object, *, index_columns: Mapping[str, Collection[str]]) -> object:
+    def _rewrite(
+        self, plan: object, *, index_columns: Mapping[str, Collection[str]]
+    ) -> object:
         if isinstance(plan, PlanNode):
             return self._rewrite_plan_node(plan, index_columns=index_columns)
         children = getattr(plan, "children", None)
         if isinstance(children, tuple):
-            rewritten = tuple(self._rewrite(child, index_columns=index_columns) for child in children)
+            rewritten = tuple(
+                self._rewrite(child, index_columns=index_columns) for child in children
+            )
             if rewritten != children:
                 try:
                     plan = replace(plan, children=rewritten)
@@ -288,19 +308,32 @@ class Optimizer:
                     return plan
         return plan
 
-    def _rewrite_plan_node(self, plan: PlanNode, *, index_columns: Mapping[str, Collection[str]]) -> PlanNode:
+    def _rewrite_plan_node(
+        self, plan: PlanNode, *, index_columns: Mapping[str, Collection[str]]
+    ) -> PlanNode:
         """递归重写计划，并把单表过滤条件下推到扫描节点。"""
 
         if plan.kind == "Filter" and len(plan.children) == 1:
             child = self._rewrite(plan.children[0], index_columns=index_columns)
             predicate = self._rewrite_expr(plan.properties.get("predicate"))
             if not isinstance(predicate, Expr):
-                return replace(plan, children=(child,)) if child != plan.children[0] else plan
+                return (
+                    replace(plan, children=(child,))
+                    if child != plan.children[0]
+                    else plan
+                )
             if self._is_false_predicate(predicate):
-                return PlanNode("EmptyScan", {"reason": "过滤条件恒假", "predicate": predicate}, (), plan.statement)
+                return PlanNode(
+                    "EmptyScan",
+                    {"reason": "过滤条件恒假", "predicate": predicate},
+                    (),
+                    plan.statement,
+                )
             if self._is_true_predicate(predicate):
                 return child
-            pushed, residual = self._push_predicates(child, predicate, index_columns=index_columns)
+            pushed, residual = self._push_predicates(
+                child, predicate, index_columns=index_columns
+            )
             if residual is None:
                 return pushed
             properties = dict(plan.properties)
@@ -311,7 +344,9 @@ class Optimizer:
             key: self._rewrite_plan_value(value)
             for key, value in dict(plan.properties).items()
         }
-        children = tuple(self._rewrite(child, index_columns=index_columns) for child in plan.children)
+        children = tuple(
+            self._rewrite(child, index_columns=index_columns) for child in plan.children
+        )
         if properties == dict(plan.properties) and children == plan.children:
             return plan
         return replace(plan, properties=properties, children=children)
@@ -332,7 +367,9 @@ class Optimizer:
         if not self._predicate_uses_index(predicate, table, alias, available):
             return plan
         columns = self._indexable_columns(predicate, table, alias)
-        column = next((item for item in columns if item.name.lower() in available), None)
+        column = next(
+            (item for item in columns if item.name.lower() in available), None
+        )
         if column is None:
             return plan
         if self.choose_scan(table, has_usable_index=True) != "IndexScan":
@@ -359,37 +396,68 @@ class Optimizer:
         return False, None
 
     @classmethod
-    def _indexable_columns(cls, predicate: object, table: str, alias: object) -> tuple[ColumnRef, ...]:
+    def _indexable_columns(
+        cls, predicate: object, table: str, alias: object
+    ) -> tuple[ColumnRef, ...]:
         qualifiers = {table.lower()}
         if isinstance(alias, str):
             qualifiers.add(alias.lower())
         if isinstance(predicate, BinaryOp):
             operator = predicate.operator.upper()
             if operator in {"AND", "OR"}:
-                return (*cls._indexable_columns(predicate.left, table, alias),
-                        *cls._indexable_columns(predicate.right, table, alias))
+                return (
+                    *cls._indexable_columns(predicate.left, table, alias),
+                    *cls._indexable_columns(predicate.right, table, alias),
+                )
             if operator not in {"=", "<", "<=", ">", ">=", "LIKE"}:
                 return ()
-            for column, other in ((predicate.left, predicate.right), (predicate.right, predicate.left)):
+            for column, other in (
+                (predicate.left, predicate.right),
+                (predicate.right, predicate.left),
+            ):
                 if isinstance(column, ColumnRef) and cls._constant_expression(other):
                     if not column.table or column.table.lower() in qualifiers:
-                        if operator != "LIKE" or (isinstance(other, Literal) and isinstance(other.value, str)
-                                                   and not any(marker in other.value for marker in ("%", "_"))):
+                        if operator != "LIKE" or (
+                            isinstance(other, Literal)
+                            and isinstance(other.value, str)
+                            and not any(marker in other.value for marker in ("%", "_"))
+                        ):
                             return (column,)
             return ()
-        if isinstance(predicate, IsNull) and isinstance(predicate.expression, ColumnRef):
+        if isinstance(predicate, IsNull) and isinstance(
+            predicate.expression, ColumnRef
+        ):
             column = predicate.expression
-            return (column,) if not column.table or column.table.lower() in qualifiers else ()
-        if isinstance(predicate, InPredicate) and not predicate.negated and isinstance(predicate.expression, ColumnRef):
+            return (
+                (column,)
+                if not column.table or column.table.lower() in qualifiers
+                else ()
+            )
+        if (
+            isinstance(predicate, InPredicate)
+            and not predicate.negated
+            and isinstance(predicate.expression, ColumnRef)
+        ):
             column = predicate.expression
             if column.table and column.table.lower() not in qualifiers:
                 return ()
-            return (column,) if all(cls._constant_expression(value) for value in predicate.values) else ()
-        if isinstance(predicate, BetweenPredicate) and isinstance(predicate.expression, ColumnRef):
+            return (
+                (column,)
+                if all(cls._constant_expression(value) for value in predicate.values)
+                else ()
+            )
+        if isinstance(predicate, BetweenPredicate) and isinstance(
+            predicate.expression, ColumnRef
+        ):
             column = predicate.expression
             if column.table and column.table.lower() not in qualifiers:
                 return ()
-            return (column,) if cls._constant_expression(predicate.lower) and cls._constant_expression(predicate.upper) else ()
+            return (
+                (column,)
+                if cls._constant_expression(predicate.lower)
+                and cls._constant_expression(predicate.upper)
+                else ()
+            )
         return ()
 
     @classmethod
@@ -401,18 +469,25 @@ class Optimizer:
         available: set[str],
     ) -> bool:
         if isinstance(predicate, BinaryOp) and predicate.operator.upper() == "AND":
-            return (cls._predicate_uses_index(predicate.left, table, alias, available)
-                    or cls._predicate_uses_index(predicate.right, table, alias, available))
+            return cls._predicate_uses_index(
+                predicate.left, table, alias, available
+            ) or cls._predicate_uses_index(predicate.right, table, alias, available)
         if isinstance(predicate, BinaryOp) and predicate.operator.upper() == "OR":
-            return (cls._predicate_uses_index(predicate.left, table, alias, available)
-                    and cls._predicate_uses_index(predicate.right, table, alias, available))
-        return any(column.name.lower() in available for column in cls._indexable_columns(predicate, table, alias))
+            return cls._predicate_uses_index(
+                predicate.left, table, alias, available
+            ) and cls._predicate_uses_index(predicate.right, table, alias, available)
+        return any(
+            column.name.lower() in available
+            for column in cls._indexable_columns(predicate, table, alias)
+        )
 
     @classmethod
     def _rewrite_expr(cls, expression: object) -> object:
         """递归折叠表达式，并应用安全的布尔恒等式。"""
 
-        if expression is None or isinstance(expression, (Literal, ColumnRef, Parameter, Star)):
+        if expression is None or isinstance(
+            expression, (Literal, ColumnRef, Parameter, Star)
+        ):
             return expression
         if isinstance(expression, UnaryOp):
             operand = cls._rewrite_expr(expression.operand)
@@ -448,13 +523,17 @@ class Optimizer:
             child = cls._rewrite_expr(expression.expression)
             if isinstance(child, Literal):
                 value = child.value is None
-                return cls._literal(not value if expression.negated else value, expression)
+                return cls._literal(
+                    not value if expression.negated else value, expression
+                )
             return cls._replace_node(expression, expression=child)
         if isinstance(expression, InPredicate):
             child = cls._rewrite_expr(expression.expression)
             values = tuple(cls._rewrite_expr(value) for value in expression.values)
             rewritten = cls._replace_node(expression, expression=child, values=values)
-            if isinstance(child, Literal) and all(isinstance(value, Literal) for value in values):
+            if isinstance(child, Literal) and all(
+                isinstance(value, Literal) for value in values
+            ):
                 result: bool | None = False
                 for value in values:
                     comparison = compare_values(child.value, value.value, "=")
@@ -471,7 +550,9 @@ class Optimizer:
             child = cls._rewrite_expr(expression.expression)
             lower = cls._rewrite_expr(expression.lower)
             upper = cls._rewrite_expr(expression.upper)
-            rewritten = cls._replace_node(expression, expression=child, lower=lower, upper=upper)
+            rewritten = cls._replace_node(
+                expression, expression=child, lower=lower, upper=upper
+            )
             if all(isinstance(value, Literal) for value in (child, lower, upper)):
                 result = cls._and_truth(
                     compare_values(child.value, lower.value, ">="),
@@ -482,7 +563,10 @@ class Optimizer:
                 return cls._literal(result, expression)
             return rewritten
         if isinstance(expression, FunctionCall):
-            return cls._replace_node(expression, args=tuple(cls._rewrite_expr(arg) for arg in expression.args))
+            return cls._replace_node(
+                expression,
+                args=tuple(cls._rewrite_expr(arg) for arg in expression.args),
+            )
         if isinstance(expression, Subquery):
             query = cls._rewrite_statement(expression.query)
             return cls._replace_node(expression, query=query)
@@ -496,7 +580,9 @@ class Optimizer:
             return cls._replace_node(
                 statement,
                 items=tuple(
-                    cls._replace_node(item, expression=cls._rewrite_expr(item.expression))
+                    cls._replace_node(
+                        item, expression=cls._rewrite_expr(item.expression)
+                    )
                     for item in statement.items
                 ),
                 joins=tuple(
@@ -507,28 +593,42 @@ class Optimizer:
                 group_by=tuple(cls._rewrite_expr(item) for item in statement.group_by),
                 having=cls._rewrite_expr(statement.having),
                 order_by=tuple(
-                    cls._replace_node(item, expression=cls._rewrite_expr(item.expression))
+                    cls._replace_node(
+                        item, expression=cls._rewrite_expr(item.expression)
+                    )
                     for item in statement.order_by
                 ),
                 union=cls._rewrite_statement(statement.union),
             )
         if isinstance(statement, Explain):
-            return cls._replace_node(statement, statement=cls._rewrite_statement(statement.statement))
+            return cls._replace_node(
+                statement, statement=cls._rewrite_statement(statement.statement)
+            )
         if isinstance(statement, Update):
             return cls._replace_node(
                 statement,
-                assignments=tuple((column, cls._rewrite_expr(value)) for column, value in statement.assignments),
+                assignments=tuple(
+                    (column, cls._rewrite_expr(value))
+                    for column, value in statement.assignments
+                ),
                 where=cls._rewrite_expr(statement.where),
             )
         if isinstance(statement, Delete):
-            return cls._replace_node(statement, where=cls._rewrite_expr(statement.where))
+            return cls._replace_node(
+                statement, where=cls._rewrite_expr(statement.where)
+            )
         if isinstance(statement, Insert):
             return cls._replace_node(
                 statement,
-                values=tuple(tuple(cls._rewrite_expr(value) for value in row) for row in statement.values),
+                values=tuple(
+                    tuple(cls._rewrite_expr(value) for value in row)
+                    for row in statement.values
+                ),
             )
         if isinstance(statement, CreateView):
-            return cls._replace_node(statement, query=cls._rewrite_statement(statement.query))
+            return cls._replace_node(
+                statement, query=cls._rewrite_statement(statement.query)
+            )
         return statement
 
     @classmethod
@@ -536,9 +636,13 @@ class Optimizer:
         if isinstance(value, Expr):
             return cls._rewrite_expr(value)
         if isinstance(value, SelectItem):
-            return cls._replace_node(value, expression=cls._rewrite_expr(value.expression))
+            return cls._replace_node(
+                value, expression=cls._rewrite_expr(value.expression)
+            )
         if isinstance(value, OrderItem):
-            return cls._replace_node(value, expression=cls._rewrite_expr(value.expression))
+            return cls._replace_node(
+                value, expression=cls._rewrite_expr(value.expression)
+            )
         if isinstance(value, JoinClause):
             return cls._replace_node(value, on=cls._rewrite_expr(value.on))
         if isinstance(value, Statement):
@@ -568,21 +672,33 @@ class Optimizer:
         return None
 
     @classmethod
-    def _simplify_boolean(cls, operator: str, left: object, right: object, source: Node) -> Expr | None:
+    def _simplify_boolean(
+        cls, operator: str, left: object, right: object, source: Node
+    ) -> Expr | None:
         if operator not in {"AND", "OR"}:
             return None
         if isinstance(left, Literal) and isinstance(right, Literal):
             folded, value = cls._fold_binary(operator, left.value, right.value)
             return cls._literal(value, source) if folded else None
         if operator == "AND":
-            if isinstance(left, Literal) and left.value is False or isinstance(right, Literal) and right.value is False:
+            if (
+                isinstance(left, Literal)
+                and left.value is False
+                or isinstance(right, Literal)
+                and right.value is False
+            ):
                 return cls._literal(False, source)
             if isinstance(left, Literal) and left.value is True:
                 return right if isinstance(right, Expr) else None
             if isinstance(right, Literal) and right.value is True:
                 return left if isinstance(left, Expr) else None
         else:
-            if isinstance(left, Literal) and left.value is True or isinstance(right, Literal) and right.value is True:
+            if (
+                isinstance(left, Literal)
+                and left.value is True
+                or isinstance(right, Literal)
+                and right.value is True
+            ):
                 return cls._literal(True, source)
             if isinstance(left, Literal) and left.value is False:
                 return right if isinstance(right, Expr) else None
@@ -593,9 +709,14 @@ class Optimizer:
         return None
 
     @classmethod
-    def _fold_binary(cls, operator: str, left: object, right: object) -> tuple[bool, object]:
+    def _fold_binary(
+        cls, operator: str, left: object, right: object
+    ) -> tuple[bool, object]:
         if operator == "AND":
-            return True, cls._and_truth(left if isinstance(left, bool) else None, right if isinstance(right, bool) else None)
+            return True, cls._and_truth(
+                left if isinstance(left, bool) else None,
+                right if isinstance(right, bool) else None,
+            )
         if operator == "OR":
             if left is True or right is True:
                 return True, True
@@ -607,29 +728,30 @@ class Optimizer:
         if left is None or right is None:
             return True, None
         if operator in {"LIKE", "NOT LIKE"}:
-            pattern = "^" + re.escape(str(right)).replace(r"%", ".*").replace(r"_", ".") + "$"
+            pattern = (
+                "^" + re.escape(str(right)).replace(r"%", ".*").replace(r"_", ".") + "$"
+            )
             matched = re.match(pattern, str(left), flags=re.DOTALL) is not None
             return True, not matched if operator == "NOT LIKE" else matched
+        if operator == "||":
+            return True, str(left) + str(right)
+        arithmetic = {
+            "+": py_operator.add,
+            "-": py_operator.sub,
+            "*": py_operator.mul,
+            "/": py_operator.truediv,
+            "%": py_operator.mod,
+        }.get(operator)
+        if arithmetic is None:
+            return False, None
         try:
-            if operator == "+":
-                return True, left + right  # type: ignore[operator]
-            if operator == "-":
-                return True, left - right  # type: ignore[operator]
-            if operator == "*":
-                return True, left * right  # type: ignore[operator]
-            if operator == "/":
-                if right == 0:
-                    return False, None
-                return True, left / right  # type: ignore[operator]
-            if operator == "%":
-                if right == 0:
-                    return False, None
-                return True, left % right  # type: ignore[operator]
-            if operator == "||":
-                return True, str(left) + str(right)
+            if operator in {"/", "%"} and right == 0:
+                return False, None
+            # WHY：这里保留 Python 动态运算，让不兼容的 SQL 值统一落入异常分支，
+            # 由常量折叠按“不可折叠”处理，而不是改变原有错误语义。
+            return True, arithmetic(left, right)
         except (TypeError, ValueError, OverflowError):
             return False, None
-        return False, None
 
     @classmethod
     def _is_true_predicate(cls, expression: Expr) -> bool:
@@ -643,7 +765,10 @@ class Optimizer:
     @classmethod
     def _split_conjunction(cls, predicate: Expr) -> tuple[Expr, ...]:
         if isinstance(predicate, BinaryOp) and predicate.operator.upper() == "AND":
-            return (*cls._split_conjunction(predicate.left), *cls._split_conjunction(predicate.right))
+            return (
+                *cls._split_conjunction(predicate.left),
+                *cls._split_conjunction(predicate.right),
+            )
         return (predicate,)
 
     @staticmethod
@@ -737,7 +862,9 @@ class Optimizer:
         """把单表 AND 条件下推，跨表条件保留在 JOIN 上方。"""
 
         atoms = self._split_conjunction(predicate)
-        pushed, residual = self._push_into_subtree(child, atoms, index_columns=index_columns)
+        pushed, residual = self._push_into_subtree(
+            child, atoms, index_columns=index_columns
+        )
         return pushed, self._combine_conjunction(residual)
 
     def _push_into_subtree(
@@ -750,18 +877,33 @@ class Optimizer:
         items = tuple(predicates)
         if not items:
             return plan, ()
-        if plan.kind == "Join" and len(plan.children) == 2 and str(plan.properties.get("join_type", "")).upper() in {"INNER", "CROSS"}:
+        if (
+            plan.kind == "Join"
+            and len(plan.children) == 2
+            and str(plan.properties.get("join_type", "")).upper() in {"INNER", "CROSS"}
+        ):
             left, right = plan.children
             left_relations = self._plan_relations(left)
             right_relations = self._plan_relations(right)
-            left_items = tuple(item for item in items if self._can_push_to(item, left_relations))
+            left_items = tuple(
+                item for item in items if self._can_push_to(item, left_relations)
+            )
             right_items = tuple(
-                item for item in items
+                item
+                for item in items
                 if item not in left_items and self._can_push_to(item, right_relations)
             )
-            residual = tuple(item for item in items if item not in left_items and item not in right_items)
-            left, left_residual = self._push_into_subtree(left, left_items, index_columns=index_columns)
-            right, right_residual = self._push_into_subtree(right, right_items, index_columns=index_columns)
+            residual = tuple(
+                item
+                for item in items
+                if item not in left_items and item not in right_items
+            )
+            left, left_residual = self._push_into_subtree(
+                left, left_items, index_columns=index_columns
+            )
+            right, right_residual = self._push_into_subtree(
+                right, right_items, index_columns=index_columns
+            )
             rewritten = replace(plan, children=(left, right))
             return rewritten, (*left_residual, *right_residual, *residual)
         # HOW：单个扫描节点可能同时包含真实表名和别名，不能用关系名集合
@@ -769,7 +911,9 @@ class Optimizer:
         if plan.kind in {"SeqScan", "IndexScan"}:
             predicate = self._combine_conjunction(items)
             if predicate is not None:
-                return self._wrap_pushed_filter(plan, predicate, index_columns=index_columns), ()
+                return self._wrap_pushed_filter(
+                    plan, predicate, index_columns=index_columns
+                ), ()
         return plan, items
 
     def _wrap_pushed_filter(
@@ -786,7 +930,12 @@ class Optimizer:
             properties["pushed_predicate"] = predicate
             scan = replace(plan, properties=properties)
             scan = self._choose_scan(scan, predicate, index_columns)
-            return PlanNode("Filter", {"predicate": predicate, "pushed": True}, (scan,), plan.statement)
+            return PlanNode(
+                "Filter",
+                {"predicate": predicate, "pushed": True},
+                (scan,),
+                plan.statement,
+            )
         return PlanNode("Filter", {"predicate": predicate}, (plan,), plan.statement)
 
 

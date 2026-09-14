@@ -6,6 +6,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from enum import Enum
+from typing import ClassVar
 
 from ..common.errors import StorageError
 
@@ -53,6 +54,7 @@ def _page_type_from_code(code: int) -> PageType:
 class Page:
     """带 CRC 校验的固定大小页。"""
 
+    HEADER_SIZE: ClassVar[int] = HEADER_SIZE
     page_id: int
     page_size: int = 4096
     page_type: PageType = PageType.FREE
@@ -87,7 +89,11 @@ class Page:
             checksum,
             b"\x00" * 4,
         )
-        return header + self.payload + bytes(self.page_size - len(header) - len(self.payload))
+        return (
+            header
+            + self.payload
+            + bytes(self.page_size - len(header) - len(self.payload))
+        )
 
     @classmethod
     def from_bytes(cls, raw: bytes, *, page_size: int | None = None) -> "Page":
@@ -97,7 +103,16 @@ class Page:
             raise StorageError(f"页长度错误，期望 {page_size}，实际 {len(raw)}")
         if len(raw) < HEADER_SIZE:
             raise StorageError("页内容不足以包含页头")
-        magic, version, type_code, _reserved, page_id, payload_length, checksum, _alignment_reserved = PAGE_HEADER.unpack(raw[:HEADER_SIZE])
+        (
+            magic,
+            version,
+            type_code,
+            _reserved,
+            page_id,
+            payload_length,
+            checksum,
+            _alignment_reserved,
+        ) = PAGE_HEADER.unpack(raw[:HEADER_SIZE])
         if magic != PAGE_MAGIC:
             raise StorageError(f"页 {page_id} 魔数错误")
         if version != PAGE_VERSION:
@@ -111,7 +126,9 @@ class Page:
         return cls(page_id, page_size, _page_type_from_code(type_code), payload)
 
     @classmethod
-    def empty(cls, page_id: int, page_size: int = 4096, page_type: PageType = PageType.FREE) -> "Page":
+    def empty(
+        cls, page_id: int, page_size: int = 4096, page_type: PageType = PageType.FREE
+    ) -> "Page":
         return cls(page_id=page_id, page_size=page_size, page_type=page_type)
 
 
@@ -131,7 +148,9 @@ class SlottedPage:
         self.page_size = int(page_size)
         self.slots: list[bytes | None] = list(slots or [])
         self._entries: list[tuple[int, int, bool]] = list(entries or [])
-        self._payload: bytearray | None = None if _payload is None else bytearray(_payload)
+        self._payload: bytearray | None = (
+            None if _payload is None else bytearray(_payload)
+        )
         if self._payload is not None and len(self._payload) != self._payload_capacity:
             raise StorageError("双向槽式页负载长度错误")
 
@@ -163,14 +182,20 @@ class SlottedPage:
         if capacity > 0xFFFF:
             raise StorageError("页容量超过双向槽式格式的偏移上限")
         try:
-            magic, version, _flags, slot_count, free_start, free_end = SLOTTED_HEADER.unpack(
-                page.payload[:SLOTTED_HEADER_SIZE])
+            magic, version, _flags, slot_count, free_start, free_end = (
+                SLOTTED_HEADER.unpack(page.payload[:SLOTTED_HEADER_SIZE])
+            )
         except struct.error as exc:
             raise StorageError(f"HEAP 页 {page.page_id} 双向槽式页头损坏") from exc
         if magic != SLOTTED_MAGIC or version != SLOTTED_VERSION:
             raise StorageError(f"HEAP 页 {page.page_id} 双向槽式版本不支持")
         directory_end = SLOTTED_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE
-        if directory_end > capacity or free_start != directory_end or free_start > free_end or free_end > capacity:
+        if (
+            directory_end > capacity
+            or free_start != directory_end
+            or free_start > free_end
+            or free_end > capacity
+        ):
             raise StorageError(f"HEAP 页 {page.page_id} 空闲区边界非法")
 
         slots: list[bytes | None] = []
@@ -180,27 +205,41 @@ class SlottedPage:
             entry_offset = SLOTTED_HEADER_SIZE + slot_id * SLOT_ENTRY_SIZE
             try:
                 record_offset, record_length, flags, _reserved = SLOT_ENTRY.unpack(
-                    page.payload[entry_offset:entry_offset + SLOT_ENTRY_SIZE])
+                    page.payload[entry_offset : entry_offset + SLOT_ENTRY_SIZE]
+                )
             except struct.error as exc:
                 raise StorageError(f"HEAP 页 {page.page_id} 槽目录损坏") from exc
             deleted = bool(flags & SLOT_DELETED)
             if deleted:
-                if record_length and (record_offset < directory_end or record_offset + record_length > capacity):
+                if record_length and (
+                    record_offset < directory_end
+                    or record_offset + record_length > capacity
+                ):
                     raise StorageError(f"HEAP 页 {page.page_id} 删除槽记录范围非法")
                 slots.append(None)
                 entries.append((record_offset, record_length, True))
                 continue
-            if record_length <= 0 or record_offset < free_end or record_offset + record_length > capacity:
+            if (
+                record_length <= 0
+                or record_offset < free_end
+                or record_offset + record_length > capacity
+            ):
                 raise StorageError(f"HEAP 页 {page.page_id} 槽 {slot_id} 记录范围非法")
             ranges.append((record_offset, record_offset + record_length))
-            slots.append(bytes(page.payload[record_offset:record_offset + record_length]))
+            slots.append(
+                bytes(page.payload[record_offset : record_offset + record_length])
+            )
             entries.append((record_offset, record_length, False))
         for left, right in zip(sorted(ranges), sorted(ranges)[1:]):
             if left[1] > right[0]:
                 raise StorageError(f"HEAP 页 {page.page_id} 记录范围重叠")
-        return cls(page.page_id, page.page_size, slots, entries=entries, _payload=page.payload)
+        return cls(
+            page.page_id, page.page_size, slots, entries=entries, _payload=page.payload
+        )
 
-    def _compact_binary(self, slots: list[bytes | None] | None = None) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
+    def _compact_binary(
+        self, slots: list[bytes | None] | None = None
+    ) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
         """在无法增量分配时压缩记录，并生成新的槽目录。"""
 
         selected = self.slots if slots is None else slots
@@ -230,25 +269,45 @@ class SlottedPage:
             entries[slot_id] = (cursor, len(record), False)
 
         payload = bytearray(capacity)
-        SLOTTED_HEADER.pack_into(payload, 0, SLOTTED_MAGIC, SLOTTED_VERSION, 0,
-                                  len(selected), directory_end, cursor)
+        SLOTTED_HEADER.pack_into(
+            payload,
+            0,
+            SLOTTED_MAGIC,
+            SLOTTED_VERSION,
+            0,
+            len(selected),
+            directory_end,
+            cursor,
+        )
         for slot_id, (record_offset, record_length, deleted) in enumerate(entries):
             entry_offset = SLOTTED_HEADER_SIZE + slot_id * SLOT_ENTRY_SIZE
-            SLOT_ENTRY.pack_into(payload, entry_offset, record_offset, record_length,
-                                 SLOT_DELETED if deleted else 0, 0)
+            SLOT_ENTRY.pack_into(
+                payload,
+                entry_offset,
+                record_offset,
+                record_length,
+                SLOT_DELETED if deleted else 0,
+                0,
+            )
         for (record_offset, _record_length, deleted), record in zip(entries, selected):
             if not deleted and record is not None:
-                payload[record_offset:record_offset + len(record)] = record
-        return bytes(payload), entries, {
-            "directory_start": SLOTTED_HEADER_SIZE,
-            "directory_end": directory_end,
-            "free_start": directory_end,
-            "free_end": cursor,
-            "record_start": cursor,
-            "record_end": capacity,
-        }
+                payload[record_offset : record_offset + len(record)] = record
+        return (
+            bytes(payload),
+            entries,
+            {
+                "directory_start": SLOTTED_HEADER_SIZE,
+                "directory_end": directory_end,
+                "free_start": directory_end,
+                "free_end": cursor,
+                "record_start": cursor,
+                "record_end": capacity,
+            },
+        )
 
-    def _active_ranges(self, entries: list[tuple[int, int, bool]], directory_end: int) -> list[tuple[int, int]]:
+    def _active_ranges(
+        self, entries: list[tuple[int, int, bool]], directory_end: int
+    ) -> list[tuple[int, int]]:
         ranges: list[tuple[int, int]] = []
         for record_offset, record_length, deleted in entries:
             if deleted or record_length == 0:
@@ -263,7 +322,9 @@ class SlottedPage:
                 raise StorageError("槽式页记录范围重叠")
         return ranges
 
-    def _free_extents(self, entries: list[tuple[int, int, bool]], directory_end: int) -> list[tuple[int, int]]:
+    def _free_extents(
+        self, entries: list[tuple[int, int, bool]], directory_end: int
+    ) -> list[tuple[int, int]]:
         """返回目录之后所有可用空闲片段，供插入和更新做 first-fit。"""
 
         if directory_end > self._payload_capacity:
@@ -279,7 +340,9 @@ class SlottedPage:
             extents.append((cursor, self._payload_capacity))
         return extents
 
-    def _current_binary(self) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
+    def _current_binary(
+        self,
+    ) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
         """序列化当前物理布局，不主动压缩已有记录。"""
 
         if self._payload is None or len(self._entries) != len(self.slots):
@@ -292,7 +355,10 @@ class SlottedPage:
         ranges: list[tuple[int, int]] = []
         for slot_id, (record_offset, record_length, deleted) in enumerate(entries):
             if record_length:
-                if record_offset < directory_end or record_offset + record_length > capacity:
+                if (
+                    record_offset < directory_end
+                    or record_offset + record_length > capacity
+                ):
                     raise StorageError(f"槽 {slot_id} 记录范围非法")
                 ranges.append((record_offset, record_offset + record_length))
             if not deleted:
@@ -310,24 +376,44 @@ class SlottedPage:
                 record = self.slots[slot_id]
                 if record is None:
                     raise StorageError(f"槽 {slot_id} 缺少记录")
-                payload[record_offset:record_offset + record_length] = record
+                payload[record_offset : record_offset + record_length] = record
                 live_starts.append(record_offset)
             entry_offset = SLOTTED_HEADER_SIZE + slot_id * SLOT_ENTRY_SIZE
-            SLOT_ENTRY.pack_into(payload, entry_offset, record_offset, record_length,
-                                 SLOT_DELETED if deleted else 0, 0)
+            SLOT_ENTRY.pack_into(
+                payload,
+                entry_offset,
+                record_offset,
+                record_length,
+                SLOT_DELETED if deleted else 0,
+                0,
+            )
         free_end = min(live_starts, default=capacity)
-        SLOTTED_HEADER.pack_into(payload, 0, SLOTTED_MAGIC, SLOTTED_VERSION, 0,
-                                  len(entries), directory_end, free_end)
-        return bytes(payload), entries, {
-            "directory_start": SLOTTED_HEADER_SIZE,
-            "directory_end": directory_end,
-            "free_start": directory_end,
-            "free_end": free_end,
-            "record_start": free_end,
-            "record_end": capacity,
-        }
+        SLOTTED_HEADER.pack_into(
+            payload,
+            0,
+            SLOTTED_MAGIC,
+            SLOTTED_VERSION,
+            0,
+            len(entries),
+            directory_end,
+            free_end,
+        )
+        return (
+            bytes(payload),
+            entries,
+            {
+                "directory_start": SLOTTED_HEADER_SIZE,
+                "directory_end": directory_end,
+                "free_start": directory_end,
+                "free_end": free_end,
+                "record_start": free_end,
+                "record_end": capacity,
+            },
+        )
 
-    def _build_binary(self, slots: list[bytes | None] | None = None) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
+    def _build_binary(
+        self, slots: list[bytes | None] | None = None
+    ) -> tuple[bytes, list[tuple[int, int, bool]], dict[str, int]]:
         # 带候选 slots 的调用按候选布局试算，不改变当前页的物理记录位置。
         if slots is not None:
             return self._compact_binary(slots)
@@ -344,8 +430,12 @@ class SlottedPage:
         if self._payload is None or len(self._entries) != len(self.slots):
             self._set_compact()
 
-    def _allocate_record(self, record_length: int, directory_end: int,
-                         entries: list[tuple[int, int, bool]]) -> int | None:
+    def _allocate_record(
+        self,
+        record_length: int,
+        directory_end: int,
+        entries: list[tuple[int, int, bool]],
+    ) -> int | None:
         if record_length <= 0 or record_length > 0xFFFF:
             raise StorageError("记录长度非法")
         for start, end in reversed(self._free_extents(entries, directory_end)):
@@ -354,8 +444,9 @@ class SlottedPage:
         return None
 
     @staticmethod
-    def _clear_deleted_overlaps(entries: list[tuple[int, int, bool]],
-                                 record_offset: int, record_length: int) -> None:
+    def _clear_deleted_overlaps(
+        entries: list[tuple[int, int, bool]], record_offset: int, record_length: int
+    ) -> None:
         """清理被新记录覆盖的删除槽旧范围，避免目录范围与新记录重叠。"""
 
         record_end = record_offset + record_length
@@ -366,7 +457,9 @@ class SlottedPage:
             if old_offset < record_end and record_offset < old_end:
                 entries[slot_id] = (0, 0, True)
 
-    def _place_record(self, slot_id: int, record: bytes, *, append_slot: bool = False) -> int:
+    def _place_record(
+        self, slot_id: int, record: bytes, *, append_slot: bool = False
+    ) -> int:
         self._ensure_binary()
         if not isinstance(record, bytes):
             raise TypeError("record 必须是 bytes")
@@ -395,18 +488,23 @@ class SlottedPage:
         if not append_slot:
             old_offset, old_length, old_deleted = old_entries[slot_id]
             if old_deleted and old_length:
-                self._payload[old_offset:old_offset + old_length] = b"\x00" * old_length
+                self._payload[old_offset : old_offset + old_length] = (
+                    b"\x00" * old_length
+                )
         self.slots = candidate
         self._entries = old_entries
         self._entries[slot_id] = (offset, len(record), False)
-        self._payload[offset:offset + len(record)] = record
+        self._payload[offset : offset + len(record)] = record
         return slot_id
 
     @property
     def free_space(self) -> int:
         self._ensure_binary()
         directory_end = SLOTTED_HEADER_SIZE + len(self._entries) * SLOT_ENTRY_SIZE
-        return sum(end - start for start, end in self._free_extents(self._entries, directory_end))
+        return sum(
+            end - start
+            for start, end in self._free_extents(self._entries, directory_end)
+        )
 
     def insert(self, record: bytes) -> int:
         if not isinstance(record, bytes):
@@ -431,14 +529,20 @@ class SlottedPage:
         if len(record) <= old_length:
             if self._payload is None:
                 raise StorageError("槽式页负载尚未初始化")
-            self._payload[old_offset:old_offset + old_length] = record + b"\x00" * (old_length - len(record))
+            self._payload[old_offset : old_offset + old_length] = record + b"\x00" * (
+                old_length - len(record)
+            )
             self.slots[slot_id] = record
             self._entries[slot_id] = (old_offset, len(record), False)
             return
 
         entries_for_space = list(self._entries)
         entries_for_space[slot_id] = (old_offset, old_length, True)
-        offset = self._allocate_record(len(record), SLOTTED_HEADER_SIZE + len(self._entries) * SLOT_ENTRY_SIZE, entries_for_space)
+        offset = self._allocate_record(
+            len(record),
+            SLOTTED_HEADER_SIZE + len(self._entries) * SLOT_ENTRY_SIZE,
+            entries_for_space,
+        )
         candidate = list(self.slots)
         candidate[slot_id] = record
         if offset is None:
@@ -447,8 +551,8 @@ class SlottedPage:
         if self._payload is None:
             raise StorageError("槽式页负载尚未初始化")
         self._clear_deleted_overlaps(self._entries, offset, len(record))
-        self._payload[old_offset:old_offset + old_length] = b"\x00" * old_length
-        self._payload[offset:offset + len(record)] = record
+        self._payload[old_offset : old_offset + old_length] = b"\x00" * old_length
+        self._payload[offset : offset + len(record)] = record
         self.slots[slot_id] = record
         self._entries[slot_id] = (offset, len(record), False)
 
@@ -460,7 +564,9 @@ class SlottedPage:
         self._ensure_binary()
         record_offset, record_length, _deleted = self._entries[slot_id]
         if self._payload is not None and record_length:
-            self._payload[record_offset:record_offset + record_length] = b"\x00" * record_length
+            self._payload[record_offset : record_offset + record_length] = (
+                b"\x00" * record_length
+            )
         self.slots[slot_id] = None
         self._entries[slot_id] = (record_offset, record_length, True)
 
@@ -468,11 +574,15 @@ class SlottedPage:
         """返回每个槽的物理范围，offset 相对于完整数据库页。"""
 
         _payload, entries, _layout = self._build_binary()
-        return [{"slot_id": slot_id,
-                 "offset": 0 if deleted else HEADER_SIZE + record_offset,
-                 "length": 0 if deleted else record_length,
-                 "deleted": deleted}
-                for slot_id, (record_offset, record_length, deleted) in enumerate(entries)]
+        return [
+            {
+                "slot_id": slot_id,
+                "offset": 0 if deleted else HEADER_SIZE + record_offset,
+                "length": 0 if deleted else record_length,
+                "deleted": deleted,
+            }
+            for slot_id, (record_offset, record_length, deleted) in enumerate(entries)
+        ]
 
     def layout_metadata(self) -> dict[str, object]:
         """返回工作台绘制双向页布局所需的有界结构化信息。"""
@@ -481,36 +591,61 @@ class SlottedPage:
         page_offset = HEADER_SIZE
         slot_directory_start = page_offset + layout["directory_start"]
         slot_directory_end = page_offset + layout["directory_end"]
-        free_regions = [{"start": page_offset + start, "end": page_offset + end,
-                         "size": end - start, "direction": "free"}
-                        for start, end in self._free_extents(entries, layout["directory_end"])
-                        if end > start]
+        free_regions = [
+            {
+                "start": page_offset + start,
+                "end": page_offset + end,
+                "size": end - start,
+                "direction": "free",
+            }
+            for start, end in self._free_extents(entries, layout["directory_end"])
+            if end > start
+        ]
         free_start = page_offset + layout["free_start"]
         free_end = page_offset + layout["free_end"]
         record_start = page_offset + layout["record_start"]
         record_end = page_offset + layout["record_end"]
         return {
-            "format": self.storage_format, "physical": True,
-            "payload_offset": page_offset, "payload_capacity": self._payload_capacity,
-            "inner_header_size": SLOTTED_HEADER_SIZE, "slot_entry_size": SLOT_ENTRY_SIZE,
+            "format": self.storage_format,
+            "physical": True,
+            "payload_offset": page_offset,
+            "payload_capacity": self._payload_capacity,
+            "inner_header_size": SLOTTED_HEADER_SIZE,
+            "slot_entry_size": SLOT_ENTRY_SIZE,
             "slot_count": len(entries),
-            "slot_directory": {"start": slot_directory_start, "end": slot_directory_end,
-                                "size": slot_directory_end - slot_directory_start,
-                                "direction": "forward"},
-            "free_region": {"start": free_start, "end": free_end,
-                             "size": max(0, free_end - free_start),
-                             "direction": "free"},
+            "slot_directory": {
+                "start": slot_directory_start,
+                "end": slot_directory_end,
+                "size": slot_directory_end - slot_directory_start,
+                "direction": "forward",
+            },
+            "free_region": {
+                "start": free_start,
+                "end": free_end,
+                "size": max(0, free_end - free_start),
+                "direction": "free",
+            },
             "free_regions": free_regions,
-            "record_region": {"start": record_start, "end": record_end,
-                               "size": max(0, record_end - record_start),
-                               "direction": "backward"},
-            "slots": [{"slot_id": slot_id,
-                       "offset": 0 if deleted else HEADER_SIZE + record_offset,
-                       "length": 0 if deleted else record_length,
-                       "deleted": deleted,
-                       "directory_offset": slot_directory_start + slot_id * SLOT_ENTRY_SIZE,
-                       "directory_length": SLOT_ENTRY_SIZE}
-                      for slot_id, (record_offset, record_length, deleted) in enumerate(entries)],
+            "record_region": {
+                "start": record_start,
+                "end": record_end,
+                "size": max(0, record_end - record_start),
+                "direction": "backward",
+            },
+            "slots": [
+                {
+                    "slot_id": slot_id,
+                    "offset": 0 if deleted else HEADER_SIZE + record_offset,
+                    "length": 0 if deleted else record_length,
+                    "deleted": deleted,
+                    "directory_offset": slot_directory_start
+                    + slot_id * SLOT_ENTRY_SIZE,
+                    "directory_length": SLOT_ENTRY_SIZE,
+                }
+                for slot_id, (record_offset, record_length, deleted) in enumerate(
+                    entries
+                )
+            ],
         }
 
     def to_page(self) -> Page:
@@ -520,8 +655,8 @@ class SlottedPage:
         return Page(self.page_id, self.page_size, PageType.HEAP, payload)
 
     def live_slots(self) -> tuple[tuple[int, bytes], ...]:
-        return tuple((index, value) for index, value in enumerate(self.slots) if value is not None)
-
-
-# 让测试和调用者可以从 Page 访问常量，避免重复导入内部结构。
-Page.HEADER_SIZE = HEADER_SIZE  # type: ignore[attr-defined]
+        return tuple(
+            (index, value)
+            for index, value in enumerate(self.slots)
+            if value is not None
+        )

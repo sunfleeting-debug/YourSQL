@@ -13,10 +13,10 @@ import pytest
 
 from yoursql.common import AuthorizationError, DatabaseConfig, YourSQLError
 from yoursql.common.trace import ExecutionTrace, current_trace
-from yoursql.engine.database import Database
-from yoursql.engine.http import HTTPService
-from yoursql.engine.session import Session
-from yoursql.engine.workbench_sql import redact_sql, split_sql
+from yoursql.engine.runtime.database import Database
+from yoursql.engine.services.http import HTTPService
+from yoursql.engine.security.session import Session
+from yoursql.engine.services.workbench_sql import redact_sql, split_sql
 from yoursql.sql.lexer import tokenize
 
 
@@ -472,8 +472,8 @@ def test_storage_map_mode_defers_table_and_index_labels(service, monkeypatch) ->
     def forbidden(*_args, **_kwargs):
         raise AssertionError("地图请求不应重算索引绑定表或逐页目录归属")
 
-    monkeypatch.setattr("yoursql.engine.inspection._index_pages", forbidden)
-    monkeypatch.setattr("yoursql.engine.inspection._table_for_page", forbidden)
+    monkeypatch.setattr("yoursql.engine.services.inspection._index_pages", forbidden)
+    monkeypatch.setattr("yoursql.engine.services.inspection._table_for_page", forbidden)
     status, response = client.request("/api/storage?offset=0&limit=500&fields=map")
     assert status == 200
     storage = response["data"]

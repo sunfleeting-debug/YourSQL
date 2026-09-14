@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from yoursql.common import CatalogError
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 
 def _seed(database: Database) -> None:

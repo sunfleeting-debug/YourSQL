@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from ..common.errors import StorageError
 from ..common.types import PageId, RowId
 from .buffer import BufferPool
-from .page import HEADER_SIZE, Page, PageType, SLOTTED_HEADER_SIZE, SLOT_ENTRY_SIZE, SlottedPage
+from .page import (
+    Page,
+    PageType,
+    SLOTTED_HEADER_SIZE,
+    SLOT_ENTRY_SIZE,
+    SlottedPage,
+)
 
 
 class TableHeap:
     """管理一张表的页链；页号列表由 Catalog 持久化。"""
 
-    def __init__(self, buffer_pool: BufferPool, page_ids: list[int] | None = None) -> None:
+    def __init__(
+        self, buffer_pool: BufferPool, page_ids: list[int] | None = None
+    ) -> None:
         self.buffer_pool = buffer_pool
         self.page_ids: list[int] = [int(page_id) for page_id in (page_ids or [])]
 
@@ -26,7 +34,9 @@ class TableHeap:
 
     @staticmethod
     def _encode(row: tuple[object, ...]) -> bytes:
-        return json.dumps(list(row), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return json.dumps(list(row), ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
 
     @staticmethod
     def _decode(raw: bytes) -> tuple[object, ...]:
@@ -86,9 +96,13 @@ class TableHeap:
             page_id = int(self.page_ids[-1])
             existing = list(self._read_slotted(page_id).slots)
             pending = list(existing)
-            free_slots = [index for index, record in enumerate(existing) if record is None]
-            used = SLOTTED_HEADER_SIZE + len(existing) * SLOT_ENTRY_SIZE + sum(
-                len(record) for record in existing if record is not None
+            free_slots = [
+                index for index, record in enumerate(existing) if record is None
+            ]
+            used = (
+                SLOTTED_HEADER_SIZE
+                + len(existing) * SLOT_ENTRY_SIZE
+                + sum(len(record) for record in existing if record is not None)
             )
 
         def flush() -> None:

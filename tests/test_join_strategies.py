@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 LEFT_ROWS = [(index, f"c{index}") for index in range(40)]
 RIGHT_ROWS = [
@@ -105,13 +105,13 @@ def test_index_nested_loop_is_chosen_when_hash_build_does_not_fit(tmp_path: Path
         assert len(expected) == 1000
 
         # 把内存预算压到 1 行 → 哈希建侧（1,000 行）不可行；外层仅 2 行 → 索引连接应胜出
-        monkeypatch.setattr("yoursql.engine.database._JOIN_HASH_MEMORY_BUDGET", 464)
+        monkeypatch.setattr("yoursql.execution.query._JOIN_HASH_MEMORY_BUDGET", 464)
         result = db.execute(sql)
         assert result.stats["joins"] == ["IndexNestedLoop"], result.stats
         assert sorted((row[0], row[1]) for row in result.rows) == expected
 
         # LEFT JOIN 同样走索引连接，且未匹配左行补 NULL
-        monkeypatch.setattr("yoursql.engine.database._JOIN_HASH_MEMORY_BUDGET", 464)
+        monkeypatch.setattr("yoursql.execution.query._JOIN_HASH_MEMORY_BUDGET", 464)
         left = db.execute("SELECT s.id, b.bid FROM small AS s LEFT JOIN big AS b ON b.small_id = s.id;")
         assert left.stats["joins"] == ["IndexNestedLoop"], left.stats
         assert len(left.rows) == 1000

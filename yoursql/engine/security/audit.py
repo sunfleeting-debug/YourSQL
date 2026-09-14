@@ -17,14 +17,29 @@ class AuditLog:
         self._events: list[dict[str, object]] = []
         self._lock = RLock()
 
-    def record(self, action: str, *, user: str | None = None, success: bool = True, details: Mapping[str, object] | None = None) -> None:
-        event: dict[str, object] = {"timestamp": time.time(), "action": action, "user": user, "success": success, "details": dict(details or {})}
+    def record(
+        self,
+        action: str,
+        *,
+        user: str | None = None,
+        success: bool = True,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        event: dict[str, object] = {
+            "timestamp": time.time(),
+            "action": action,
+            "user": user,
+            "success": success,
+            "details": dict(details or {}),
+        }
         with self._lock:
             self._events.append(event)
             if self.path is not None:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+                    stream.write(
+                        json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+                    )
 
     def events(self) -> tuple[dict[str, object], ...]:
         with self._lock:
