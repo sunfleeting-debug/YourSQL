@@ -258,6 +258,7 @@ const DatabasePickerDialog = forwardRef<HTMLDialogElement, DatabasePickerProps>(
                 >
                   <option value="lru">LRU</option>
                   <option value="fifo">FIFO</option>
+                  <option value="2q">2Q</option>
                 </select>
               </label>
               <label>

@@ -144,6 +144,7 @@ class DatabaseConfig:
     page_size: int = 4096
     buffer_pool_size: int = 64
     replacement_policy: str = "lru"
+    protect_page_types: bool = False
     max_varchar_length: int = 1_000_000
     payload_codec: PayloadCodecName = "json"
 
@@ -157,6 +158,9 @@ class DatabaseConfig:
             replacement_policy=_env_text(
                 "YOURSQL_REPLACEMENT_POLICY", cls.replacement_policy
             ),
+            protect_page_types=_env_bool(
+                "YOURSQL_BUFFER_POOL_PROTECT_PAGE_TYPES", cls.protect_page_types
+            ),
             max_varchar_length=_env_int(
                 "YOURSQL_MAX_VARCHAR_LENGTH", cls.max_varchar_length
             ),
@@ -169,8 +173,8 @@ class DatabaseConfig:
             raise ValueError("page_size 必须是不小于 512 的二次幂")
         if self.buffer_pool_size < 1:
             raise ValueError("buffer_pool_size 必须为正数")
-        if self.replacement_policy.lower() not in {"lru", "fifo"}:
-            raise ValueError("replacement_policy 只能是 lru 或 fifo")
+        if self.replacement_policy.lower() not in {"lru", "fifo", "2q"}:
+            raise ValueError("replacement_policy 只能是 lru、fifo 或 2q")
         if self.max_varchar_length < 1:
             raise ValueError("max_varchar_length 必须为正数")
         object.__setattr__(self, "payload_codec", validate_payload_codec(self.payload_codec))

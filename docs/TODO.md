@@ -37,6 +37,7 @@
 - [x] 逐行执行路径优化：行上下文模板化 + 按需列裁剪 + WHERE 预过滤（不通过的行不建上下文）+ 常量折叠 + 表达式编译为闭包；同口径背靠背对比 TPC-H Q6 从 3.1542 s 降到 0.5741 s（约 5.5×，对照脚本当次 0.2961 s），并新增 `tests/test_expression_compiler.py` 对编译闭包与解释器的等价性回归。
 - [x] 差距归因（含阶段拆解）：单次 Q6 中 JSON 解析 0.180 s（48%）、槽目录反序列化 0.052 s、读页 0.016 s、谓词 0.06 s；与 SQLite 的 34× 差距主要来自“每行都产生 Python 对象 + JSON 行编码”，与 DuckDB 的 296× 还差列存与向量化。
 - [x] BufferPool 淘汰路径优化：`_evict_one` 从 O(容量) 改为按 `OrderedDict` 维护的淘汰顺序取队首，并给对照脚本加 `--settle-seconds` 固定测量口径（同进程内依次测不同池容量会产生虚假的“池越大越慢”）。
+- [x] BufferPool 访问策略实验：新增 2Q 冷/热队列以避免顺序扫描污染热点页，并增加 INDEX/CATALOG/SUPERBLOCK 页面类型保护开关；`examples/create_buffer_pool_lab.py` 与 `benchmarks/compare_buffer_pool_lab.py` 提供基线、单项和组合策略的固定顺序对照。
 - [x] 索引构建与只读路径修复：`bulk_load` 分块改为按“条目编码长度”增量核算（5,000 行 7.97 s → 0.14 s，60,175 行约 2 s）；`DiskManager.peek` 先 flush 再读，避免被淘汰的页读成旧内容（新增 `tests/test_disk_peek.py`）；抽候选前先常量折叠，否则 `DATE(...)` 会让字符串列范围索引失效。
 - [x] 索引实测（TPC-H Q6）：现场建 `l_shipdate` / `l_discount` / `(l_shipdate, l_discount)` / `l_quantity` 四个索引，结果 SeqScan 0.3591 s 快于 IndexScan 0.3926 s（1,728 候选）与 0.6233 s（800 候选）——现有“候选行 ≤ 20% 行数”的规则缺“触碰页数 × 随机访问惩罚”项。
 - [x] 索引侧优化三项：候选集缓存（252.9 ms → 0.12 ms）、页级代价模型（正确拒绝 10,969 候选的低选择性索引）、`CREATE INDEX ... INCLUDE` + `IndexOnlyScan`（Q6 0.6138 s → 0.1358 s）；新增 `tests/test_index_cache.py` 与 `tests/test_covering_index.py`。

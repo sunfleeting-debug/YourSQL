@@ -15,7 +15,7 @@ export function siblingDatabasePath(path: string): string {
 }
 
 export function isReplacementPolicy(value: string): value is ReplacementPolicy {
-  return value === 'lru' || value === 'fifo'
+  return value === 'lru' || value === 'fifo' || value === '2q'
 }
 
 export function isPayloadCodec(value: string): value is PayloadCodecName {

@@ -3,7 +3,7 @@
 import type { JsonObject, JsonValue } from './common'
 import type { IndexMeta } from './catalog'
 
-export type ReplacementPolicy = 'lru' | 'fifo'
+export type ReplacementPolicy = 'lru' | 'fifo' | '2q'
 
 export interface PageHeader {
   page_id: number
@@ -104,6 +104,8 @@ export interface StoragePageDetail extends PageHeader {
 export interface BufferPoolSnapshot {
   stats: Record<string, number>
   policy: ReplacementPolicy
+  protect_page_types: boolean
+  protected_page_limit: number
   frames: {
     page_id: number
     type: string
@@ -111,6 +113,8 @@ export interface BufferPoolSnapshot {
     pin_count: number
     loaded_order: number
     last_used: number
+    queue?: string
+    access_count?: number
   }[]
   /** 当前可淘汰页号，数组下标越小表示越快被淘汰。 */
   eviction_order?: number[]
@@ -177,6 +181,62 @@ export interface StoragePolicyChange {
   replacement_policy: ReplacementPolicy
   buffer_pool: BufferPoolSnapshot
   note: string
+}
+
+export interface StorageProtectionChange {
+  snapshot_at: string
+  changed: boolean
+  previous_protect_page_types: boolean
+  protect_page_types: boolean
+  buffer_pool: BufferPoolSnapshot
+  note: string
+}
+
+export interface BufferPoolDemoPhase {
+  hits: number
+  misses: number
+  evictions: number
+  promotions: number
+  writebacks: number
+  type_protection_skips: number
+  elapsed_ms: number
+  requests: number
+  hit_rate: number
+}
+
+export interface BufferPoolDemoResult {
+  mode?: string
+  policy: ReplacementPolicy
+  protect_page_types: boolean
+  capacity: number
+  hot_index_pages: number[]
+  core_index_pages: number[]
+  probe_index_pages: number[]
+  hot_index_resident_after_scan: number[]
+  heap_pages: number
+  index_pages: number
+  prime: BufferPoolDemoPhase
+  scan: BufferPoolDemoPhase
+  probe: BufferPoolDemoPhase
+  total: Record<string, number>
+  page_reads: number
+  elapsed_ms: number
+}
+
+export interface StorageBufferPoolDemo {
+  snapshot_at: string
+  database_page_count: number
+  buffer_pool: BufferPoolSnapshot
+  kind: 'current' | 'compare'
+  workload: {
+    sequence: string
+    prime_rounds: number
+    scan_rounds: number
+    probe_rounds: number
+    cycles: number
+  }
+  result?: BufferPoolDemoResult
+  results?: BufferPoolDemoResult[]
 }
 
 export interface StorageResizeChange {

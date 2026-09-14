@@ -53,17 +53,20 @@ export interface PageTileClassNameOptions {
   linkedIndex: boolean
   cacheFocus: boolean
   cached: boolean
+  cacheQueue?: 'a1in' | 'am' | null
 }
 
 /** 页面地图方块：类型 + 选中 + 关联表/索引 + 缓存高亮。 */
 export function pageTileClassName(options: PageTileClassNameOptions): string {
-  const { type, active, linked, linkedIndex, cacheFocus, cached } = options
+  const { type, active, linked, linkedIndex, cacheFocus, cached, cacheQueue } = options
   return classNames(
     'page-tile',
     type,
     active && 'selected',
     linked && (linkedIndex ? 'table-linked-index' : 'table-linked'),
-    cacheFocus && (cached ? 'cache-hit' : 'cache-muted')
+    cacheFocus && (cached ? 'cache-hit' : 'cache-muted'),
+    cacheFocus && cacheQueue === 'a1in' && 'cache-cold',
+    cacheFocus && cacheQueue === 'am' && 'cache-hot'
   )
 }
 

@@ -38,7 +38,7 @@ with Database("demo.db") as db:
 | --- | --- |
 | `yoursql.common` | 类型、Schema、RowId、执行结果、统一异常 |
 | `yoursql.sql` | Lexer → Parser → Binder → Plan，输出可解释的计划 |
-| `yoursql.storage` | 固定页、单文件磁盘、槽式页、LRU/FIFO BufferPool、TableHeap、B+Tree |
+| `yoursql.storage` | 固定页、单文件磁盘、槽式页、LRU/FIFO/2Q BufferPool、TableHeap、B+Tree |
 | `yoursql.engine` | Catalog、Volcano Executor、优化器、RBAC、Session、HTTP/SSH |
 | `tests` | 单元与集成测试（持久化、权限、工作台 HTTP） |
 | `benchmarks` | BenchBox TPC-H 数据生成与 Q6 workload |
@@ -73,12 +73,62 @@ SHOW GRANTS FOR USER alice;
 ## 测试与基准
 
 ```powershell
-python -m pytest -q                                     # 87 passed
-cd web; npm test                                        # 4 passed
+python -m pytest -q                                     # 166 passed
+cd web; npm test                                        # 17 passed
 python -m benchmarks.run_benchbox_tpch --iterations 5 --force
 ```
 
 `pytest` 覆盖公共层、存储、SQL、索引、服务与工作台。SQL 语义与优化规则的对外复现用例维护在 [`examples/test_example.md`](examples/test_example.md)（配套 [`examples/test_example.sql`](examples/test_example.sql)），按文档步骤可复现全部断言。
+
+### Buffer Pool 实验室
+
+专用实验库由 [`examples/create_buffer_pool_lab.py`](examples/create_buffer_pool_lab.py) 生成，
+用于对照 LRU 基线、2Q 抗扫描污染和 INDEX/CATALOG 页类型保护：
+
+仓库已经附带可直接打开的压力成品数据库：
+[`data/buffer_pool_lab_large.db`](data/buffer_pool_lab_large.db)。可以直接执行最小演示：
+
+```powershell
+python -m benchmarks.compare_buffer_pool_lab --mode compare
+```
+
+如果需要重新生成同样的数据，再执行 `python -m examples.create_buffer_pool_lab --force`。
+
+`compare` 按“基线 → 只开 2Q → 只开页面类型保护 → 两者组合”运行；也可以使用
+`--mode custom --policy 2q --protect-page-types` 单独组合开关。实验序列固定为“重复访问核心
+INDEX → 重复访问一组 HEAP 热页 → 访问冷的次级 INDEX → 顺序扫描 HEAP → 重复探测核心 INDEX 与次级页”，默认重复 2 个扫描-探测周期，报告写入
+`benchmarks/reports/buffer_pool_lab.json`。运行时也可通过
+`YOURSQL_REPLACEMENT_POLICY=2q` 和 `YOURSQL_BUFFER_POOL_PROTECT_PAGE_TYPES=true` 开启对应策略。
+
+SQL 级复现脚本见 [`examples/buffer_pool_lab_test.sql`](examples/buffer_pool_lab_test.sql)，它在同一
+连接内执行核心点查、次热点点查、完整顺序扫描和逆序热点探测。直接运行：
+
+```powershell
+.venv\Scripts\python.exe -m yoursql.cli `
+  --database .\data\buffer_pool_lab_large.db `
+  --file .\examples\buffer_pool_lab_test.sql --json
+```
+
+要切换 SQL 脚本使用的缓存策略，可在每次启动 CLI 前设置：
+
+```powershell
+$env:YOURSQL_BUFFER_POOL_SIZE = "32"
+$env:YOURSQL_REPLACEMENT_POLICY = "2q"
+$env:YOURSQL_BUFFER_POOL_PROTECT_PAGE_TYPES = "true"
+.venv\Scripts\python.exe -m yoursql.cli `
+  --database .\data\buffer_pool_lab_large.db `
+  --file .\examples\buffer_pool_lab_test.sql --json
+```
+
+JSON 结果中的 `core_warm_*`、`scan_*`、`probe_*` 会分别报告 `page_reads` 与 `cache_hits`；四策略的
+聚合命中率和热点保留结果由上面的 `compare_buffer_pool_lab` 统一统计。
+
+前端现场演示：启动工作台后打开“存储检查 → 缓存”，先把缓存容量设为 `32`，选择 `LRU`，
+关闭“页面类型保护”，点击“当前策略”运行实验；再依次切换到 `2Q` 或打开“页面类型保护”，
+再次点击实验。点击“四策略对比”可在同一张表中查看扫描淘汰、热点探测命中/缺页和热点保留，
+不需要重启服务。开启缓存高亮后，2Q 的冷/热状态用不同边框区分，页面格和缓存表保留数字淘汰序，
+不再额外显示队列字符。开关对应的 HTTP 接口是 `POST /api/storage/cache/policy`、
+`POST /api/storage/cache/protection` 和 `POST /api/storage/cache/demo`。
 
 第二条命令用第三方 BenchBox 0.4.0 跑 TPC-H SF0.01 Q6：数据来自 `TPCH.generate_data()`，SQL 来自 `TPCH.get_query(6, dialect="sqlite")`，YourSQL 只负责加载与执行。结果写入 `benchmarks/reports/tpch_sf001_q6.json`；这是 Q6 子集实验，不等同官方 QphH@Size 成绩。数据集与运行产物落在 `benchmarks/third_party/`、`benchmarks/results/`，不入库。
 
@@ -215,7 +265,7 @@ superblock 会记录 `payload_codec`，已有数据库打开时以文件记录�
 
 **存储检查**（需要全库 `SELECT` + `SECURITY`）：页面页签常驻右侧详情栏，开关块详情不改变地图列数与滚动位置。页面地图按真实字节边界画固定小方格（当前槽目录项 6 B/格），页头、`MSP2` 双向槽式页头、槽目录、空闲区与记录区分别着色，并按 `free_space / page_size` 编码使用率；点击多格区域按“区域 Hex/ASCII → 具体格 → 区域汇总”循环，单格直接看详情，HEAP 页支持槽位下拉联动定位。地图仅在首次进入或手动刷新时全量加载，按 `fields=map` 以 500 页/批拉取，只取画图必需字段（表名/索引名在选中页时补齐，4860 页演示库约 2 s）；其余刷新走单页、页头变更游标、缓存或索引目录接口。索引基于落盘 B+Tree，选中表会懒加载其索引物理页并在地图上联动高亮根、内部与叶子页。内部权限页默认只对 `admin` 显示原始字节，其他安全审计会话显示 `MASKED`。
 
-**数据库面板**：可用路径或本机文件选择器打开已有库，也可新建空白库并自选页大小、缓存页数与 LRU/FIFO 淘汰策略。登录前只能选当前服务目录中的 `.db`；登录后切换需要 `SECURITY` 权限，执行中的任务会阻止切换，切换后旧会话失效。选中本机文件会先复制到当前数据库目录再切换。选择器列出的是当前库所在目录下的 `.db`。
+**数据库面板**：可用路径或本机文件选择器打开已有库，也可新建空白库并自选页大小、缓存页数与 LRU/FIFO/2Q 淘汰策略。登录前只能选当前服务目录中的 `.db`；登录后切换需要 `SECURITY` 权限，执行中的任务会阻止切换，切换后旧会话失效。选中本机文件会先复制到当前数据库目录再切换。选择器列出的是当前库所在目录下的 `.db`。
 
 **演示库**：[`data/showcase_v2.db`](data/showcase_v2.db) 含 9 张表、137,036 行、4096B 页（4915 页）、11 个索引、3 个用户视图与 `analyst`/`support`/`auditor` 账号；`python -m examples.create_showcase_db --force` 可重建。重建的可复现性边界：用户可见内容（9 表行集与行序、11 个索引条目、3 个视图、页数 4915）逐次一致，但**文件 SHA256 不固定**——内部 `_sys_users.password_hash` 用 `secrets.token_bytes(16)` 随机盐 + PBKDF2-HMAC-SHA256（12 万轮），盐每次不同（安全设计）。配套 [`examples/showcase_init.sql`](examples/showcase_init.sql) 与 [`examples/showcase_demo.md`](examples/showcase_demo.md)。
 
@@ -227,9 +277,9 @@ superblock 会记录 `payload_codec`，已有数据库打开时以文件记录�
 - SQL：`POST /api/validate`、`POST /api/queries`、`GET /api/queries/{id}`、`GET /api/queries/{id}/results/{index}`、`POST /api/queries/{id}/cancel`
 - 历史：`GET /api/history`
 - 性能监控：`GET /api/monitor/summary`、`GET /api/monitor/queries`、`GET /api/monitor/queries/{query_id}`
-- 存储：`GET /api/storage`、`GET /api/storage/changes`、`GET /api/storage/pages/{page_id}`、`GET /api/storage/cache`、`POST /api/storage/cache/policy`、`POST /api/storage/cache/resize`、`GET /api/storage/indexes`、`GET /api/storage/indexes/{name}`
+- 存储：`GET /api/storage`、`GET /api/storage/changes`、`GET /api/storage/pages/{page_id}`、`GET /api/storage/cache`、`POST /api/storage/cache/policy`、`POST /api/storage/cache/protection`、`POST /api/storage/cache/demo`、`POST /api/storage/cache/resize`、`GET /api/storage/indexes`、`GET /api/storage/indexes/{name}`
 
-切换与新建库用 `path` 字段（新建还可传 `page_size`、`buffer_pool_size`、`replacement_policy`）；导入用二进制 `.db` 文件体加 `X-YourSQL-File-Name` 文件名头。缓存响应的 `buffer_pool.eviction_order` 是当前策略下的升序淘汰队列，Pin 中的页不进入队列；拥有 `SECURITY` 权限时可在线切换 LRU/FIFO，切换不清空已有缓存帧，从下一次淘汰开始生效。`POST /api/storage/cache/resize` 接收 `{"buffer_pool_size": 1024}`，可在当前服务进程内热调整缓存页数：扩容保留现有缓存帧，缩容按当前策略淘汰未 pin 页并写回脏页，累计命中/未命中统计保持连续；有 SQL 任务执行时拒绝调整，容量范围为 1–4096 页。登录后页眉的“设置”入口集中展示当前数据库参数，并提供缓存页数和淘汰策略的在线调整；页大小与 Payload 编码属于数据库格式参数，只读展示。
+切换与新建库用 `path` 字段（新建还可传 `page_size`、`buffer_pool_size`、`replacement_policy`）；导入用二进制 `.db` 文件体加 `X-YourSQL-File-Name` 文件名头。缓存响应的 `buffer_pool.eviction_order` 是当前策略下的升序淘汰队列，Pin 中的页不进入队列；拥有 `SECURITY` 权限时可在线切换 LRU/FIFO/2Q 和页面类型保护，切换不清空已有缓存帧，从下一次淘汰开始生效。页面类型保护带有受保护页预算，目标是最多占缓存一半；预算超出时优先回收冷的受保护页，避免冷门 INDEX 无限占满缓存。`POST /api/storage/cache/demo` 会重置当前实验缓存，按“热点 INDEX → 热 HEAP 干扰 → 冷次级 INDEX → 顺序 HEAP 扫描 → 热点 INDEX 探测”运行默认 2 个周期并返回分阶段统计；`POST /api/storage/cache/resize` 接收 `{"buffer_pool_size": 1024}`，可在当前服务进程内热调整缓存页数：扩容保留现有缓存帧，缩容按当前策略淘汰未 pin 页并写回脏页，累计命中/未命中统计保持连续；有 SQL 任务执行时拒绝调整，容量范围为 1–4096 页。登录后页眉的“设置”入口集中展示当前数据库参数，并提供缓存页数、淘汰策略和页面类型保护的在线调整；页大小与 Payload 编码属于数据库格式参数，只读展示。
 
 ## 索引与 Q6 实测
 

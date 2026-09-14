@@ -19,6 +19,7 @@ build/
 data/*
 !data/showcase_v2.db
 !data/showcase_v3.db
+!data/buffer_pool_lab_large.db
 
 # ---------- 依赖锁与前端构建产物 ----------
 *.lock

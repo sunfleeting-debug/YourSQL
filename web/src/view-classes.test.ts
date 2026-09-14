@@ -76,6 +76,12 @@ describe('视图类名纯函数', () => {
         expect(tokens(pageTileClassName(tile))).toEqual(tokens(referenceTile(tile)))
       }
     }
+    expect(
+      pageTileClassName({ type: 'index', active: false, linked: false, linkedIndex: false, cacheFocus: true, cached: true, cacheQueue: 'a1in' })
+    ).toContain('cache-cold')
+    expect(
+      pageTileClassName({ type: 'index', active: false, linked: false, linkedIndex: false, cacheFocus: true, cached: true, cacheQueue: 'am' })
+    ).toContain('cache-hot')
     for (const usageFill of [true, false]) {
       const map = { usageFill, cacheFocus: !usageFill, tableFocus: usageFill }
       expect(tokens(pageMapClassName(map))).toEqual(tokens(referenceMap(map)))

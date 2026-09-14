@@ -32,3 +32,13 @@ def test_runtime_config_reads_query_limits(monkeypatch) -> None:
     assert config.slow_query_ms == 125.5
     assert config.monitor_diagnostic_sample_rate == 0.05
     assert config.trace_max_steps is None
+
+
+def test_database_config_reads_2q_and_page_type_protection(monkeypatch) -> None:
+    monkeypatch.setenv("YOURSQL_REPLACEMENT_POLICY", "2q")
+    monkeypatch.setenv("YOURSQL_BUFFER_POOL_PROTECT_PAGE_TYPES", "true")
+
+    config = RuntimeConfig.from_environment().database_config
+
+    assert config.replacement_policy == "2q"
+    assert config.protect_page_types is True

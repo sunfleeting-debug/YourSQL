@@ -169,7 +169,10 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self.config = replace(self.config, payload_codec=self.disk.payload_codec.name)
         self.payload_codec = self.disk.payload_codec
         self.buffer_pool = BufferPool(
-            self.disk, self.config.buffer_pool_size, self.config.replacement_policy
+            self.disk,
+            self.config.buffer_pool_size,
+            self.config.replacement_policy,
+            protect_page_types=self.config.protect_page_types,
         )
         self.catalog = self._load_catalog()
         self.index_manager = IndexManager()

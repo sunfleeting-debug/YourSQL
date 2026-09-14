@@ -118,6 +118,120 @@ def test_buffer_pool_can_resize_without_resetting_hot_pages(tmp_path: Path) -> N
         pinned.unpin(page_ids[1])
 
 
+def test_2q_promotes_reused_pages_and_resists_scan_pollution(tmp_path: Path) -> None:
+    path = tmp_path / "2q.db"
+    with DiskManager(path) as disk:
+        pages = [disk.allocate(PageType.HEAP, str(index).encode()) for index in range(4)]
+        page_ids = [page.page_id for page in pages]
+        buffer = BufferPool(disk, capacity=3, replacement_policy="2q")
+
+        buffer.get_page(page_ids[0])
+        buffer.unpin(page_ids[0])
+        buffer.get_page(page_ids[0])
+        buffer.unpin(page_ids[0])
+        assert buffer.snapshot()["frames"][0]["queue"] == "am"
+        assert buffer.stats().promotions == 1
+
+        for page_id in page_ids[1:]:
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+
+        assert page_ids[0] in buffer
+        assert page_ids[1] not in buffer
+        assert buffer.events()[-1]["queue"] == "a1in"
+
+
+def test_page_type_protection_prefers_heap_victims(tmp_path: Path) -> None:
+    path = tmp_path / "type-aware-buffer.db"
+    with DiskManager(path) as disk:
+        index_pages = [
+            disk.allocate(PageType.INDEX, str(index).encode()) for index in range(2)
+        ]
+        heap_pages = [
+            disk.allocate(PageType.HEAP, str(index).encode()) for index in range(3)
+        ]
+        index_ids = [page.page_id for page in index_pages]
+        heap_ids = [page.page_id for page in heap_pages]
+        buffer = BufferPool(disk, capacity=4, protect_page_types=True)
+
+        for page_id in (index_ids[0], index_ids[1], heap_ids[0], heap_ids[1]):
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+        buffer.get_page(heap_ids[2])
+        buffer.unpin(heap_ids[2])
+
+        assert index_ids[0] in buffer
+        assert index_ids[1] in buffer
+        assert heap_ids[0] not in buffer
+        assert buffer.stats().type_protection_skips == 2
+        assert buffer.snapshot()["eviction_order"][:2] == [heap_ids[1], heap_ids[2]]
+
+
+def test_page_type_protection_has_bounded_index_budget(tmp_path: Path) -> None:
+    path = tmp_path / "bounded-type-aware-buffer.db"
+    with DiskManager(path) as disk:
+        index_pages = [
+            disk.allocate(PageType.INDEX, str(index).encode()) for index in range(4)
+        ]
+        heap_pages = [
+            disk.allocate(PageType.HEAP, str(index).encode()) for index in range(2)
+        ]
+        index_ids = [page.page_id for page in index_pages]
+        heap_ids = [page.page_id for page in heap_pages]
+        buffer = BufferPool(disk, capacity=4)
+
+        for page_id in (index_ids[0], index_ids[1], index_ids[2], heap_ids[0]):
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+
+        assert buffer.set_protect_page_types(True)
+        snapshot = buffer.snapshot()
+        assert snapshot["protected_page_limit"] == 2
+        assert index_ids[0] not in buffer
+        assert index_ids[1] in buffer
+        assert index_ids[2] in buffer
+        assert index_ids[3] not in buffer
+        assert heap_ids[0] in buffer
+
+        buffer.get_page(heap_ids[1])
+        buffer.unpin(heap_ids[1])
+        assert heap_ids[0] in buffer
+        assert heap_ids[1] in buffer
+
+        buffer.get_page(index_ids[0])
+        buffer.unpin(index_ids[0])
+        assert index_ids[0] in buffer
+        assert index_ids[1] in buffer
+        assert index_ids[2] in buffer
+        assert heap_ids[0] not in buffer
+        assert heap_ids[1] in buffer
+
+        buffer.get_page(index_ids[3])
+        buffer.unpin(index_ids[3])
+        assert index_ids[1] not in buffer
+        assert index_ids[2] in buffer
+        assert index_ids[3] in buffer
+        assert heap_ids[1] in buffer
+
+
+def test_buffer_policy_switch_to_2q_preserves_existing_frames(tmp_path: Path) -> None:
+    path = tmp_path / "switch-2q.db"
+    with DiskManager(path) as disk:
+        pages = [disk.allocate(PageType.HEAP, str(index).encode()) for index in range(3)]
+        page_ids = [page.page_id for page in pages]
+        buffer = BufferPool(disk, capacity=3)
+        for page_id in page_ids:
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+
+        before = set(page_ids)
+        assert buffer.set_replacement_policy("2q")
+        assert set(buffer.snapshot()["frames"][index]["page_id"] for index in range(3)) == before
+        assert all(
+            frame["queue"] == "a1in" for frame in buffer.snapshot()["frames"]
+        )
+
+
 def test_table_heap_reuses_slots_and_persists(tmp_path: Path) -> None:
     path = tmp_path / "heap.db"
     with DiskManager(path) as disk:

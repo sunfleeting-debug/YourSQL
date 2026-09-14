@@ -2,7 +2,23 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, MouseEvent, UIEvent, WheelEvent } from 'react'
-import { ArrowLeft, ChevronLeft, ChevronRight, HardDrive, List, ListTree, LockKeyhole, Network, RefreshCw, Settings2, Table2, X } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+  FlaskConical,
+  HardDrive,
+  List,
+  ListTree,
+  LockKeyhole,
+  Network,
+  RefreshCw,
+  Settings2,
+  ShieldCheck,
+  Table2,
+  X
+} from 'lucide-react'
 import { api, ApiError, errorMessage } from '../../api'
 import { pageTileAction } from '../../storage-selection'
 import { useResizableWidth } from '../../use-resizable-width'
@@ -14,9 +30,11 @@ import type {
   RawPayload,
   ReplacementPolicy,
   StorageCacheSnapshot,
+  StorageBufferPoolDemo,
   StorageIndexSnapshot,
   StoragePageChanges,
   StoragePageDetail,
+  StorageProtectionChange,
   StoragePolicyChange,
   StorageResizeChange,
   StorageSlot,
@@ -57,7 +75,8 @@ interface PageMapTilesProps {
   linkedIndexRootIds: ReadonlySet<number>
   tableFocus: boolean
   cachedPageIds: ReadonlySet<number>
-  cacheFrameByPageId: ReadonlyMap<number, { pin_count: number }>
+  cachePolicy: ReplacementPolicy
+  cacheFrameByPageId: ReadonlyMap<number, { pin_count: number; queue?: string }>
   evictionRankByPageId: ReadonlyMap<number, number>
 }
 
@@ -72,6 +91,7 @@ const PageMapTiles = memo(function PageMapTiles({
   linkedIndexRootIds,
   tableFocus,
   cachedPageIds,
+  cachePolicy,
   cacheFrameByPageId,
   evictionRankByPageId
 }: PageMapTilesProps) {
@@ -89,12 +109,22 @@ const PageMapTiles = memo(function PageMapTiles({
         const indexRoot = linkedIndexRootIds.has(page.page_id)
         const frame = cacheFrameByPageId.get(page.page_id)
         const evictionRank = evictionRankByPageId.get(page.page_id)
+        const cacheQueue: 'a1in' | 'am' | null =
+          cachePolicy === '2q' && frame?.queue === 'a1in' ? 'a1in' : cachePolicy === '2q' && frame?.queue === 'am' ? 'am' : null
         const cacheOrderText = evictionRank ? ` · 淘汰序 #${evictionRank}` : frame?.pin_count ? ' · Pin，不参与淘汰' : ''
         const cacheText = cached ? ` · 缓存${cacheOrderText}` : ''
         const linkText = tableFocus && linked ? ` · ${linkedIndexPage ? (indexRoot ? '索引根页' : '索引页') : '关联表'}` : ''
+        const freeLinkText =
+          page.type === 'free'
+            ? typeof page.free_page_next_id === 'number'
+              ? ` · 下一空闲页 #${page.free_page_next_id}`
+              : page.free_page_is_tail
+                ? ' · 空闲链尾'
+                : ''
+            : ''
         const pageText = `#${page.page_id} · ${PAGE_TYPE_LABELS[page.type] ?? page.type}`
         const usageText = `${used} B 已用 · ${page.free_space} B 空闲`
-        const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}`
+        const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}${freeLinkText}`
 
         return (
           <button
@@ -111,7 +141,8 @@ const PageMapTiles = memo(function PageMapTiles({
               linkedIndex: linkedIndexPage,
               // HOW：缓存类别常驻在节点上，开关只切换父级 .cache-focus，避免 5k+ 个节点同步改 class。
               cacheFocus: true,
-              cached
+              cached,
+              cacheQueue
             })}
             style={
               {
@@ -903,6 +934,10 @@ export default function StoragePanel({
   const [policyBusy, setPolicyBusy] = useState(false)
   const [policyDraft, setPolicyDraft] = useState<ReplacementPolicy | null>(null)
   const [policyNotice, setPolicyNotice] = useState('')
+  const [protectionBusy, setProtectionBusy] = useState(false)
+  const [protectionNotice, setProtectionNotice] = useState('')
+  const [demoBusy, setDemoBusy] = useState(false)
+  const [demoResult, setDemoResult] = useState<StorageBufferPoolDemo | null>(null)
   const [capacityBusy, setCapacityBusy] = useState(false)
   const [capacityDraft, setCapacityDraft] = useState<string | null>(null)
   const [capacityNotice, setCapacityNotice] = useState('')
@@ -941,7 +976,8 @@ export default function StoragePanel({
   const slotDetailRequestRef = useRef(0)
   const { tooltip, tooltipContainerProps } = useStorageTooltip()
   const detailPanelPane = useResizableWidth({ initialWidth: null, minWidth: 320, maxWidth: 760, edge: 'left' })
-  const busy = snapshotBusy || cacheBusy || policyBusy || capacityBusy || incrementalBusy || pageRefreshBusy || detailBusy
+  const busy =
+    snapshotBusy || cacheBusy || policyBusy || protectionBusy || demoBusy || capacityBusy || incrementalBusy || pageRefreshBusy || detailBusy
   const refreshSnapshot = useCallback(async () => {
     const requestId = ++snapshotRequestRef.current
     setSnapshotBusy(true)
@@ -1017,6 +1053,57 @@ export default function StoragePanel({
       }
     },
     [busy, policyBusy]
+  )
+  const changePageTypeProtection = useCallback(
+    async (enabled: boolean) => {
+      if (protectionBusy || busy) return
+      setProtectionBusy(true)
+      setError('')
+      setDenied(false)
+      setProtectionNotice('')
+      try {
+        const value = await api<StorageProtectionChange>('/api/storage/cache/protection', {
+          protect_page_types: enabled
+        })
+        setProtectionNotice(enabled ? '页面类型保护已热加载；下一次淘汰优先回收 HEAP 页。' : '页面类型保护已关闭；下一次淘汰恢复普通队列顺序。')
+        setCacheSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+        setSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+      } catch (error) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      } finally {
+        setProtectionBusy(false)
+      }
+    },
+    [busy, protectionBusy]
+  )
+  const runBufferPoolDemo = useCallback(
+    async (compare: boolean) => {
+      if (demoBusy || busy) return
+      setDemoBusy(true)
+      setError('')
+      setDenied(false)
+      try {
+        const value = await api<StorageBufferPoolDemo>('/api/storage/cache/demo', {
+          compare,
+          prime_rounds: 3,
+          scan_rounds: 2,
+          probe_rounds: 1,
+          cycles: 2
+        })
+        setDemoResult(value)
+        if (!compare) {
+          setCacheSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+          setSnapshot(current => (current ? { ...current, snapshot_at: value.snapshot_at, buffer_pool: value.buffer_pool } : current))
+        }
+      } catch (error) {
+        setError(errorMessage(error))
+        setDenied(error instanceof ApiError && error.status === 403)
+      } finally {
+        setDemoBusy(false)
+      }
+    },
+    [busy, demoBusy]
   )
   const changeCapacity = useCallback(
     async (capacity: number) => {
@@ -1301,6 +1388,8 @@ export default function StoragePanel({
   const displayedCapacity = capacityValid ? pendingCapacity : currentCapacity
   const cacheBytes = displayedCapacity * (snapshot?.page_size ?? 4096)
   const cacheSizeLabel = cacheBytes >= 1024 * 1024 ? `${(cacheBytes / (1024 * 1024)).toFixed(1)} MiB` : `${Math.round(cacheBytes / 1024)} KiB`
+  const demoRows = demoResult?.kind === 'compare' ? (demoResult.results ?? []) : demoResult?.result ? [demoResult.result] : []
+  const demoReference = demoRows[0]
   const cacheView = useMemo(() => {
     const evictionOrder = currentCache?.eviction_order ?? []
     const frames = currentCache?.frames ?? []
@@ -1628,6 +1717,7 @@ export default function StoragePanel({
                         linkedIndexPageIds={linkedIndexPageIds}
                         linkedIndexRootIds={linkedIndexRootIds}
                         cachedPageIds={cachedPageIds}
+                        cachePolicy={currentCache?.policy ?? 'lru'}
                         cacheFrameByPageId={cacheFrameByPageId}
                         evictionRankByPageId={evictionRankByPageId}
                         onSelectPage={selectPage}
@@ -1744,6 +1834,7 @@ export default function StoragePanel({
                         >
                           <option value="lru">LRU · 最近最少使用</option>
                           <option value="fifo">FIFO · 先进先出</option>
+                          <option value="2q">2Q · 抗扫描污染</option>
                         </select>
                         <button
                           type="button"
@@ -1759,6 +1850,105 @@ export default function StoragePanel({
                         <div className="storage-policy-notice" role="status">
                           {policyNotice}
                         </div>
+                      )}
+                      <div className="storage-policy-control">
+                        <div className="storage-policy-label">
+                          <ShieldCheck size={13} />
+                          <span>页面类型保护</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="subtle"
+                          onClick={() => void changePageTypeProtection(!currentCache.protect_page_types)}
+                          disabled={busy}
+                          aria-pressed={currentCache.protect_page_types}
+                          title="在线切换；开启后优先淘汰 HEAP 页，受保护页按缓存一半预算控制"
+                        >
+                          {protectionBusy ? <RefreshCw size={12} className="spin" /> : currentCache.protect_page_types ? '已开启' : '已关闭'}
+                        </button>
+                        <small>热加载 · 保护预算 {currentCache.protected_page_limit} 帧 · 下一次淘汰生效</small>
+                      </div>
+                      {protectionNotice && (
+                        <div className="storage-policy-notice" role="status">
+                          {protectionNotice}
+                        </div>
+                      )}
+                      <div className="storage-policy-control">
+                        <div className="storage-policy-label">
+                          <FlaskConical size={13} />
+                          <span>扫描污染实验</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="subtle"
+                          onClick={() => void runBufferPoolDemo(false)}
+                          disabled={busy}
+                          title="重置当前缓存，运行一次热点索引与顺序扫描冲突实验"
+                        >
+                          {demoBusy ? <RefreshCw size={12} className="spin" /> : '当前策略'}
+                        </button>
+                        <button
+                          type="button"
+                          className="subtle"
+                          onClick={() => void runBufferPoolDemo(true)}
+                          disabled={busy}
+                          title="用相同工作负载对照 LRU、2Q、类型保护和组合策略"
+                        >
+                          四策略对比
+                        </button>
+                        <small>自动重置 · 2 次扫描 · 2 个周期 · 每轮一次热点探测</small>
+                      </div>
+                      {demoResult && (
+                        <section className="buffer-demo-panel" aria-label="Buffer Pool 扫描污染实验结果">
+                          <div className="buffer-demo-heading">
+                            <strong>{demoResult.kind === 'compare' ? '四策略对照结果' : '当前策略实验结果'}</strong>
+                            <span>
+                              {demoResult.database_page_count.toLocaleString()} 个物理页 · 缓存 {demoResult.buffer_pool.stats.capacity} 帧 ·
+                              {demoReference
+                                ? ` 核心 ${demoReference.core_index_pages.length} + 次热点 ${demoReference.hot_index_pages.length - demoReference.core_index_pages.length} 个 INDEX`
+                                : ' 分层 INDEX'}
+                              {' → 顺序 HEAP 扫描 → 逆序核心 + 次热点探测'}
+                            </span>
+                          </div>
+                          <table className="compact-table">
+                            <thead>
+                              <tr>
+                                <th>策略</th>
+                                <th>扫描淘汰</th>
+                                <th>探测命中</th>
+                                <th>探测缺页</th>
+                                <th>热点命中率</th>
+                                <th>热点保留</th>
+                                <th>类型保护跳过</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {demoRows.map(result => (
+                                <tr key={`${result.mode ?? 'current'}-${result.policy}-${String(result.protect_page_types)}`}>
+                                  <td>
+                                    {result.mode ?? result.policy.toUpperCase()}
+                                    <small>
+                                      {' '}
+                                      · {result.policy.toUpperCase()}
+                                      {result.protect_page_types ? ' + type-aware' : ''}
+                                    </small>
+                                  </td>
+                                  <td>{result.scan.evictions}</td>
+                                  <td>{result.probe.hits}</td>
+                                  <td>{result.probe.misses}</td>
+                                  <td>{(result.probe.hit_rate * 100).toFixed(0)}%</td>
+                                  <td>
+                                    {result.hot_index_resident_after_scan.length} / {result.hot_index_pages.length}
+                                  </td>
+                                  <td>{result.total.type_protection_skips ?? 0}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <p className="buffer-demo-note">
+                            结论看“探测缺页”：LRU 被顺序扫描污染后热点索引页被换出；2Q 或页面类型保护应将该值压到 0。
+                          </p>
+                        </section>
                       )}
                       <table className="compact-table">
                         <thead>

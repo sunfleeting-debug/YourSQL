@@ -4,7 +4,13 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { Database, HardDrive, Info, RefreshCw, Settings2, X } from 'lucide-react'
 import { api, errorMessage } from '../../api'
 import type { PayloadCodecName } from '../../types/common'
-import type { ReplacementPolicy, StoragePolicyChange, StorageResizeChange, StorageSettingsSnapshot } from '../../types/storage'
+import type {
+  ReplacementPolicy,
+  StoragePolicyChange,
+  StorageProtectionChange,
+  StorageResizeChange,
+  StorageSettingsSnapshot
+} from '../../types/storage'
 
 export interface DatabaseSettingsDialogHandle {
   open: () => void
@@ -121,6 +127,24 @@ const DatabaseSettingsDialog = forwardRef<DatabaseSettingsDialogHandle, Database
     }
   }
 
+  async function applyProtection(enabled: boolean) {
+    if (!snapshot || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const value = await api<StorageProtectionChange>('/api/storage/cache/protection', {
+        protect_page_types: enabled
+      })
+      setSnapshot(current => (current ? { ...current, buffer_pool: value.buffer_pool } : current))
+      setNotice(enabled ? '页面类型保护已热加载。' : '页面类型保护已关闭。')
+      onChanged?.()
+    } catch (value) {
+      setError(errorMessage(value))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <dialog ref={dialogRef} className="database-dialog database-settings-dialog" onClose={() => setVisible(false)}>
       <div className="panel-heading">
@@ -210,9 +234,26 @@ const DatabaseSettingsDialog = forwardRef<DatabaseSettingsDialogHandle, Database
               <select value={policyDraft} aria-label="缓存淘汰策略" onChange={event => setPolicyDraft(event.target.value as ReplacementPolicy)}>
                 <option value="lru">LRU · 最近最少使用</option>
                 <option value="fifo">FIFO · 先进先出</option>
+                <option value="2q">2Q · 抗扫描污染</option>
               </select>
               <button onClick={() => void applyPolicy()} disabled={policyDraft === snapshot.buffer_pool.policy || busy}>
                 应用
+              </button>
+            </div>
+          </div>
+
+          <div className="database-setting-control">
+            <div className="database-setting-label">
+              <Settings2 size={14} />
+              <div>
+                <strong>页面类型保护</strong>
+                <small>在线切换，淘汰优先回收 HEAP 页</small>
+              </div>
+            </div>
+            <div className="database-setting-editor">
+              <span>{snapshot.buffer_pool.protect_page_types ? '已开启' : '已关闭'}</span>
+              <button onClick={() => void applyProtection(!snapshot.buffer_pool.protect_page_types)} disabled={busy}>
+                {busy ? '应用中…' : snapshot.buffer_pool.protect_page_types ? '关闭' : '开启'}
               </button>
             </div>
           </div>

@@ -631,6 +631,62 @@ def test_storage_replacement_policy_can_be_switched_without_resetting_cache(serv
     assert client.request("/api/storage/cache/policy", {"replacement_policy": "random"})[0] == 400
 
 
+def test_storage_buffer_demo_and_page_protection_are_hot_loaded(tmp_path: Path) -> None:
+    config = DatabaseConfig(page_size=1024, buffer_pool_size=8)
+    with Database(tmp_path / "buffer-demo.db", config=config) as database:
+        database.execute(
+            "CREATE TABLE buffer_lab(id INT PRIMARY KEY, payload VARCHAR NOT NULL);"
+        )
+        database.insert_rows(
+            "buffer_lab",
+            [(index, "payload-" * 30) for index in range(1, 1025)],
+            validate_constraints=False,
+        )
+        database.execute("CREATE INDEX idx_buffer_lab_id ON buffer_lab (id);")
+        with HTTPService(database, legacy_anonymous=False) as http:
+            client = Client(f"http://{http.address[0]}:{http.address[1]}")
+            client.login()
+
+            status, response = client.request(
+                "/api/storage/cache/protection", {"protect_page_types": True}
+            )
+            assert status == 200
+            assert response["data"]["changed"]
+            assert response["data"]["buffer_pool"]["protect_page_types"] is True
+
+            status, response = client.request(
+                "/api/storage/cache/demo",
+                {"compare": True, "cycles": 2, "probe_rounds": 1},
+            )
+            assert status == 200
+            results = {item["mode"]: item for item in response["data"]["results"]}
+            rates = {
+                mode: result["probe"]["hit_rate"] for mode, result in results.items()
+            }
+            assert len(set(rates.values())) == 4
+            assert rates["baseline"] < rates["2q"]
+            assert rates["2q"] < rates["combined"]
+            assert rates["type-aware"] < rates["combined"]
+
+            status, response = client.request(
+                "/api/storage/cache/demo", {"cycles": 2, "probe_rounds": 1}
+            )
+            assert status == 200
+            protected_rate = response["data"]["result"]["probe"]["hit_rate"]
+            assert protected_rate > 0
+
+            status, response = client.request(
+                "/api/storage/cache/protection", {"protect_page_types": False}
+            )
+            assert status == 200 and response["data"]["changed"]
+            status, response = client.request(
+                "/api/storage/cache/demo", {"cycles": 2, "probe_rounds": 1}
+            )
+            assert status == 200
+            unprotected_rate = response["data"]["result"]["probe"]["hit_rate"]
+            assert protected_rate > unprotected_rate
+
+
 def test_storage_cache_capacity_can_be_resized_online(service) -> None:
     database, _, client = service
     client.login()

@@ -417,6 +417,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         "page_size",
                         "buffer_pool_size",
                         "replacement_policy",
+                        "protect_page_types",
                         "payload_codec",
                     )
                     if key in body
@@ -447,6 +448,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
             elif post and route == "/api/storage/cache/policy":
                 replacement_policy = self._string(body, "replacement_policy", 16)
                 data = workbench.set_storage_policy(session, replacement_policy)
+            elif post and route == "/api/storage/cache/protection":
+                data = workbench.set_storage_protection(
+                    session, body.get("protect_page_types")
+                )
+            elif post and route == "/api/storage/cache/demo":
+                data = workbench.run_storage_buffer_demo(
+                    session,
+                    compare=body.get("compare", False),
+                    prime_rounds=self._integer(body.get("prime_rounds"), 3, 2, 100),
+                    scan_rounds=self._integer(body.get("scan_rounds"), 2, 1, 20),
+                    probe_rounds=self._integer(body.get("probe_rounds"), 8, 1, 100),
+                )
             elif post and route == "/api/storage/cache/resize":
                 capacity = self._integer(body.get("buffer_pool_size"), 0, 1, 4096)
                 data = workbench.resize_storage(session, capacity)

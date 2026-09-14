@@ -41,6 +41,7 @@ from yoursql.engine.services.workbench_sql import (
     stage,
 )
 from yoursql.engine.services.monitoring import PerformanceMonitor
+from yoursql.engine.services.buffer_pool_demo import run_buffer_pool_demo
 
 __all__ = ["QueryTask", "WebSession", "Workbench", "now"]
 
@@ -375,8 +376,13 @@ class Workbench:
             options, "buffer_pool_size", defaults.buffer_pool_size, 1, 4096
         )
         policy = options.get("replacement_policy", defaults.replacement_policy)
-        if not isinstance(policy, str) or policy.lower() not in {"lru", "fifo"}:
-            raise YourSQLError("replacement_policy 只能是 lru 或 fifo", "BAD_REQUEST")
+        if not isinstance(policy, str) or policy.lower() not in {"lru", "fifo", "2q"}:
+            raise YourSQLError("replacement_policy 只能是 lru、fifo 或 2q", "BAD_REQUEST")
+        protect_page_types = options.get(
+            "protect_page_types", defaults.protect_page_types
+        )
+        if not isinstance(protect_page_types, bool):
+            raise YourSQLError("protect_page_types 必须是布尔值", "BAD_REQUEST")
         raw_codec = options.get("payload_codec", defaults.payload_codec)
         if not isinstance(raw_codec, str):
             raise YourSQLError("payload_codec 必须是 json 或 manual", "BAD_REQUEST")
@@ -388,6 +394,7 @@ class Workbench:
             page_size=page_size,
             buffer_pool_size=buffer_pool_size,
             replacement_policy=policy.lower(),
+            protect_page_types=protect_page_types,
             max_varchar_length=defaults.max_varchar_length,
             payload_codec=selected_codec,
         )
@@ -604,8 +611,8 @@ class Workbench:
         """切换当前数据库缓存的页淘汰策略，不清空现有缓存帧。"""
 
         policy = replacement_policy.strip().lower()
-        if policy not in {"lru", "fifo"}:
-            raise YourSQLError("replacement_policy 只能是 lru 或 fifo", "BAD_REQUEST")
+        if policy not in {"lru", "fifo", "2q"}:
+            raise YourSQLError("replacement_policy 只能是 lru、fifo 或 2q", "BAD_REQUEST")
         with self._switch_lock:
             with self.connection(session):
                 session.connection.authorize("SECURITY")
@@ -632,6 +639,85 @@ class Workbench:
                     "replacement_policy": policy,
                     "buffer_pool": buffer_pool.to_dict(),
                     "note": "策略仅影响当前服务进程；现有缓存帧和累计统计保持不变，下一次淘汰开始采用新策略。",
+                }
+
+    def set_storage_protection(
+        self, session: WebSession, enabled: object
+    ) -> JsonObject:
+        """【前端特供】在线切换系统页和索引页保护，不重启服务。"""
+
+        if not isinstance(enabled, bool):
+            raise YourSQLError("protect_page_types 必须是布尔值", "BAD_REQUEST")
+        with self._switch_lock:
+            with self.connection(session):
+                session.connection.authorize("SECURITY")
+                with self._lock:
+                    if any(
+                        task.state in {"queued", "running"}
+                        for task in self._tasks.values()
+                    ):
+                        raise YourSQLError(
+                            "当前仍有 SQL 任务执行，请等待完成后再切换", "SERVICE_BUSY"
+                        )
+                previous = self.database.buffer_pool.protect_page_types
+                changed = self.database.buffer_pool.set_protect_page_types(enabled)
+                if changed:
+                    self.database.config = replace(
+                        self.database.config, protect_page_types=enabled
+                    )
+                return {
+                    "snapshot_at": now(),
+                    "changed": changed,
+                    "previous_protect_page_types": previous,
+                    "protect_page_types": enabled,
+                    "buffer_pool": self.database.buffer_pool.snapshot(0, 100).to_dict(),
+                    "note": "页面类型保护已热加载；下一次淘汰开始按新开关选择 HEAP/INDEX 页。",
+                }
+
+    def run_storage_buffer_demo(
+        self,
+        session: WebSession,
+        *,
+        compare: object = False,
+        prime_rounds: int = 3,
+        scan_rounds: int = 2,
+        probe_rounds: int = 8,
+    ) -> JsonObject:
+        """【前端特供】运行固定扫描污染实验并返回可视化对照指标。"""
+
+        if not isinstance(compare, bool):
+            raise YourSQLError("compare 必须是布尔值", "BAD_REQUEST")
+        with self._switch_lock:
+            with self.connection(session):
+                session.connection.authorize("SECURITY")
+                with self._lock:
+                    if any(
+                        task.state in {"queued", "running"}
+                        for task in self._tasks.values()
+                    ):
+                        raise YourSQLError(
+                            "当前仍有 SQL 任务执行，请等待完成后再运行实验", "SERVICE_BUSY"
+                        )
+                buffer_pool = self.database.buffer_pool
+                if compare:
+                    # WHY：对照实例直接复用同一个磁盘文件；先写回活动缓存，避免比较读到旧页。
+                    buffer_pool.flush_all()
+                result = run_buffer_pool_demo(
+                    self.database.disk,
+                    active_pool=None if compare else buffer_pool,
+                    capacity=buffer_pool.capacity,
+                    policy=buffer_pool.replacement_policy,
+                    protect_page_types=buffer_pool.protect_page_types,
+                    prime_rounds=prime_rounds,
+                    scan_rounds=scan_rounds,
+                    probe_rounds=probe_rounds,
+                    compare=compare,
+                )
+                return {
+                    "snapshot_at": now(),
+                    "database_page_count": self.database.disk.page_count,
+                    "buffer_pool": buffer_pool.snapshot(0, 100).to_dict(),
+                    **result,
                 }
 
     def resize_storage(
