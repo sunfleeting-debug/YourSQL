@@ -22,6 +22,7 @@ from ..sql.ast import (
     Show,
     ShowGrants,
     Statement,
+    TableRef,
     Update,
 )
 from .physical import PlanNode
@@ -35,6 +36,28 @@ class LogicalPlanNode(PlanNode):
 LogicalPlan = LogicalPlanNode
 
 
+def _source_node(reference: TableRef) -> LogicalPlanNode:
+    """构造一个 FROM 来源的扫描节点。
+
+    HOW：派生表/CTE 用独立的 ``DerivedScan`` 而不是 ``SeqScan``——执行层的
+    ``_scan_plans`` 只把 SeqScan/IndexScan 当作堆表扫描，用错 kind 会让派生表
+    混进按表名匹配的计划列表里。
+    """
+
+    if reference.is_derived:
+        return LogicalPlanNode(
+            "DerivedScan",
+            {
+                "table": reference.effective_name,
+                "alias": reference.alias,
+                "query": reference.query,
+            },
+        )
+    return LogicalPlanNode(
+        "SeqScan", {"table": reference.name, "alias": reference.alias}
+    )
+
+
 def _select_plan(statement: Select) -> LogicalPlanNode:
     """按 SQL 子句顺序组装逻辑计划，不在此处选择具体访问路径。"""
 
@@ -43,14 +66,9 @@ def _select_plan(statement: Select) -> LogicalPlanNode:
     if statement.from_table is None:
         root = LogicalPlanNode("Values", {"rows": 1})
     else:
-        root = LogicalPlanNode(
-            "SeqScan",
-            {"table": statement.from_table.name, "alias": statement.from_table.alias},
-        )
+        root = _source_node(statement.from_table)
         for join in statement.joins:
-            right = LogicalPlanNode(
-                "SeqScan", {"table": join.table.name, "alias": join.table.alias}
-            )
+            right = _source_node(join.table)
             root = LogicalPlanNode(
                 "Join", {"join_type": join.join_type, "on": join.on}, (root, right)
             )
