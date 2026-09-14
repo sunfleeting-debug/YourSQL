@@ -7,7 +7,7 @@ import type { JsonObject, JsonValue } from '../../types/common'
 import type { RawPayload, StorageLayout, StoragePageDetail, StorageRegion, StorageSlot } from '../../types/storage'
 import { pageCellClassName, pageCellSegmentClassName } from '../../view-classes'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
-import { inspectYsplPayload } from './raw-bytes'
+import { inspectStoragePayload } from './raw-bytes'
 
 type PageGridValue = JsonValue | undefined
 
@@ -30,7 +30,7 @@ export interface PageGridSelection {
   completeHex: string
   completeAscii: string
   completeKind: PageGridCellKind
-  yspl: ReturnType<typeof inspectYsplPayload>
+  payloadInspection: ReturnType<typeof inspectStoragePayload>
   grouped: boolean
 }
 
@@ -852,9 +852,9 @@ function SlotSelectionInfo({ slots }: { slots: StorageSlot[] }) {
   )
 }
 
-function YsplSelectionInfo({ inspection }: { inspection: NonNullable<PageGridSelection['yspl']> }) {
+function PayloadSelectionInfo({ inspection }: { inspection: NonNullable<PageGridSelection['payloadInspection']> }) {
   return (
-    <section className="selected-payload-special" aria-label="YSPL 特殊解析">
+    <section className="selected-payload-special" aria-label="Payload 特殊解析">
       <div className="selected-payload-special-heading">
         <strong>{inspection.title}</strong>
         <span>{inspection.summary}</span>
@@ -920,7 +920,7 @@ export function PageGridSelectionDetail({ selection, detail }: { selection: Page
           </div>
         </details>
       )}
-      {selection.yspl && <YsplSelectionInfo inspection={selection.yspl} />}
+      {selection.payloadInspection && <PayloadSelectionInfo inspection={selection.payloadInspection} />}
       {showRawDetails && (
         <details className="raw-byte-details" open={rawDetailsOpen} onToggle={event => setRawByteDetailsOpen(event.currentTarget.open)}>
           <summary>{rawLabel}</summary>
@@ -1116,7 +1116,7 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
     : rangeText(selected.offset, selected.offset + selected.bytes.length - 1)
   const completeHex = completeMasked ? 'MASKED' : hex(completeBytes)
   const completeAscii = completeMasked ? 'MASKED' : ascii(completeBytes)
-  const yspl = inspectYsplPayload(completeBytes, completeMasked)
+  const payloadInspection = inspectStoragePayload(completeBytes, completeMasked)
   const layoutSlotDetails = new Map(
     (layout?.slots ?? []).map(slot => [
       slot.slot_id,
@@ -1154,7 +1154,7 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
     completeHex,
     completeAscii,
     completeKind,
-    yspl,
+    payloadInspection,
     grouped: displayGroup !== undefined
   }
   useEffect(() => {
@@ -1179,9 +1179,9 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
     slotDetailsKey,
     selection.slotIds.join(','),
     selection.slotText,
-    selection.yspl?.title,
-    selection.yspl?.summary,
-    selection.yspl?.fields.map(field => `${field.label}:${field.value}`).join('|')
+    selection.payloadInspection?.title,
+    selection.payloadInspection?.summary,
+    selection.payloadInspection?.fields.map(field => `${field.label}:${field.value}`).join('|')
   ])
 
   return (

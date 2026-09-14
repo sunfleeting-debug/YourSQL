@@ -25,6 +25,7 @@ import type { InspectableStorageKind, PageUsageVisual, StoragePanelProps, Storag
 import JsonTree from '../query/JsonTree'
 import PageGrid, { PageGridSelectionDetail } from './PageGrid'
 import type { PageGridSelection } from './PageGrid'
+import { decodeRawPayloadBytes, inspectStoragePayload } from './raw-bytes'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
 
 type StorageDetail = StoragePageDetail | IndexSnapshot
@@ -172,6 +173,7 @@ function PagePayloadWorkbench({
 }
 
 function RawPreview({ payload, title = '原始 payload 预览', pageWide = false }: { payload: RawPayload; title?: string; pageWide?: boolean }) {
+  const inspection = inspectStoragePayload(decodeRawPayloadBytes(payload))
   return (
     <details className={`raw-preview ${pageWide ? 'page-wide-preview' : ''}`}>
       <summary>
@@ -181,6 +183,24 @@ function RawPreview({ payload, title = '原始 payload 预览', pageWide = false
         </small>
       </summary>
       <div className="raw-tabs">
+        {inspection && (
+          <section className="selected-payload-special raw-payload-inspection" aria-label="Payload 结构解析">
+            <div className="selected-payload-special-heading">
+              <strong>{inspection.title}</strong>
+              <span>{inspection.summary}</span>
+            </div>
+            <dl>
+              {inspection.fields.map(field => (
+                <div key={field.label}>
+                  <dt>{field.label}</dt>
+                  <dd>
+                    <code>{field.value}</code>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        )}
         <pre>{payload.text ?? payload.hex}</pre>
         <details>
           <summary>Hex</summary>

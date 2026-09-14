@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { encodeManualPayload } from '../../payload-codec'
-import { inspectYsplPayload } from './raw-bytes'
+import { inspectIndexPayload, inspectYsplPayload } from './raw-bytes'
 
 describe('YSPL raw byte inspection', () => {
   it('解码魔数后的小端长度文本帧', () => {
@@ -18,5 +18,30 @@ describe('YSPL raw byte inspection', () => {
 
     expect(inspection?.title).toBe('YSPL 手写 TLV')
     expect(inspection?.fields).toContainEqual({ label: '解码值', value: '[15,"Hello World"]' })
+  })
+
+  it('解析 MBIX 索引页中的手写 payload', () => {
+    const node = {
+      version: 1,
+      kind: 'leaf',
+      level: 0,
+      parent: null,
+      next: 18,
+      prev: null,
+      keys: [[15], [21]],
+      row_ids: [
+        [32, 4],
+        [32, 5]
+      ],
+      payloads: [['alpha'], ['beta']]
+    }
+    const bytes = [0x4d, 0x42, 0x49, 0x58, ...Array.from(encodeManualPayload(node))]
+
+    const inspection = inspectIndexPayload(bytes)
+
+    expect(inspection?.title).toBe('MBIX 索引页 payload')
+    expect(inspection?.fields).toContainEqual({ label: '编码', value: 'YSPL 手写 payload' })
+    expect(inspection?.fields).toContainEqual({ label: '节点类型', value: '叶子节点' })
+    expect(inspection?.fields).toContainEqual({ label: '覆盖列 payload', value: '[["alpha"],["beta"]]' })
   })
 })
