@@ -21,6 +21,7 @@ from yoursql.engine.services.inspection import (
     storage_cache_snapshot,
     storage_index_snapshot,
     storage_page_changes,
+    storage_settings_snapshot,
     storage_snapshot,
 )
 from yoursql.engine.services.ssh import SSHAdapterError, SSHCommandClient, SSHStdioServer, serve_ssh_stdio
@@ -53,6 +54,7 @@ __all__ = [
     "storage_cache_snapshot",
     "storage_index_snapshot",
     "storage_page_changes",
+    "storage_settings_snapshot",
     "storage_snapshot",
     "STORAGE_PAGE_LIMIT",
 ]

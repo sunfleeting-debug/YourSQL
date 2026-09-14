@@ -1,6 +1,6 @@
 /** 存储页的字节/区域可视化与选中详情。 */
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Grid3X3 } from 'lucide-react'
 import type { JsonObject, JsonValue } from '../../types/common'
@@ -944,7 +944,7 @@ export function PageGridSelectionDetail({ selection, detail }: { selection: Page
   )
 }
 
-export default function PageGrid({ detail, onCellDetail }: Props) {
+function PageGrid({ detail, onCellDetail }: Props) {
   const { cells, slotWidth } = useMemo(() => makeCells(detail), [detail])
   const groups = useMemo(() => makeGroups(cells), [cells])
   const slots = detail.slots ?? []
@@ -1385,3 +1385,5 @@ export default function PageGrid({ detail, onCellDetail }: Props) {
     </section>
   )
 }
+
+export default memo(PageGrid)

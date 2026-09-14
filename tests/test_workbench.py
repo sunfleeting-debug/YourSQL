@@ -505,6 +505,30 @@ def test_storage_default_mode_keeps_page_labels(service) -> None:
     assert index_storage["pages"][0]["table_name"] == "student"
 
 
+def test_index_page_inspection_hint_skips_global_index_mapping(service, monkeypatch) -> None:
+    """从索引图打开页详情时，只使用当前索引的目录绑定。"""
+
+    database, _, client = service
+    client.login()
+    index_page = min(database.index_manager.get("idx_id").physical_page_ids(readonly=True))
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("索引页详情不应重建全部索引页映射")
+
+    monkeypatch.setattr("yoursql.engine.services.inspection._index_pages", forbidden)
+    status, response = client.request(
+        f"/api/storage/pages/{index_page}?limit=1&index_name=idx_id"
+    )
+    assert status == 200
+    assert response["data"]["index_name"] == "idx_id"
+
+    status, response = client.request(
+        f"/api/storage/pages/{index_page}?limit=1&resolve_index=0"
+    )
+    assert status == 200
+    assert "index_name" not in response["data"]
+
+
 def test_storage_refresh_endpoints_are_incremental_and_readonly(service) -> None:
     database, _, client = service
     client.login()
@@ -512,6 +536,10 @@ def test_storage_refresh_endpoints_are_incremental_and_readonly(service) -> None
     cache = client.request("/api/storage/cache?limit=2")[1]["data"]
     assert cache["readonly"] and len(cache["buffer_pool"]["frames"]) <= 2
     assert "evictions" in cache["buffer_pool"]["stats"] and cache["note"]
+    settings = client.request("/api/storage/settings")[1]["data"]
+    assert settings["readonly"]
+    assert settings["page_size"] == database.disk.page_size
+    assert settings["buffer_pool"]["stats"] == cache["buffer_pool"]["stats"]
 
     student_page = int(database.catalog.get_table("student").page_ids[0])
     changes_before = client.request(f"/api/storage/changes?since={initial['storage_revision']}")[1]["data"]

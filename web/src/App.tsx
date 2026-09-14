@@ -8,6 +8,7 @@ import Login from './components/auth/Login'
 import { AppHeader, PermissionDialog, Toast } from './components/layout'
 import DatabasePickerDialog from './components/database/DatabasePickerDialog'
 import DatabaseSettingsDialog from './components/database/DatabaseSettingsDialog'
+import type { DatabaseSettingsDialogHandle } from './components/database/DatabaseSettingsDialog'
 import { siblingDatabasePath } from './components/database/utils'
 import { QueryWorkspace } from './components/query'
 import { SchemaBrowser } from './components/schema'
@@ -60,7 +61,6 @@ export default function App() {
   const [createDatabasePath, setCreateDatabasePath] = useState('data/new_database.db')
   const [createDatabaseConfig, setCreateDatabaseConfig] = useState<DatabaseCreateConfig>(DEFAULT_DATABASE_CONFIG)
   const [storageRefreshToken, setStorageRefreshToken] = useState(0)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [rowLimit, setRowLimit] = useState(1000)
   const [timeout, setTimeoutValue] = useState(15)
 
@@ -68,7 +68,7 @@ export default function App() {
   const editor = useRef<EditorView | null>(null)
   const permissionsDialog = useRef<HTMLDialogElement>(null)
   const databaseDialog = useRef<HTMLDialogElement>(null)
-  const settingsDialog = useRef<HTMLDialogElement>(null)
+  const settingsDialog = useRef<DatabaseSettingsDialogHandle>(null)
   const sources = useRef(new Map<string, RunSource>())
   const pipelineResizeStart = useRef<{ x: number; width: number } | null>(null)
 
@@ -157,7 +157,6 @@ export default function App() {
     setStorageRefreshToken(0)
     databaseDialog.current?.close()
     settingsDialog.current?.close()
-    setSettingsOpen(false)
     sources.current.clear()
   }, [])
 
@@ -414,12 +413,7 @@ export default function App() {
   }
   function openSettings() {
     if (running) return
-    setSettingsOpen(true)
-    if (!settingsDialog.current?.open) settingsDialog.current?.showModal()
-  }
-  function closeSettings() {
-    setSettingsOpen(false)
-    settingsDialog.current?.close()
+    settingsDialog.current?.open()
   }
   async function selectDatabase(path: string) {
     if (databasePickerBusy) return
@@ -691,9 +685,7 @@ export default function App() {
             database={session.database}
             databasePath={session.database_path}
             payloadCodec={dialect?.payload_codec ?? null}
-            visible={settingsOpen}
             onChanged={() => setStorageRefreshToken(token => token + 1)}
-            onClose={closeSettings}
           />
         </>
       )}

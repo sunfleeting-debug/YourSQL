@@ -162,6 +162,13 @@ export interface StorageCacheSnapshot {
   note: string
 }
 
+export interface StorageSettingsSnapshot {
+  snapshot_at: string
+  readonly: boolean
+  page_size: number
+  buffer_pool: BufferPoolSnapshot
+}
+
 export interface StoragePolicyChange {
   snapshot_at: string
   changed: boolean

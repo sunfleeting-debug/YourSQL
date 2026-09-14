@@ -21,6 +21,7 @@ from yoursql.engine.services.inspection import (
     storage_cache_snapshot,
     storage_index_snapshot,
     storage_page_changes,
+    storage_settings_snapshot,
     storage_snapshot,
 )
 from yoursql.engine.services.workbench import WebSession, Workbench
@@ -550,6 +551,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                             page_limit,
                             map_only=map_only,
                         )
+                    elif route == "/api/storage/settings":
+                        data = storage_settings_snapshot(self.server.database)
                     elif route == "/api/storage/changes":
                         since = self._integer(
                             query.get("since", [None])[0], 0, 0, 2**31 - 1
@@ -567,8 +570,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         )
                     elif len(parts) == 4 and parts[2] == "pages":
                         page_id = self._integer(parts[3], 0, 0, 2**31 - 1)
+                        index_name = query.get("index_name", [None])[0]
+                        resolve_index = query.get("resolve_index", ["1"])[0].lower() not in {
+                            "0",
+                            "false",
+                        }
                         data = inspect_page(
-                            self.server.database, page_id, offset, min(limit, 100)
+                            self.server.database,
+                            page_id,
+                            offset,
+                            min(limit, 100),
+                            index_name=index_name,
+                            resolve_index=resolve_index,
                         )
                     elif len(parts) == 4 and parts[2] == "indexes":
                         data = inspect_index(

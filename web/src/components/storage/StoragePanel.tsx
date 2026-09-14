@@ -1,11 +1,12 @@
 /** 存储检查工作区：页面地图、缓存、索引和页详情。 */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties, WheelEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, MouseEvent, UIEvent, WheelEvent } from 'react'
 import { ArrowLeft, ChevronLeft, ChevronRight, HardDrive, List, ListTree, LockKeyhole, Network, RefreshCw, Settings2, Table2, X } from 'lucide-react'
 import { api, ApiError, errorMessage } from '../../api'
 import { pageTileAction } from '../../storage-selection'
-import { pageMapClassName, pageTileClassName } from '../../view-classes'
+import { useResizableWidth } from '../../use-resizable-width'
+import { pageMapClassName, pageTileClassName, storageDetailPanelClassName } from '../../view-classes'
 import type { JsonObject, JsonValue } from '../../types/common'
 import type { IndexNode, IndexSnapshot } from '../../types/catalog'
 import type {
@@ -28,8 +29,14 @@ import PageGrid, { PageGridSelectionDetail } from './PageGrid'
 import type { PageGridSelection } from './PageGrid'
 import { decodeRawPayloadBytes, inspectStoragePayload } from './raw-bytes'
 import { StorageTooltip, useStorageTooltip } from './StorageTooltip'
+import type { StorageTooltipContainerProps } from './StorageTooltip'
 
 type StorageDetail = StoragePageDetail | IndexSnapshot
+
+const PAGE_TILE_SIZE = 16
+const PAGE_TILE_GAP = 2
+const PAGE_ROW_HEIGHT = PAGE_TILE_SIZE + PAGE_TILE_GAP
+const PAGE_WINDOW_OVERSCAN_ROWS = 4
 
 // WHY：页详情和索引详情共享同一块展示状态，但字段集合不同；联合类型让分支必须先说明当前详情种类。
 function isPageDetail(value: StorageDetail): value is StoragePageDetail {
@@ -39,6 +46,177 @@ function isPageDetail(value: StorageDetail): value is StoragePageDetail {
 function isIndexDetail(value: StorageDetail): value is IndexSnapshot {
   return 'entries' in value
 }
+
+interface PageMapTilesProps {
+  pages: PageHeader[]
+  pageStart: number
+  columnCount: number
+  selectedPageId: string | null
+  linkedPageIds: ReadonlySet<number>
+  linkedIndexPageIds: ReadonlySet<number>
+  linkedIndexRootIds: ReadonlySet<number>
+  tableFocus: boolean
+  cachedPageIds: ReadonlySet<number>
+  cacheFrameByPageId: ReadonlyMap<number, { pin_count: number }>
+  evictionRankByPageId: ReadonlyMap<number, number>
+}
+
+/** 页面地图块本体；缓存开关只改变父级状态时，保持 5k+ 个块节点免于重建。 */
+const PageMapTiles = memo(function PageMapTiles({
+  pages,
+  pageStart,
+  columnCount,
+  selectedPageId,
+  linkedPageIds,
+  linkedIndexPageIds,
+  linkedIndexRootIds,
+  tableFocus,
+  cachedPageIds,
+  cacheFrameByPageId,
+  evictionRankByPageId
+}: PageMapTilesProps) {
+  return (
+    <>
+      {pages.map((page, index) => {
+        const pageIndex = pageStart + index
+        const pageId = String(page.page_id)
+        const cached = cachedPageIds.has(page.page_id)
+        const active = selectedPageId === pageId
+        const used = page.logical_used_space ?? page.payload_size
+        const occupancy = pageOccupancy(page)
+        const linked = linkedPageIds.has(page.page_id)
+        const linkedIndexPage = linkedIndexPageIds.has(page.page_id)
+        const indexRoot = linkedIndexRootIds.has(page.page_id)
+        const frame = cacheFrameByPageId.get(page.page_id)
+        const evictionRank = evictionRankByPageId.get(page.page_id)
+        const cacheOrderText = evictionRank ? ` · 淘汰序 #${evictionRank}` : frame?.pin_count ? ' · Pin，不参与淘汰' : ''
+        const cacheText = cached ? ` · 缓存${cacheOrderText}` : ''
+        const linkText = tableFocus && linked ? ` · ${linkedIndexPage ? (indexRoot ? '索引根页' : '索引页') : '关联表'}` : ''
+        const pageText = `#${page.page_id} · ${PAGE_TYPE_LABELS[page.type] ?? page.type}`
+        const usageText = `${used} B 已用 · ${page.free_space} B 空闲`
+        const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}`
+
+        return (
+          <button
+            key={page.page_id}
+            type="button"
+            data-page-id={pageId}
+            data-storage-tooltip={tooltipText}
+            aria-pressed={active}
+            aria-label={tooltipText}
+            className={pageTileClassName({
+              type: page.type,
+              active,
+              linked,
+              linkedIndex: linkedIndexPage,
+              // HOW：缓存类别常驻在节点上，开关只切换父级 .cache-focus，避免 5k+ 个节点同步改 class。
+              cacheFocus: true,
+              cached
+            })}
+            style={
+              {
+                '--page-occupancy': occupancy.ratio,
+                '--eviction-rank': evictionRank ? JSON.stringify(String(evictionRank)) : 'none',
+                left: `${(pageIndex % columnCount) * PAGE_ROW_HEIGHT}px`,
+                top: `${Math.floor(pageIndex / columnCount) * PAGE_ROW_HEIGHT}px`
+              } as CSSProperties
+            }
+          />
+        )
+      })}
+    </>
+  )
+})
+
+interface PageMapProps extends Omit<PageMapTilesProps, 'pageStart' | 'columnCount'> {
+  cacheFocus: boolean
+  usageFill: boolean
+  tableFocus: boolean
+  ariaLabel: string
+  scrollTargetKey: string
+  scrollTargetPageId: number | null
+  tooltipContainerProps: StorageTooltipContainerProps
+  onSelectPage: (pageId: string) => void
+}
+
+/** 页面地图容器；点击与悬浮采用事件委托，避免为每个页块创建多组闭包。 */
+const PageMap = memo(function PageMap({
+  cacheFocus,
+  usageFill,
+  tableFocus,
+  ariaLabel,
+  scrollTargetKey,
+  scrollTargetPageId,
+  tooltipContainerProps,
+  onSelectPage,
+  ...tileProps
+}: PageMapProps) {
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
+  const [scrollTop, setScrollTop] = useState(0)
+  const viewportHeight = viewportSize.height || 230
+  const contentWidth = Math.max(1, viewportSize.width - 4)
+  const columnCount = Math.max(1, Math.floor((contentWidth + PAGE_TILE_GAP) / PAGE_ROW_HEIGHT))
+  const rowCount = Math.ceil(tileProps.pages.length / columnCount)
+  const totalHeight = Math.max(PAGE_TILE_SIZE, rowCount * PAGE_ROW_HEIGHT - PAGE_TILE_GAP)
+  const firstVisibleRow = Math.max(0, Math.floor(scrollTop / PAGE_ROW_HEIGHT) - PAGE_WINDOW_OVERSCAN_ROWS)
+  const lastVisibleRow = Math.min(rowCount, Math.ceil((scrollTop + viewportHeight) / PAGE_ROW_HEIGHT) + PAGE_WINDOW_OVERSCAN_ROWS)
+  const pageStart = firstVisibleRow * columnCount
+  const pageEnd = Math.min(tileProps.pages.length, lastVisibleRow * columnCount)
+  const visiblePages = useMemo(() => tileProps.pages.slice(pageStart, pageEnd), [pageEnd, pageStart, tileProps.pages])
+  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const nextScrollTop = event.currentTarget.scrollTop
+    setScrollTop(current => (Math.floor(current / PAGE_ROW_HEIGHT) === Math.floor(nextScrollTop / PAGE_ROW_HEIGHT) ? current : nextScrollTop))
+  }, [])
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const updateSize = () => {
+      const next = { width: viewport.clientWidth, height: viewport.clientHeight }
+      setViewportSize(current => (current.width === next.width && current.height === next.height ? current : next))
+    }
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (scrollTargetPageId === null || columnCount < 1) return
+    const targetIndex = tileProps.pages.findIndex(page => page.page_id === scrollTargetPageId)
+    const viewport = viewportRef.current
+    if (targetIndex < 0 || !viewport) return
+    const targetTop = Math.floor(targetIndex / columnCount) * PAGE_ROW_HEIGHT
+    const targetBottom = targetTop + PAGE_TILE_SIZE
+    if (targetTop < viewport.scrollTop) viewport.scrollTop = targetTop
+    else if (targetBottom > viewport.scrollTop + viewport.clientHeight) viewport.scrollTop = targetBottom - viewport.clientHeight
+  }, [columnCount, scrollTargetKey, scrollTargetPageId, tileProps.pages])
+
+  const handleClick = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      const target = event.target instanceof HTMLElement ? event.target.closest<HTMLButtonElement>('[data-page-id]') : null
+      if (!target || !event.currentTarget.contains(target)) return
+      const pageId = target.dataset.pageId
+      if (pageId) onSelectPage(pageId)
+    },
+    [onSelectPage]
+  )
+
+  return (
+    <div ref={viewportRef} className="page-map-viewport" onScroll={handleScroll}>
+      <div
+        className={`${pageMapClassName({ usageFill, cacheFocus, tableFocus })} virtual-window`}
+        style={{ height: `${totalHeight}px` }}
+        aria-label={ariaLabel}
+        onClick={handleClick}
+        {...tooltipContainerProps}
+      >
+        <PageMapTiles {...tileProps} pages={visiblePages} pageStart={pageStart} columnCount={columnCount} tableFocus={tableFocus} />
+      </div>
+    </div>
+  )
+})
 
 function jsonDetailValue(detail: StorageDetail, omitPagePayload: boolean): JsonObject {
   const entries = Object.entries(detail).filter(([key]) => !omitPagePayload || !['raw_payload', 'raw_page', 'slots'].includes(key))
@@ -754,7 +932,6 @@ export default function StoragePanel({
   const [indexBindingError, setIndexBindingError] = useState('')
 
   // HOW：请求编号 ref 用来作废过期响应；焦点 ref 用于关闭详情后把焦点还给列表项。
-  const pageButtonRefs = useRef(new Map<string, HTMLButtonElement>())
   const indexButtonRefs = useRef(new Map<string, HTMLButtonElement>())
   const detailHeadingRef = useRef<HTMLHeadingElement>(null)
   const indexHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -765,7 +942,8 @@ export default function StoragePanel({
   const activeRefreshRef = useRef(false)
   const detailRequestRef = useRef(0)
   const slotDetailRequestRef = useRef(0)
-  const { tooltip, tooltipProps } = useStorageTooltip()
+  const { tooltip, tooltipContainerProps } = useStorageTooltip()
+  const detailPanelPane = useResizableWidth({ initialWidth: null, minWidth: 320, maxWidth: 760, edge: 'left' })
   const busy = snapshotBusy || cacheBusy || policyBusy || capacityBusy || incrementalBusy || pageRefreshBusy || detailBusy
   const refreshSnapshot = useCallback(async () => {
     const requestId = ++snapshotRequestRef.current
@@ -962,7 +1140,7 @@ export default function StoragePanel({
       if (requestId === changeRequestRef.current) setIncrementalBusy(false)
     }
   }, [refreshSnapshot, snapshot])
-  async function inspect(kind: InspectableStorageKind, value: string, start = 0) {
+  const inspect = useCallback(async (kind: InspectableStorageKind, value: string, start = 0, indexName?: string) => {
     const requestId = ++detailRequestRef.current
     setDetailBusy(true)
     setDetailLoading(true)
@@ -979,7 +1157,11 @@ export default function StoragePanel({
       setCellSelection(null)
     }
     try {
-      const data = await api<StorageDetail>(`/api/storage/${kind}/${encodeURIComponent(value)}?offset=${start}&limit=40`)
+      const indexQuery = kind === 'pages' && indexName ? `&index_name=${encodeURIComponent(indexName)}` : ''
+      const resolveIndexQuery = kind === 'pages' && !indexName ? '&resolve_index=0' : ''
+      const data = await api<StorageDetail>(
+        `/api/storage/${kind}/${encodeURIComponent(value)}?offset=${start}&limit=40${indexQuery}${resolveIndexQuery}`
+      )
       if (requestId !== detailRequestRef.current) return
       setDetail(data)
       setSelected({ kind, value })
@@ -995,7 +1177,7 @@ export default function StoragePanel({
         setDetailLoading(false)
       }
     }
-  }
+  }, [])
   const refreshActiveView = useCallback(
     async (_automatic = false) => {
       if (busy || activeRefreshRef.current) return
@@ -1016,19 +1198,23 @@ export default function StoragePanel({
         activeRefreshRef.current = false
       }
     },
-    [busy, cacheFocus, detailOffset, refreshCache, refreshIndexCatalog, refreshPage, refreshPageChanges, selected, tab]
+    [busy, cacheFocus, detailOffset, inspect, refreshCache, refreshIndexCatalog, refreshPage, refreshPageChanges, selected, tab]
   )
   useEffect(() => {
     if (!active || refreshToken === 0) return
     void refreshActiveView(true)
     // WHY：SQL 完成只触发当前存储页签的轻量刷新，不重载整张页面地图。
   }, [active, refreshToken])
-  function selectPage(pageId: string) {
-    // WHY：切换页必须一次点击就加载新页详情；旧实现只清空 detail/selected/cellSelection，
-    // 表现为“第一次点击折叠工作区与抽屉，第二次点击才切换”。
-    if (pageTileAction(selectedPageId, pageId, pageDetail !== null) === 'noop') return
-    void inspect('pages', pageId)
-  }
+  const selectPage = useCallback(
+    (pageId: string) => {
+      // WHY：切换页必须一次点击就加载新页详情；旧实现只清空 detail/selected/cellSelection，
+      // 表现为“第一次点击折叠工作区与抽屉，第二次点击才切换”。
+      const pageLoaded = selected?.kind === 'pages' && detail !== null && isPageDetail(detail)
+      if (pageTileAction(selectedPageId, pageId, pageLoaded) === 'noop') return
+      void inspect('pages', pageId)
+    },
+    [detail, inspect, selected, selectedPageId]
+  )
   function selectTab(value: StorageTab) {
     setTab(value)
     setDetail(null)
@@ -1110,7 +1296,7 @@ export default function StoragePanel({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [detail, detailLoading, selected])
   const raw = pageDetail ? rawValue(pageDetail.raw_payload) : null
-  const jsonDetail = detail ? jsonDetailValue(detail, pageDetail !== null) : null
+  const jsonDetail = useMemo(() => (detail ? jsonDetailValue(detail, pageDetail !== null) : null), [detail, pageDetail])
   const currentCache = cacheSnapshot?.buffer_pool ?? snapshot?.buffer_pool
   const currentCapacity = currentCache?.stats.capacity ?? 64
   const pendingCapacity = capacityDraft === null ? currentCapacity : Number(capacityDraft)
@@ -1118,24 +1304,36 @@ export default function StoragePanel({
   const displayedCapacity = capacityValid ? pendingCapacity : currentCapacity
   const cacheBytes = displayedCapacity * (snapshot?.page_size ?? 4096)
   const cacheSizeLabel = cacheBytes >= 1024 * 1024 ? `${(cacheBytes / (1024 * 1024)).toFixed(1)} MiB` : `${Math.round(cacheBytes / 1024)} KiB`
-  const evictionOrder = currentCache?.eviction_order ?? []
-  const evictionRankByPageId = new Map(evictionOrder.map((pageId, index) => [pageId, index + 1] as const))
-  const cacheFrameByPageId = new Map(currentCache?.frames.map(frame => [frame.page_id, frame] as const) ?? [])
-  const cachedFrameIds = currentCache?.frames.map(frame => frame.page_id) ?? []
-  const cachedPageIds = new Set([...cachedFrameIds, ...evictionOrder])
-  const orderedCacheFrames = [...(currentCache?.frames ?? [])].sort((left, right) => {
-    const leftRank = evictionRankByPageId.get(left.page_id) ?? Number.MAX_SAFE_INTEGER
-    const rightRank = evictionRankByPageId.get(right.page_id) ?? Number.MAX_SAFE_INTEGER
-    return leftRank - rightRank || left.page_id - right.page_id
-  })
-  const visiblePageTypes = PAGE_TYPE_LEGEND.filter(item => snapshot?.pages.some(page => page.type === item.type))
+  const cacheView = useMemo(() => {
+    const evictionOrder = currentCache?.eviction_order ?? []
+    const frames = currentCache?.frames ?? []
+    const evictionRankByPageId = new Map(evictionOrder.map((pageId, index) => [pageId, index + 1] as const))
+    const cacheFrameByPageId = new Map(frames.map(frame => [frame.page_id, frame] as const))
+    const cachedPageIds = new Set([...frames.map(frame => frame.page_id), ...evictionOrder])
+    const orderedCacheFrames = [...frames].sort((left, right) => {
+      const leftRank = evictionRankByPageId.get(left.page_id) ?? Number.MAX_SAFE_INTEGER
+      const rightRank = evictionRankByPageId.get(right.page_id) ?? Number.MAX_SAFE_INTEGER
+      return leftRank - rightRank || left.page_id - right.page_id
+    })
+    return { evictionRankByPageId, cacheFrameByPageId, cachedPageIds, orderedCacheFrames }
+  }, [currentCache])
+  const { evictionRankByPageId, cacheFrameByPageId, cachedPageIds, orderedCacheFrames } = cacheView
+  const visiblePageTypes = useMemo(() => PAGE_TYPE_LEGEND.filter(item => snapshot?.pages.some(page => page.type === item.type)), [snapshot?.pages])
   const usageFill = pageUsageVisual === 'fill'
-  const linkedDataPageIds = new Set(selectedTable?.page_ids.map(pageId => Number(pageId)) ?? [])
-  const linkedIndexRootIds = new Set(
-    (selectedTable?.indexes ?? []).map(index => index.root_page_id).filter((pageId): pageId is number => typeof pageId === 'number')
+  const linkedDataPageIds = useMemo(() => new Set(selectedTable?.page_ids.map(pageId => Number(pageId)) ?? []), [selectedTable?.page_ids])
+  const linkedIndexRootIds = useMemo(
+    () => new Set((selectedTable?.indexes ?? []).map(index => index.root_page_id).filter((pageId): pageId is number => typeof pageId === 'number')),
+    [selectedTable?.indexes]
   )
-  const linkedIndexPageIds = new Set<number>([...linkedIndexRootIds, ...Object.values(indexPageIdsByName).flat()])
-  const linkedPageIds = new Set([...linkedDataPageIds, ...linkedIndexPageIds])
+  const linkedIndexPageIds = useMemo(
+    () => new Set<number>([...linkedIndexRootIds, ...Object.values(indexPageIdsByName).flat()]),
+    [indexPageIdsByName, linkedIndexRootIds]
+  )
+  const linkedPageIds = useMemo(() => new Set([...linkedDataPageIds, ...linkedIndexPageIds]), [linkedDataPageIds, linkedIndexPageIds])
+  const firstLinkedPageId = useMemo(
+    () => (selectedTable && snapshot ? (snapshot.pages.find(page => linkedPageIds.has(page.page_id))?.page_id ?? null) : null),
+    [linkedPageIds, selectedTable, snapshot]
+  )
   const selectedIndexBindingsKey = selectedTable?.indexes.map(index => `${index.name}\u0002${index.root_page_id ?? ''}`).join('\u0001') ?? ''
   useEffect(() => {
     let cancelled = false
@@ -1171,23 +1369,34 @@ export default function StoragePanel({
       cancelled = true
     }
   }, [selectedIndexBindingsKey, snapshot?.snapshot_at])
-  useEffect(() => {
-    if (!selectedTable || tab !== 'pages' || !snapshot) return
-    const firstLinkedPage = snapshot.pages.find(page => linkedPageIds.has(page.page_id))
-    if (!firstLinkedPage) return
-    window.requestAnimationFrame(() =>
-      pageButtonRefs.current.get(String(firstLinkedPage.page_id))?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-    )
-  }, [selectedTable?.name, snapshot?.snapshot_at, tab])
   const indexScreenOpen = tab === 'indexes' && selected?.kind === 'indexes'
   const selectedIndexName = selected?.kind === 'indexes' ? selected.value : ''
+  const inspectPageFromIndex = useCallback(
+    (pageId: number) => {
+      if (!selectedIndexName) return
+      // WHY：索引页点击应明确切到页面页签；否则只改 selected 会卸载索引视图，却仍停留在索引页签。
+      setTab('pages')
+      void inspect('pages', String(pageId), 0, selectedIndexName)
+    },
+    [inspect, selectedIndexName]
+  )
   const selectedPageHeader = selectedPageId && snapshot ? (snapshot.pages.find(page => String(page.page_id) === selectedPageId) ?? null) : null
   const detailPanelOpen = selected?.kind === 'pages' && pageDetail !== null && cellSelection !== null
   // HOW：页面地图页签常驻右侧详情栏；未选中块时只给占位提示，布局不因开关抽屉而重排。
   const railOpen = tab === 'pages'
   const detailPanelHeading = pageDetail ? (cellSelection ? `块 #${cellSelection.cellIndex}` : '块') : detailTitle
   const detailPanel = railOpen && (
-    <aside className="storage-detail-panel" aria-labelledby="storage-panel-title" aria-busy={detailLoading}>
+    <aside className={storageDetailPanelClassName(detailPanelPane.resizing)} aria-labelledby="storage-panel-title" aria-busy={detailLoading}>
+      <div
+        className="storage-detail-resize-handle"
+        role="separator"
+        aria-label="调整存储详情宽度"
+        aria-orientation="vertical"
+        aria-valuemin={320}
+        aria-valuemax={760}
+        aria-valuenow={detailPanelPane.width ?? undefined}
+        onPointerDown={detailPanelPane.beginResize}
+      />
       <div className="storage-detail-panel-header">
         <div>
           <h3 id="storage-panel-title" ref={detailHeadingRef} tabIndex={-1}>
@@ -1244,7 +1453,10 @@ export default function StoragePanel({
       aria-label="存储检查与缓存运行态"
       aria-busy={busy}
     >
-      <div className={`storage-mode-layout ${railOpen ? 'has-rail' : ''}`}>
+      <div
+        className={`storage-mode-layout ${railOpen ? 'has-rail' : ''}`}
+        style={detailPanelPane.width === null ? undefined : ({ '--storage-detail-width': `${detailPanelPane.width}px` } as CSSProperties)}
+      >
         <div className="storage-scroll">
           <div className="storage-heading">
             <span>
@@ -1302,9 +1514,7 @@ export default function StoragePanel({
                   value={indexDetail}
                   loading={detailLoading}
                   onBack={closeDetail}
-                  onPage={pageId => {
-                    void inspect('pages', String(pageId))
-                  }}
+                  onPage={inspectPageFromIndex}
                   onNavigate={offset => {
                     void inspect('indexes', selectedIndexName, offset)
                   }}
@@ -1395,57 +1605,30 @@ export default function StoragePanel({
                           </button>
                         </div>
                       </div>
-                      <div
-                        className={pageMapClassName({ usageFill, cacheFocus, tableFocus: Boolean(selectedTable) })}
-                        aria-label={
+                      <PageMap
+                        tooltipContainerProps={tooltipContainerProps}
+                        cacheFocus={cacheFocus}
+                        usageFill={usageFill}
+                        tableFocus={Boolean(selectedTable)}
+                        scrollTargetKey={selectedTable?.name ?? ''}
+                        scrollTargetPageId={tab === 'pages' ? firstLinkedPageId : null}
+                        ariaLabel={
                           selectedTable
                             ? `${selectedTable.name} 的关联页面：${[...linkedPageIds].join(', ') || '暂无'}`
                             : cacheFocus
                               ? `缓存高亮已开启，${cachedPageIds.size} 个页面在缓存中`
                               : `页面预览，使用率按${usageFill ? '填充比例' : '颜色深度'}表示`
                         }
-                      >
-                        {snapshot.pages.map(page => {
-                          const pageId = String(page.page_id)
-                          const cached = cachedPageIds.has(page.page_id)
-                          const active = selectedPageId === pageId
-                          const used = page.logical_used_space ?? page.payload_size
-                          const occupancy = pageOccupancy(page)
-                          const linked = linkedPageIds.has(page.page_id)
-                          const linkedIndexPage = linkedIndexPageIds.has(page.page_id)
-                          const indexRoot = linkedIndexRootIds.has(page.page_id)
-                          const frame = cacheFrameByPageId.get(page.page_id)
-                          const evictionRank = evictionRankByPageId.get(page.page_id)
-                          const cacheOrderText = evictionRank ? ` · 淘汰序 #${evictionRank}` : frame?.pin_count ? ' · Pin，不参与淘汰' : ''
-                          // HOW：tooltip 拼接拆成常量，避免单行超出 150 字符。
-                          const cacheText = cached ? ` · 缓存${cacheOrderText}` : ''
-                          const linkText = selectedTable && linked ? ` · ${linkedIndexPage ? (indexRoot ? '索引根页' : '索引页') : '关联表'}` : ''
-                          const pageText = `#${page.page_id} · ${PAGE_TYPE_LABELS[page.type] ?? page.type}`
-                          const usageText = `${used} B 已用 · ${page.free_space} B 空闲`
-                          const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}`
-                          return (
-                            <button
-                              key={page.page_id}
-                              type="button"
-                              ref={element => {
-                                if (element) pageButtonRefs.current.set(pageId, element)
-                                else pageButtonRefs.current.delete(pageId)
-                              }}
-                              aria-pressed={active}
-                              aria-label={tooltipText}
-                              className={pageTileClassName({ type: page.type, active, linked, linkedIndex: linkedIndexPage, cacheFocus, cached })}
-                              style={
-                                {
-                                  '--page-occupancy': occupancy.ratio,
-                                  '--eviction-rank': evictionRank ? JSON.stringify(String(evictionRank)) : 'none'
-                                } as CSSProperties
-                              }
-                              onClick={() => selectPage(pageId)}
-                              {...tooltipProps(tooltipText)}
-                            />
-                          )
-                        })}
-                      </div>
+                        pages={snapshot.pages}
+                        selectedPageId={selectedPageId}
+                        linkedPageIds={linkedPageIds}
+                        linkedIndexPageIds={linkedIndexPageIds}
+                        linkedIndexRootIds={linkedIndexRootIds}
+                        cachedPageIds={cachedPageIds}
+                        cacheFrameByPageId={cacheFrameByPageId}
+                        evictionRankByPageId={evictionRankByPageId}
+                        onSelectPage={selectPage}
+                      />
                       {!pageDetail && selectedPageHeader && selectedPageHeader.table_name && (
                         <div className="storage-page-association-preview">
                           <PageAssociation

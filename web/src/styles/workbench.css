@@ -645,7 +645,7 @@
   .workbench.left-collapsed,
   .workbench.right-collapsed,
   .workbench.left-collapsed.right-collapsed {
-    grid-template-columns: 215px minmax(400px, 1fr) !important;
+    grid-template-columns: var(--sidebar-width, 215px) minmax(400px, 1fr) !important;
   }
   .workbench.left-collapsed {
     grid-template-columns: minmax(400px, 1fr) !important;
@@ -744,16 +744,49 @@
 .workbench.left-collapsed,
 .workbench.right-collapsed,
 .workbench.left-collapsed.right-collapsed {
-  grid-template-columns: 196px minmax(480px, 1fr) !important;
+  grid-template-columns: var(--sidebar-width, 196px) minmax(480px, 1fr) !important;
 }
 .workbench.left-collapsed {
   grid-template-columns: minmax(480px, 1fr) !important;
 }
 .sidebar {
+  position: relative;
   background: #f7f9fa;
 }
 .sidebar .schema-foot {
   display: none;
+}
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  z-index: 5;
+  width: 10px;
+  cursor: col-resize;
+}
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 2px;
+  height: 44px;
+  border-radius: 2px;
+  background: #c1d5d4;
+  content: '';
+  transform: translateY(-50%);
+  transition:
+    height 0.16s,
+    background 0.16s;
+}
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle.is-resizing::after {
+  height: 72px;
+  background: #4c9b91;
+}
+.sidebar-resize-handle.is-resizing,
+.sidebar-resize-handle.is-resizing * {
+  cursor: col-resize !important;
 }
 .schema-region {
   padding-top: 3px;
@@ -3080,8 +3113,6 @@
   border: 1px solid transparent;
   border-radius: 3px;
   transition:
-    filter 0.16s,
-    opacity 0.16s,
     box-shadow 0.16s,
     transform 0.16s;
 }
@@ -3116,11 +3147,9 @@
   z-index: 3;
 }
 .page-map.cache-focus .page-tile.cache-muted {
-  filter: grayscale(1);
   opacity: 0.28;
 }
 .page-map.cache-focus .page-tile.cache-muted:hover {
-  filter: grayscale(1);
   opacity: 0.4;
 }
 .page-map.cache-focus .page-tile.cache-hit {
@@ -3272,7 +3301,7 @@
 }
 /* HOW：页面地图的工作区始终保留右侧详情栏，开关抽屉不再改变地图列宽与滚动位置。 */
 .storage-mode-layout.has-rail {
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
+  grid-template-columns: minmax(0, 1fr) var(--storage-detail-width, minmax(360px, 42%));
 }
 .storage-scroll {
   min-width: 0;
@@ -3282,6 +3311,7 @@
 }
 .storage-detail-panel {
   display: flex;
+  position: relative;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -3289,6 +3319,38 @@
   border-left: 1px solid #cad9dc;
   box-shadow: -10px 0 24px #263f4b0d;
   animation: storage-panel-in 0.18s ease-out;
+}
+.storage-detail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  z-index: 5;
+  width: 10px;
+  cursor: col-resize;
+}
+.storage-detail-resize-handle::after {
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 2px;
+  height: 44px;
+  border-radius: 2px;
+  background: #c1d5d4;
+  content: '';
+  transform: translateY(-50%);
+  transition:
+    height 0.16s,
+    background 0.16s;
+}
+.storage-detail-resize-handle:hover::after,
+.storage-detail-panel.is-resizing .storage-detail-resize-handle::after {
+  height: 72px;
+  background: #4c9b91;
+}
+.storage-detail-panel.is-resizing,
+.storage-detail-panel.is-resizing * {
+  cursor: col-resize !important;
 }
 .storage-detail-panel-header {
   display: flex;
@@ -3374,7 +3436,7 @@
 }
 @media (max-width: 920px) and (min-width: 701px) {
   .storage-mode-layout.has-rail {
-    grid-template-columns: minmax(0, 1fr) minmax(310px, 44%);
+    grid-template-columns: minmax(0, 1fr) var(--storage-detail-width, minmax(310px, 44%));
   }
 }
 @media (max-width: 700px) {
@@ -3392,6 +3454,9 @@
     border-top: 1px solid #cad9dc;
     border-left: 0;
     box-shadow: 0 -10px 24px #263f4b0d;
+  }
+  .storage-detail-resize-handle {
+    display: none;
   }
   .storage-detail-panel-header {
     min-height: 58px;
@@ -3525,6 +3590,40 @@
 }
 .full-storage .page-map .page-tile.free {
   --page-color: #aebbc2;
+}
+/* HOW：地图只保留视口上下少量缓冲行，外层负责滚动高度，内层负责定位可见块。 */
+.full-storage .page-map-viewport {
+  max-height: 230px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
+  border: 1px solid #e5ecef;
+  border-radius: 3px;
+  background: #fbfcfd;
+  scrollbar-gutter: stable;
+}
+.full-storage .page-map.virtual-window {
+  display: block;
+  position: relative;
+  width: 100%;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.full-storage .page-map.virtual-window .page-tile {
+  position: absolute;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  aspect-ratio: auto;
+  border-radius: 1px;
 }
 .page-density-legend {
   display: inline-flex !important;
@@ -4771,7 +4870,7 @@
 
 /* HOW：打开流水线时才扩展第三列；未打开时保留编辑器的完整横向空间。 */
 .workbench.pipeline-open {
-  grid-template-columns: 196px minmax(480px, 1fr) var(--pipeline-width) !important;
+  grid-template-columns: var(--sidebar-width, 196px) minmax(480px, 1fr) var(--pipeline-width) !important;
 }
 .workbench.left-collapsed.pipeline-open {
   grid-template-columns: minmax(480px, 1fr) var(--pipeline-width) !important;
@@ -4810,7 +4909,7 @@
 
 @media (max-width: 1100px) {
   .workbench.pipeline-open {
-    grid-template-columns: 196px minmax(400px, 1fr) var(--pipeline-width) !important;
+    grid-template-columns: var(--sidebar-width, 196px) minmax(400px, 1fr) var(--pipeline-width) !important;
   }
   .workbench.left-collapsed.pipeline-open {
     grid-template-columns: minmax(400px, 1fr) var(--pipeline-width) !important;
@@ -7366,11 +7465,11 @@
 /* HOW：详情栏保持诊断内容的最低可读宽度，把多出来的空间优先留给页面地图。 */
 @media (min-width: 921px) {
   .storage-mode-layout.has-rail {
-    grid-template-columns: minmax(0, 1fr) minmax(330px, 36%);
+    grid-template-columns: minmax(0, 1fr) var(--storage-detail-width, minmax(330px, 36%));
   }
 }
 @media (max-width: 920px) and (min-width: 701px) {
   .storage-mode-layout.has-rail {
-    grid-template-columns: minmax(0, 1fr) minmax(300px, 40%);
+    grid-template-columns: minmax(0, 1fr) var(--storage-detail-width, minmax(300px, 40%));
   }
 }

@@ -1,19 +1,22 @@
 /** 【前端特供】当前数据库运行参数设置弹窗，不承载数据库核心逻辑。 */
 
-import { forwardRef, useEffect, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { Database, HardDrive, Info, RefreshCw, Settings2, X } from 'lucide-react'
 import { api, errorMessage } from '../../api'
 import type { PayloadCodecName } from '../../types/common'
-import type { ReplacementPolicy, StoragePolicyChange, StorageResizeChange, StorageSnapshot } from '../../types/storage'
+import type { ReplacementPolicy, StoragePolicyChange, StorageResizeChange, StorageSettingsSnapshot } from '../../types/storage'
+
+export interface DatabaseSettingsDialogHandle {
+  open: () => void
+  close: () => void
+}
 
 /** 【前端特供】数据库设置弹窗的会话与刷新回调。 */
 export interface DatabaseSettingsDialogProps {
   database: string
   databasePath?: string
   payloadCodec: PayloadCodecName | null
-  visible: boolean
   onChanged?: () => void
-  onClose: () => void
 }
 
 /** 【前端特供】格式化缓存页数对应的内存占用。 */
@@ -23,11 +26,13 @@ function formatBytes(bytes: number): string {
 }
 
 /** 【前端特供】展示并应用当前数据库的运行参数。 */
-const DatabaseSettingsDialog = forwardRef<HTMLDialogElement, DatabaseSettingsDialogProps>(function DatabaseSettingsDialog(
-  { database, databasePath, payloadCodec, visible, onChanged, onClose },
+const DatabaseSettingsDialog = forwardRef<DatabaseSettingsDialogHandle, DatabaseSettingsDialogProps>(function DatabaseSettingsDialog(
+  { database, databasePath, payloadCodec, onChanged },
   ref
 ) {
-  const [snapshot, setSnapshot] = useState<StorageSnapshot | null>(null)
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const [visible, setVisible] = useState(false)
+  const [snapshot, setSnapshot] = useState<StorageSettingsSnapshot | null>(null)
   const [capacityDraft, setCapacityDraft] = useState('')
   const [policyDraft, setPolicyDraft] = useState<ReplacementPolicy>('lru')
   const [loading, setLoading] = useState(false)
@@ -35,13 +40,30 @@ const DatabaseSettingsDialog = forwardRef<HTMLDialogElement, DatabaseSettingsDia
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
+  const close = useCallback(() => {
+    setVisible(false)
+    dialogRef.current?.close()
+  }, [])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      open: () => {
+        setVisible(true)
+        if (!dialogRef.current?.open) dialogRef.current?.showModal()
+      },
+      close
+    }),
+    [close]
+  )
+
   useEffect(() => {
     if (!visible) return
     let cancelled = false
     setLoading(true)
     setError('')
     setNotice('')
-    api<StorageSnapshot>('/api/storage?limit=1')
+    api<StorageSettingsSnapshot>('/api/storage/settings')
       .then(value => {
         if (cancelled) return
         setSnapshot(value)
@@ -100,13 +122,13 @@ const DatabaseSettingsDialog = forwardRef<HTMLDialogElement, DatabaseSettingsDia
   }
 
   return (
-    <dialog ref={ref} className="database-dialog database-settings-dialog" onClose={onClose}>
+    <dialog ref={dialogRef} className="database-dialog database-settings-dialog" onClose={() => setVisible(false)}>
       <div className="panel-heading">
         <strong>
           <Settings2 size={18} />
           数据库设置
         </strong>
-        <button className="icon-button" aria-label="关闭数据库设置" onClick={onClose}>
+        <button className="icon-button" aria-label="关闭数据库设置" onClick={close}>
           <X size={18} />
         </button>
       </div>

@@ -32,6 +32,7 @@ __all__ = [
     "storage_cache_snapshot",
     "storage_index_snapshot",
     "storage_page_changes",
+    "storage_settings_snapshot",
     "storage_snapshot",
 ]
 
@@ -285,6 +286,18 @@ def storage_cache_snapshot(database: Database, offset: int, limit: int) -> JsonO
     }
 
 
+def storage_settings_snapshot(database: Database) -> JsonObject:
+    """【前端特供】返回设置弹窗所需的最小运行参数，不重建索引页映射。"""
+
+    authorize_storage(database)
+    return {
+        "snapshot_at": datetime.now(timezone.utc).isoformat(),
+        "readonly": True,
+        "page_size": database.disk.page_size,
+        "buffer_pool": database.buffer_pool.snapshot(0, 100).to_dict(),
+    }
+
+
 def storage_index_snapshot(database: Database, limit: int) -> JsonObject:
     """【前端特供】只刷新索引目录，索引详情和页面地图保持不动。"""
 
@@ -297,7 +310,13 @@ def storage_index_snapshot(database: Database, limit: int) -> JsonObject:
 
 
 def inspect_page(
-    database: Database, page_id: int, offset: int, limit: int
+    database: Database,
+    page_id: int,
+    offset: int,
+    limit: int,
+    *,
+    index_name: str | None = None,
+    resolve_index: bool = True,
 ) -> JsonObject:
     """【前端特供】读取并返回指定页的只读检查信息。"""
     authorize_storage(database)
@@ -307,7 +326,23 @@ def inspect_page(
     admin = _is_admin(database)
     table = _table_for_page(database, page_id)
     masked = table is not None and table.system and not admin
-    index_pages = _index_pages(database) if page.page_type is PageType.INDEX else None
+    if page.page_type is PageType.INDEX and index_name:
+        # WHY：索引检查页已经携带所属索引名；直接使用已验证的目录项，避免每次点击都遍历所有 B+Tree。
+        metadata = database.catalog.get_index(index_name)
+        table = next(
+            (
+                item
+                for item in database.catalog.tables(include_system=True)
+                if item.table_id == metadata.table_id
+            ),
+            None,
+        )
+        index_pages = {page_id: [IndexPageBinding(metadata.name, table)]}
+    elif resolve_index:
+        index_pages = _index_pages(database) if page.page_type is PageType.INDEX else None
+    else:
+        # WHY：页面地图点击只需要页详情；索引归属映射可选，不能阻塞索引页的首屏响应。
+        index_pages = {} if page.page_type is PageType.INDEX else None
     result = page_header(page, database, index_pages=index_pages)
     result.update(
         {
