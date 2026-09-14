@@ -13,9 +13,9 @@ from pathlib import Path
 from yoursql.common import DatabaseConfig
 from yoursql.common.errors import StorageError
 from yoursql.common.types import PageId
-from yoursql.engine.auth import RBAC
+from yoursql.engine.security import RBAC
 from yoursql.engine.catalog import Catalog, TableMetadata
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 from yoursql.storage import IndexManager, Page, PageType, SlottedPage, TableHeap
 from yoursql.storage.index import _IndexNode
 from yoursql.storage.page import (

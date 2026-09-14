@@ -28,7 +28,7 @@ from benchmarks.run_benchbox_tpch import (
     _typed_value,
 )
 from yoursql.common import DatabaseConfig, YourSQLError
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 DEFAULT_DATA_DIR = ROOT / "benchmarks" / "third_party" / "tpch_sf001"
 DEFAULT_DB_PATH = ROOT / "benchmarks" / "results" / "tpch_sf001_multi.db"

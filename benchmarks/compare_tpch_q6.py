@@ -28,7 +28,7 @@ from benchmarks.run_benchbox_tpch import (
     _read_rows,
     _typed_value,
 )
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 
 DEFAULT_DATA_DIR = ROOT / "benchmarks" / "third_party" / "tpch_sf001"

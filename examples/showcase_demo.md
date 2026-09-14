@@ -358,7 +358,7 @@ python -m yoursql.cli --database data/showcase_v2.db --sql "SHOW TABLES; SHOW VI
 用 Python 只读检查 superblock 识别出的页大小：
 
 ```powershell
-python -c "from yoursql.engine.database import Database; print(Database.detect_page_size('data/showcase_v2.db'))"
+python -c "from yoursql.engine.runtime.database import Database; print(Database.detect_page_size('data/showcase_v2.db'))"
 ```
 
 预期输出为 `4096`。生成器使用确定性数据和分批导入，适合反复查看页分配、索引和页面布局；初始化 SQL 则适合快速建立一个无需等待大批量导入的完整功能样本。

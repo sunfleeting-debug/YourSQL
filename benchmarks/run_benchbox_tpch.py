@@ -15,7 +15,7 @@ from benchbox import TPCH
 from benchbox.platforms.sqlite import SQLiteAdapter
 
 from yoursql.common import DatabaseConfig
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]

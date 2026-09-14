@@ -16,7 +16,7 @@ from pathlib import Path
 from benchbox import TPCH
 
 from benchmarks.run_benchbox_tpch import BENCHMARK_DATABASE_CONFIG, ROOT, SCALE_FACTOR
-from yoursql.engine.database import Database
+from yoursql.engine.runtime.database import Database
 
 DEFAULT_DATA_DIR = ROOT / "benchmarks" / "third_party" / "tpch_sf001"
 
