@@ -1,5 +1,5 @@
 """基于槽式页的变长记录堆表。"""
-
+#将记录写入槽式页的空槽位，扫描更新删除记录
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
@@ -50,6 +50,7 @@ class TableHeap:
         return self.buffer_pool.disk.page_size
 
     @staticmethod
+    # HOW：字段元组交给当前数据库选择的 payload 编解码器，供槽式页保存。
     def _encode(
         row: tuple[object, ...], codec: PayloadCodec | str = "json"
     ) -> bytes:
@@ -84,12 +85,14 @@ class TableHeap:
         finally:
             self.buffer_pool.unpin(page_id)
 
+    # HOW: 修改后的页面放回缓冲池并标脏，标脏不等于已经落盘。
     def _write_slotted(self, slotted: SlottedPage) -> None:
         """将槽式页序列化后写回缓存。"""
         # WHY：SlottedPage 是页内操作的临时视图，必须重新生成 Page 并标记 dirty，
         # BufferPool 才能保留最新内容，并在淘汰或刷盘时写回 DiskManager。
         self.buffer_pool.put_page(slotted.to_page(), dirty=True)
 
+    # HOW: 输入已校验的字段值，返回页号和槽号组成的 RowId，与用户 id 列不同。
     def insert(self, row: tuple[object, ...]) -> RowId:
         """向堆表写入一行并返回其 RowId。"""
         encoded = self._encode(row, self.payload_codec)
@@ -193,6 +196,7 @@ class TableHeap:
         slotted.update(row_id.slot_id, self._encode(row, self.payload_codec))
         self._write_slotted(slotted)
 
+    # HOW: 按物理地址清除槽位，保留表及页列表；索引维护由上层负责。
     def delete(self, row_id: RowId) -> bool:
         """删除指定数据并维护相关状态。"""
         page_id = int(row_id.page_id)
@@ -205,6 +209,7 @@ class TableHeap:
         self._write_slotted(slotted)
         return True
 
+    # HOW: 按页号列表遍历有效槽位，逐条产生记录地址和解码后的字段值。
     def scan(self) -> Iterator[HeapRecord]:
         """按页和槽顺序扫描输入中的有效记录。"""
         for page_id in tuple(self.page_ids):

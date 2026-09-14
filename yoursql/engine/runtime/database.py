@@ -1,5 +1,5 @@
 """Database 运行时协调器：编译、优化、执行和页式持久化。"""
-
+#串联编译，计划，权限检查，执行和持久化
 from __future__ import annotations
 
 import os
@@ -158,6 +158,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             self.path = Path(path)
             # HOW：默认数据库位于 ./data；首次启动时自动准备父目录，CLI、Web 和直接 API 行为保持一致。
             self.path.parent.mkdir(parents=True, exist_ok=True)
+        # HOW：打开文件并准备缓冲池，再加载目录，以恢复表结构与数据位置。
         self.disk = DiskManager(
             self.path,
             page_size=self.config.page_size,
@@ -212,7 +213,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self._closed = False
 
     # ----- Catalog 页链与存储对象生命周期 -----
+    # HOW: 恢复链路：命名入口 catalog -> 目录页链 -> JSON 字典 -> 内存 Catalog。
     def _load_catalog(self) -> Catalog:
+        # HOW: 找到的是目录首页；用户表的数据位置保存在目录的 page_ids 中。
         """从目录页链加载 Catalog，必要时创建空目录。"""
         page_id = self.disk.named_page("catalog")
         if page_id is None:
@@ -246,6 +249,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             raise CatalogError("catalog 页链 payload 损坏") from exc
         if not isinstance(data, dict):
             raise CatalogError("catalog 页不是对象")
+        # HOW: 恢复元数据对象；用户记录在后续查询时才通过表堆读取。
         return Catalog.from_dict(data)
 
     def _catalog_payload(self, catalog: Catalog) -> bytes:
@@ -303,6 +307,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
         return page_ids
 
+    # HOW: 保存链路：Catalog -> 字典 -> JSON 字节 -> 分片目录页 -> 刷新到文件。
     def _persist_catalog(self) -> None:
         """把当前 Catalog 分块写入目录页链。"""
         payload = self._catalog_payload(self.catalog)
@@ -382,6 +387,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         # WHY：计划同时依赖行数与索引元数据；写入或 DDL 后不能继续复用旧访问路径。
         self.optimizer.cache.invalidate()
 
+    # HOW: 按表 ID 缓存表堆对象，首次用目录中的 page_ids 构建，不加载全表数据。
     def _heap(self, table: TableMetadata) -> TableHeap:
         """获取或创建表对应的堆表实例。"""
         key = int(table.table_id)
@@ -394,6 +400,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         return heap
 
     # ----- 对外 SQL 管线与批量写入入口 -----
+    #用户输入SQL，生成计划并执行
     def execute(self, sql: str) -> ExecutionResult:
         """执行单条或脚本 SQL；脚本返回最后一条语句的结果。"""
 
@@ -502,7 +509,14 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         )
         return result
 
+    # HOW: SQL 总入口：Token -> AST -> 绑定 -> 计划 -> 权限与优化 -> 逐条执行。
     def execute_script(self, sql: str) -> list[ExecutionResult]:
+        # 词法分析
+        # 语法分析
+        # 存储每条语句的结果
+        # 如果只有一条语句，缓存SQL
+        # 遍历每条语句
+        # 绑定表名和列名
         """执行 SQL 脚本并返回各语句结果。"""
         tokens = tuple(tokenize(sql))
         statements = Parser(tokens).parse_script()
@@ -511,9 +525,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         for statement in statements:
             bound = Binder(self.catalog).bind(statement)
             compilation = CompilationResult(
-                tokens, statement, bound, plan_from_statement(statement)
+                tokens, statement, bound, plan_from_statement(statement)#生成计划
             )
-            results.append(self._execute_compilation(compilation, sql=cache_sql))
+            results.append(self._execute_compilation(compilation, sql=cache_sql))#检查权限，优化并进入执行
         return results
 
     def compile(self, sql: str) -> CompilationResult:
@@ -609,7 +623,8 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
         return rewrite(plan)
 
-    def _execute_compilation(
+    # HOW: 执行协调入口；命令分发在 commands.py，SELECT 编排在 query.py。
+    def _execute_compilation(#检查权限，优化并进入执行
         self,
         compilation: CompilationResult,
         *,
@@ -621,13 +636,14 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         action = self._action_for(statement)
         object_name = self._object_for(statement)
         try:
-            self._authorize_statement(statement, action)
+            # HOW: 检查会话的操作权限，再选择优化计划携带的语句交给执行层。
+            self._authorize_statement(statement, action)#先检查当前用户是否有权限执行
             cache_sql = sql if isinstance(statement, (Select, Explain)) else None
             active_plan = (
                 optimized_plan
                 if optimized_plan is not None
                 else self.optimize_plan(compilation.plan, sql=cache_sql)
-            )
+            )#生成优化计划
             # HOW：表达式折叠和谓词下推后的 AST 挂在优化计划根节点上；执行时
             # 使用这份 AST，避免优化结果只停留在 EXPLAIN 展示层。
             active_statement = (
@@ -637,7 +653,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
             result = self._execute_statement(
                 active_statement, compilation.bound, active_plan
-            )
+            )#执行语句
             self.audit.record(
                 action,
                 user=self.session.user.name,
@@ -678,6 +694,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             "plan_cache": len(self.optimizer.cache),
         }
 
+    # HOW: 正常关闭保存权限状态并关闭缓存和文件；不等于具备断电恢复能力。
     def close(self) -> None:
         """关闭资源并释放关联状态。"""
         with self._lock:
