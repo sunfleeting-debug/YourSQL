@@ -230,7 +230,9 @@ class SlottedPage:
                 bytes(page.payload[record_offset : record_offset + record_length])
             )
             entries.append((record_offset, record_length, False))
-        for left, right in zip(sorted(ranges), sorted(ranges)[1:]):
+        # HOW：排序结果复用一次；早先写成 `sorted(ranges)` 调两遍，全表扫描时每页白排一遍。
+        ordered_ranges = sorted(ranges)
+        for left, right in zip(ordered_ranges, ordered_ranges[1:]):
             if left[1] > right[0]:
                 raise StorageError(f"HEAP 页 {page.page_id} 记录范围重叠")
         return cls(
@@ -660,3 +662,12 @@ class SlottedPage:
             for index, value in enumerate(self.slots)
             if value is not None
         )
+
+    def live_count(self) -> int:
+        """统计活槽个数，不切出记录内容。
+
+        HOW：只依赖已解析的槽目录项，不触碰记录区，因此调用方无需为每一行付出
+        JSON 解码成本。供 ``COUNT(*)`` 这类只关心行数的扫描使用。
+        """
+
+        return sum(1 for value in self.slots if value is not None)

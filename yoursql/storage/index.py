@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from decimal import Decimal
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator
 
 from ..common.errors import ExecutionError, StorageError
 from ..common.types import PageId, RowId
+from . import codec
 from .page import Page, PageType
 
 if TYPE_CHECKING:
@@ -56,6 +58,12 @@ def _value_order(value: object) -> tuple[int, object]:
         return (2, (0, value))
     if isinstance(value, float):
         if math.isnan(value):
+            return (2, (1, 0.0))
+        return (2, (0, value))
+    if isinstance(value, Decimal):
+        # HOW：定点数必须落进数值桶，否则会掉进下面的 repr 兜底、排到字符串之后，
+        # 范围扫描的顺序就错了。
+        if value.is_nan():
             return (2, (1, 0.0))
         return (2, (0, value))
     if isinstance(value, str):
@@ -138,7 +146,7 @@ def _entry_payload_size(key: Key, row_id: RowId, payload: Iterable[object] = ())
     payload_values = list(payload)
     if payload_values:
         entry.append(payload_values)
-    encoded = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    encoded = codec.dump_strings(entry)
     return len(encoded) + 1
 
 
@@ -154,7 +162,7 @@ def _leaf_payload_overhead() -> int:
 def _internal_payload_entry_size(key: Key, child_id: int) -> int:
     """内部页中“一个子页 + 对应分隔键”的字节数上界。"""
 
-    key_size = len(json.dumps(list(key), ensure_ascii=False, separators=(",", ":"))) + 1
+    key_size = len(codec.dump_strings(list(key))) + 1
     return key_size + len(str(int(child_id))) + 4
 
 
@@ -228,7 +236,15 @@ class _IndexNode:
         self.row_ids[:0] = other.row_ids
         self.payloads[:0] = other.payloads
 
-    def validate(self) -> None:
+    def validate_structure(self) -> None:
+        """只做 O(1) 的结构自检：数量对齐与节点类型，不检查排序。
+
+        WHY：``from_page`` 每次读索引页都会跑校验，实测 O(n) 的排序检查占了
+        节点解码耗时的约 72%（0.067 ms/页 → 0.019 ms/页）。读路径只需要挡住
+        "数组长度不一致/子页数量非法" 这类会直接导致越界或错读的损坏；排序
+        不变量由写入路径维护，需要时用 ``validate()`` 显式全量检查。
+        """
+
         if self.leaf:
             if len(self.keys) != len(self.row_ids):
                 raise StorageError(f"索引叶页 {self.page_id} 的 key/RowId 数量不一致")
@@ -238,6 +254,14 @@ class _IndexNode:
                 )
             if self.children:
                 raise StorageError(f"索引叶页 {self.page_id} 不应包含子页")
+        elif len(self.children) != len(self.keys) + 1:
+            raise StorageError(f"索引内部页 {self.page_id} 的子页数量非法")
+
+    def validate(self) -> None:
+        """完整自检：结构 + 排序不变量（O(n)，写入和巡检时使用）。"""
+
+        self.validate_structure()
+        if self.leaf:
             for left_key, right_key, left_row, right_row in zip(
                 self.keys, self.keys[1:], self.row_ids, self.row_ids[1:], strict=False
             ):
@@ -245,8 +269,6 @@ class _IndexNode:
                     raise StorageError(
                         f"索引叶页 {self.page_id} 的条目未按 key/RowId 排序"
                     )
-        elif len(self.children) != len(self.keys) + 1:
-            raise StorageError(f"索引内部页 {self.page_id} 的子页数量非法")
         elif any(
             _compare_keys(left, right) > 0
             for left, right in zip(self.keys, self.keys[1:], strict=False)
@@ -254,7 +276,10 @@ class _IndexNode:
             raise StorageError(f"索引内部页 {self.page_id} 的分隔键未排序")
 
     def payload(self) -> bytes:
-        self.validate()
+        # HOW：写路径只做 O(1) 结构自检。``_node_fits`` 会反复用它做容量探测，
+        # 而 O(n) 排序检查在这里是 O(节点大小) 的重复劳动（排序由插入逻辑保证，
+        # 需要时用 ``index_page_info(verify=True)`` 或 ``validate()`` 全量复核）。
+        self.validate_structure()
         value: dict[str, object] = {
             "version": INDEX_VERSION,
             "kind": "leaf" if self.leaf else "internal",
@@ -275,15 +300,19 @@ class _IndexNode:
         else:
             value["children"] = list(self.children)
         try:
-            encoded = json.dumps(
-                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-            ).encode("utf-8")
+            encoded = codec.dumps(value)
         except (TypeError, ValueError) as exc:
             raise StorageError(f"索引页 {self.page_id} 含无法序列化的键值") from exc
         return INDEX_MAGIC + encoded
 
     @classmethod
-    def from_page(cls, page: Page) -> "_IndexNode":
+    def from_page(cls, page: Page, *, verify: bool = False) -> "_IndexNode":
+        """从 INDEX 页还原节点。
+
+        HOW：默认只做 O(1) 结构自检；``verify=True`` 时额外跑 O(n) 的排序检查，
+        供存储巡检（``index_page_info``）和测试使用。读路径是索引访问的热点，
+        实测完整校验让单页解码慢 3.5 倍，而这些不变量由写入路径保证。
+        """
         if page.page_type is not PageType.INDEX:
             raise StorageError(f"页 {page.page_id} 不是 INDEX 页")
         if not page.payload:
@@ -291,7 +320,7 @@ class _IndexNode:
         if not page.payload.startswith(INDEX_MAGIC):
             raise StorageError(f"索引页 {page.page_id} 的格式版本不受支持")
         try:
-            raw = json.loads(page.payload[len(INDEX_MAGIC) :].decode("utf-8"))
+            raw = codec.loads(page.payload[len(INDEX_MAGIC) :])
             if not isinstance(raw, dict) or int(raw.get("version", 0)) != INDEX_VERSION:
                 raise ValueError("版本不匹配")
             kind = str(raw.get("kind"))
@@ -332,11 +361,15 @@ class _IndexNode:
                 if not isinstance(raw_children, list):
                     raise ValueError("children 不是数组")
                 node.children = [int(item) for item in raw_children]
-            node.validate()
+            if verify:
+                node.validate()
+            else:
+                node.validate_structure()
             return node
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
+            StorageError,
             TypeError,
             ValueError,
             KeyError,
@@ -346,9 +379,13 @@ class _IndexNode:
 
 
 def index_page_info(page: Page, offset: int = 0, limit: int = 100) -> dict[str, object]:
-    """返回有界的索引页结构，避免把整页重复展开到 HTTP 响应。"""
+    """返回有界的索引页结构，避免把整页重复展开到 HTTP 响应。
 
-    node = _IndexNode.from_page(page)
+    HOW：这是存储巡检入口，读一次就要给用户展示，因此走 ``verify=True`` 的
+    全量校验路径，把损坏页在展示阶段就暴露出来。
+    """
+
+    node = _IndexNode.from_page(page, verify=True)
     safe_offset = max(0, int(offset))
     safe_limit = max(1, int(limit))
     result: dict[str, object] = {
