@@ -5,31 +5,41 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import cmp_to_key
+from itertools import repeat
 from operator import itemgetter
 from typing import Callable, Iterable, Protocol
 
 from ..common import (
+    BinderError,
     CatalogError,
+    Column,
+    DataType,
     ExecutionError,
     ExecutionResult,
     Schema,
+    Value,
     compare_values,
     sql_truth,
 )
 from ..common.types import PageId, RowId
-from .evaluator import _AMBIGUOUS, _MISSING, constant_value
+from .evaluator import _AGGREGATE_NAMES, _AMBIGUOUS, _MISSING, constant_value
 from ..sql.ast import (
     BetweenPredicate,
     BinaryOp,
+    CaseExpression,
     ColumnRef,
+    ExistsPredicate,
     Expr,
     FunctionCall,
     InPredicate,
     IsNull,
+    Literal,
     Select,
+    SelectItem,
     Star,
     Subquery,
     TableRef,
+    UnaryOp,
 )
 from ..engine.catalog import IndexMetadata, TableMetadata, ViewMetadata
 from ..common.trace import ExecutionTrace, current_trace
@@ -44,6 +54,21 @@ _JOIN_NESTED_LOOP_PAIR_COST = (
 # HOW：哈希建侧的内存上限（行上下文实测 464 B/行）；超了就改用索引连接或嵌套循环。
 _JOIN_HASH_MEMORY_BUDGET = 256 * 1024 * 1024
 _JOIN_CONTEXT_BYTES = 464
+# HOW：派生表/CTE 没有统计信息，用中性估计值参与连接策略选择。
+_DERIVED_ROW_ESTIMATE = 1000
+
+
+def _key_is_usable(key: tuple[object, ...]) -> bool:
+    """连接键是否可用于哈希探测 / 索引查找。
+
+    WHY：NULL 与缺失值天然不匹配；``_AMBIGUOUS`` 表示裸列名在多表合并后归属不明，
+    拿它当连接键会静默失配（结果整片归零），必须显式排除。
+    """
+
+    return all(
+        value is not None and value is not _MISSING and value is not _AMBIGUOUS
+        for value in key
+    )
 
 
 class _RowLookup(Protocol):
@@ -101,17 +126,21 @@ def _collect_column_ref_nodes(value: object, sink: list[ColumnRef]) -> bool:
     if isinstance(value, ColumnRef):
         sink.append(value)
         return False
-    if isinstance(value, Subquery):
+    # HOW：EXISTS 与括号子查询一样内嵌一条 SELECT，只能在完整行上下文里求值；
+    # 漏判会让它被下推到 `_RowView` 预过滤，那里拿不到外层列也没有 items()。
+    if isinstance(value, (Subquery, ExistsPredicate)):
         return True
+    if isinstance(value, (list, tuple)):
+        # HOW：先递归进序列再判 dataclass——CASE 的 branches 是「元组的元组」，
+        # 只按 dataclass 字段浅层遍历会整块跳过分支里的列引用。
+        found = False
+        for item in value:
+            found |= _collect_column_ref_nodes(item, sink)
+        return found
     if is_dataclass(value):
         found = False
         for field in fields(value):
             found |= _collect_column_ref_nodes(getattr(value, field.name), sink)
-        return found
-    if isinstance(value, (list, tuple)):
-        found = False
-        for item in value:
-            found |= _collect_column_ref_nodes(item, sink)
         return found
     return False
 
@@ -119,7 +148,7 @@ def _collect_column_ref_nodes(value: object, sink: list[ColumnRef]) -> bool:
 def _collect_column_refs(value: object, sink: set[str]) -> bool:
     """递归收集表达式引用的列名（含限定名，均小写），返回是否遇到 `*`。
 
-    HOW：按 dataclass 字段泛化遍历，新增 AST 节点类型无需同步修改。
+    HOW：按 dataclass 字段与嵌套序列泛化遍历，新增 AST 节点类型无需同步修改。
     """
 
     if isinstance(value, ColumnRef):
@@ -130,17 +159,59 @@ def _collect_column_refs(value: object, sink: set[str]) -> bool:
         return False
     if isinstance(value, Star):
         return True
-    if is_dataclass(value):
-        found = False
-        for field in fields(value):
-            found |= _collect_column_refs(getattr(value, field.name), sink)
-        return found
     if isinstance(value, (list, tuple)):
         found = False
         for item in value:
             found |= _collect_column_refs(item, sink)
         return found
+    if is_dataclass(value):
+        found = False
+        for field in fields(value):
+            found |= _collect_column_refs(getattr(value, field.name), sink)
+        return found
     return False
+
+
+def _collect_projection_needs(value: object, sink: set[str]) -> bool:
+    """收集投影/聚合表达式真正需要的列名；返回是否遇到"展开全部列"的 `*`。
+
+    WHY：`COUNT(*)` 里的 `Star` 只是"数行数"的占位，与 `SELECT *` 不是一回事。
+    早先两者共用同一个递归收集器，于是 `SELECT COUNT(*) FROM lineitem` 被判成
+    "需要全部列"，每行都要构造 32 键的全列上下文——实测占单次计数全表查询的
+    约三成耗时。这里只在进入聚合函数参数时忽略 `Star`，其余位置照旧。
+    """
+
+    if isinstance(value, (ColumnRef, Star)):
+        # HOW：ColumnRef/Star 本身是 dataclass，必须先拦下，否则会被当成普通节点
+        # 展开字段遍历，列名与 `*` 都收集不到。
+        return _collect_column_refs(value, sink)
+    if isinstance(value, FunctionCall) and value.name.lower() in _AGGREGATE_NAMES:
+        found = False
+        for argument in value.args:
+            if isinstance(argument, Star):
+                # COUNT(*) 只数行数，不取任何列值。
+                continue
+            found |= _collect_column_refs(argument, sink)
+        return found
+    if isinstance(value, (list, tuple)):
+        found = False
+        for item in value:
+            found |= _collect_projection_needs(item, sink)
+        return found
+    if is_dataclass(value):
+        found = False
+        for field in fields(value):
+            found |= _collect_projection_needs(getattr(value, field.name), sink)
+        return found
+    return False
+
+
+@dataclass(frozen=True)
+class _DerivedRelation:
+    """派生表/CTE 在内存中的关系描述；只提供 ``schema``，没有数据页。"""
+
+    name: str
+    schema: Schema
 
 
 @dataclass
@@ -164,7 +235,14 @@ class QueryExecutionMixin:
         *,
         plan: _PlanNodeLike | None = None,
         allow_system_tables: bool = False,
+        outer: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
+        """执行一条 SELECT。
+
+        HOW：``outer`` 是相关子查询的外层行上下文。传入时每行上下文会把外层值作为
+        兜底合并进来，使子查询里引用外层表的列也能求值；不相关子查询不传，零额外开销。
+        """
+
         trace = current_trace.get()
         if trace is not None:
             trace.check()
@@ -174,9 +252,15 @@ class QueryExecutionMixin:
         self._join_kinds = []
         if statement.union is not None:
             left = self._execute_select(
-                replace(statement, union=None), output_columns, plan=plan
+                replace(statement, union=None),
+                output_columns,
+                plan=plan,
+                allow_system_tables=allow_system_tables,
+                outer=outer,
             )
-            right = self._execute_select(statement.union)
+            right = self._execute_select(
+                statement.union, output_columns, outer=outer
+            )
             rows = [*left.rows, *right.rows]
             if not statement.union_all:
                 rows = list(dict.fromkeys(rows))
@@ -206,11 +290,13 @@ class QueryExecutionMixin:
                 scanned += 1
                 yield item
 
-        contexts: Iterable[dict[str, object]] = _count(
-            self._iter_select_contexts(
-                statement, plan=plan, allow_system_tables=allow_system_tables
-            )
+        raw_contexts: Iterable[dict[str, object]] = self._iter_select_contexts(
+            statement,
+            plan=plan,
+            allow_system_tables=allow_system_tables,
+            outer=outer,
         )
+        contexts: Iterable[dict[str, object]] = _count(raw_contexts)
         has_aggregate = any(
             self._contains_aggregate(item.expression) for item in statement.items
         ) or self._contains_aggregate(statement.having)
@@ -226,14 +312,16 @@ class QueryExecutionMixin:
                     trace.step()
                 key = tuple(expression(context) for expression in group_keys)
                 groups.setdefault(key, []).append(context)
-            if has_aggregate and not groups:
+            # HOW：只有"无 GROUP BY 的聚合"才在空输入上产出单行；带 GROUP BY 时
+            # 没有分组键就没有行（标准 SQL 语义），多造一行 NULL 会污染结果。
+            if has_aggregate and not groups and not statement.group_by:
                 groups[()] = []
             grouped_rows: list[dict[str, object]] = []
             for group in groups.values():
                 base = (
                     dict(group[0])
                     if group
-                    else {"__row_order__": [], "__row_ids__": {}}
+                    else self._empty_group_context(statement)
                 )
                 base["__group__"] = group
                 if statement.having is None or sql_truth(having(base)):
@@ -362,11 +450,36 @@ class QueryExecutionMixin:
         *,
         plan: _PlanNodeLike | None = None,
         allow_system_tables: bool = False,
+        outer: Mapping[str, object] | None = None,
     ) -> Iterable[dict[str, object]]:
+        """产出逐行上下文；``outer`` 非空时同时负责把外层值合并为兜底。
+
+        WHY：外层兜底必须在 WHERE 过滤之前合入。相关子查询的谓词（如
+        ``u.id <= t.id``）只有拿到外层值才能求值，而"先过滤再合并"会让
+        ``t.id`` 落到本行的同名列上，把相关谓词算成恒真/恒假。
+        """
+
         if self._plan_contains_kind(plan, "EmptyScan"):
             return []
+        fallback: dict[str, object] = {}
+        if outer:
+            # HOW：外层值只作兜底，且不带 ``__`` 前缀的内部键（row_ids/row_order/schemas）。
+            fallback = {
+                key: value
+                for key, value in outer.items()
+                if not str(key).startswith("__")
+            }
+
+        def _merge(iterable: Iterable[dict[str, object]]) -> Iterable[dict[str, object]]:
+            if not fallback:
+                return iterable
+            return ({**fallback, **context} for context in iterable)
+
+        # HOW：带外层作用域时，按本行视图做的预过滤与覆盖索引直读都不安全——它们拿不到
+        # 外层列，会把 `t.id` 解析成本行的 `id`。相关子查询本来就逐行重跑，这里直接放弃下推。
+        has_outer = bool(fallback)
         needed, row_order = self._needed_context_columns(statement)
-        if statement.from_table is not None and not statement.joins:
+        if statement.from_table is not None and not statement.joins and not has_outer:
             # HOW：覆盖索引直读优先；只在所有被引用列都在索引里时启用，且仍需用 WHERE 过滤残余谓词。
             index_only = self._index_only_contexts(
                 statement.from_table, statement.where, needed
@@ -374,7 +487,7 @@ class QueryExecutionMixin:
             if index_only is not None:
                 self._last_scan_kind = "IndexOnlyScan"
                 if statement.where is None:
-                    return iter(index_only)
+                    return _merge(index_only)
                 predicate = self._compile_expr(statement.where)
                 return (
                     context for context in index_only if sql_truth(predicate(context))
@@ -386,14 +499,21 @@ class QueryExecutionMixin:
             statement.from_table is not None
             and not statement.joins
             and statement.where is not None
+            and not has_outer
         ):
-            where_columns: set[str] = set()
-            if not _collect_column_refs(statement.where, where_columns):
+            # HOW：含子查询/EXISTS 的谓词不能下推到行视图——它们需要完整上下文才能求值。
+            refs: list[ColumnRef] = []
+            if not _collect_column_ref_nodes(statement.where, refs):
+                where_columns: set[str] = set()
+                for ref in refs:
+                    where_columns.add(ref.name.lower())
+                    if ref.table:
+                        where_columns.add(f"{ref.table.lower()}.{ref.name.lower()}")
                 prefilter = self._compile_expr(statement.where)
                 prefilter_needed = frozenset(where_columns)
         scan_plans = self._scan_plans(plan)
         if statement.from_table is None:
-            return iter([{"__row_order__": [], "__row_ids__": {}, "__schemas__": {}}])
+            return _merge([{"__row_order__": [], "__row_ids__": {}, "__schemas__": {}}])
         generated = self._joined_contexts(
             statement,
             scan_plans=scan_plans,
@@ -402,7 +522,9 @@ class QueryExecutionMixin:
             row_order=row_order,
             prefilter=prefilter,
             prefilter_needed=prefilter_needed,
+            pushdown=not has_outer,
         )
+        generated = _merge(generated)
         if statement.where is not None and prefilter is None:
             # HOW：无预过滤（例如带 JOIN）时，WHERE 在流上惰性求值，不再先物化全部连接结果。
             predicate = self._compile_expr(statement.where)
@@ -419,15 +541,19 @@ class QueryExecutionMixin:
         row_order: bool,
         prefilter: Callable[[_RowLookup], object] | None,
         prefilter_needed: frozenset[str],
+        pushdown: bool = True,
     ) -> Iterable[dict[str, object]]:
         """惰性产出逐行上下文：单表扫描与连接都不再全量物化。
 
         HOW：左表（及每个连接的左侧）保持流式；右表需要反复扫描，因此只物化右表。
         RIGHT/FULL 需要在连接结束后知道哪些右行未被匹配，这两种连接类型仍会缓存匹配状态。
+
+        ``pushdown=False``（相关子查询带外层作用域时）关闭所有"按本行视图求值"的
+        谓词下推：这类下推拿不到外层列，会把 ``t.id`` 当成本行的同名列求值。
         """
 
         trace = current_trace.get()
-        primary_plan = scan_plans[0] if scan_plans else None
+        primary_plan = self._plan_for_reference(scan_plans, statement.from_table)
         # HOW：把 WHERE 拆成 AND 原子，能只引用单表的原子直接下推到该表扫描（带 JOIN 时原来只在连接后过滤）。
         atoms = (
             self._conjunction_atoms(statement.where)
@@ -440,20 +566,21 @@ class QueryExecutionMixin:
             statement.from_table,
             *(join.table for join in statement.joins),
         ):
-            columns = self._relation_columns(reference.name)
+            columns = self._relation_columns_of(reference)
             if columns is None:
                 continue
-            scope_columns[reference.name.lower()] = columns
-            if reference.alias:
-                scope_columns[reference.alias.lower()] = columns
-        primary_filter, primary_needed = self._table_prefilter(
-            atoms, statement.from_table
-        )
+            # HOW：只登记生效名（别名优先）。标准 SQL 里别名会遮蔽原表名，绑定层同样只认别名，
+            # 两边保持一致才不会出现"绑定到外层、求值取到内层"的错配。
+            scope_columns[reference.effective_name.lower()] = columns
+        primary_filter: Callable[[_RowLookup], object] | None = None
+        primary_needed: frozenset[str] = frozenset()
+        if pushdown:
+            primary_filter, primary_needed = self._table_prefilter(
+                atoms, statement.from_table
+            )
         contexts: Iterable[dict[str, object]] = self._scan_contexts(
             statement.from_table,
-            self._scan_predicate(
-                scan_plans[0] if scan_plans else None, statement.where
-            ),
+            self._scan_predicate(primary_plan, statement.where),
             scan_plan=primary_plan,
             allow_system_tables=allow_system_tables,
             needed=needed,
@@ -464,21 +591,15 @@ class QueryExecutionMixin:
             else prefilter_needed,
         )
         for join_index, join in enumerate(statement.joins, start=1):
-            join_plan = scan_plans[join_index] if join_index < len(scan_plans) else None
-            join_filter, join_needed = self._table_prefilter(atoms, join.table)
-            right_qualifiers = {
-                join.table.name.lower(),
-                (join.table.alias or "").lower(),
-            } - {""}
-            left_qualifiers = {
-                statement.from_table.name.lower(),
-                (statement.from_table.alias or "").lower(),
-            } - {""}
+            join_plan = self._plan_for_reference(scan_plans, join.table)
+            join_filter: Callable[[_RowLookup], object] | None = None
+            join_needed: frozenset[str] = frozenset()
+            if pushdown:
+                join_filter, join_needed = self._table_prefilter(atoms, join.table)
+            right_qualifiers = {join.table.effective_name.lower()} - {""}
+            left_qualifiers = {statement.from_table.effective_name.lower()} - {""}
             for previous in statement.joins[: join_index - 1]:
-                left_qualifiers |= {
-                    previous.table.name.lower(),
-                    (previous.table.alias or "").lower(),
-                } - {""}
+                left_qualifiers |= {previous.table.effective_name.lower()} - {""}
             on_atoms = (
                 self._conjunction_atoms(join.on)
                 if join.join_type != "CROSS" and join.on is not None
@@ -487,7 +608,7 @@ class QueryExecutionMixin:
             # WHY：逗号连接（`FROM a, b WHERE a.x = b.y`）会被解析成 CROSS 且 ON 为空，
             # 连接条件全在 WHERE 里；只在 INNER/CROSS 下从 WHERE 推断连接键，
             # 外连接的 WHERE 必须在连接之后生效，不能提升为连接条件。
-            inferred = atoms if join.join_type in {"INNER", "CROSS"} else ()
+            inferred = atoms if pushdown and join.join_type in {"INNER", "CROSS"} else ()
             # HOW：先把范围限定到“已就绪的表”（左侧已连接的表 + 当前右表）；
             # 引用后续表的原子留给那一层连接或最后的 WHERE 过滤，否则会报“执行时找不到列”。
             available = left_qualifiers | right_qualifiers
@@ -500,23 +621,28 @@ class QueryExecutionMixin:
                 and scope <= available
             )
             join_atoms = (*on_atoms, *usable_inferred)
-            left_columns = self._relation_columns(statement.from_table.name) or set()
+            left_columns = self._relation_columns_of(statement.from_table) or set()
             for previous in statement.joins[: join_index - 1]:
-                left_columns |= self._relation_columns(previous.table.name) or set()
-            right_columns = self._relation_columns(join.table.name) or set()
+                left_columns |= self._relation_columns_of(previous.table) or set()
+            right_columns = self._relation_columns_of(join.table) or set()
             pairs, residual_atoms = self._join_key_pairs(
                 join_atoms,
                 left_qualifiers,
                 right_qualifiers,
                 left_columns,
                 right_columns,
+                scope_columns,
             )
-            right_only, right_only_needed = self._table_prefilter(
-                residual_atoms, join.table
-            )
-            left_only, _left_needed = self._table_prefilter(
-                residual_atoms, statement.from_table
-            )
+            right_only: Callable[[_RowLookup], object] | None = None
+            right_only_needed: frozenset[str] = frozenset()
+            left_only: Callable[[_RowLookup], object] | None = None
+            if pushdown:
+                right_only, right_only_needed = self._table_prefilter(
+                    residual_atoms, join.table
+                )
+                left_only, _left_needed = self._table_prefilter(
+                    residual_atoms, statement.from_table
+                )
             remaining = residual_atoms
             if right_only is not None:
                 # HOW：已下推到右侧扫描的原子不再重复求值；其余（含左侧相关原子）留作连接后的残余谓词。
@@ -528,17 +654,15 @@ class QueryExecutionMixin:
                 else None
             )
             # HOW：右表在连接列上的索引可用于索引嵌套循环（前导列需与连接键列一致）。
-            join_columns = [pair[1] for pair in pairs]
+            join_columns = [pair[2] for pair in pairs]
             index_metadata = (
                 self._join_index_metadata(join.table, join_columns)
                 if join_columns
                 else None
             )
-            right_rows = int(self.catalog.get_table(join.table.name).stats.row_count)
+            right_rows = self._row_count_of(join.table)
             # HOW：左侧行数按首表统计粗估（左侧可能已被连接放大，这里宁可偏低以便优先选哈希）。
-            left_rows = int(
-                self.catalog.get_table(statement.from_table.name).stats.row_count
-            )
+            left_rows = self._row_count_of(statement.from_table)
             strategy = self._choose_join_strategy(
                 pairs, right_rows, left_rows, index_metadata
             )
@@ -629,6 +753,9 @@ class QueryExecutionMixin:
     ) -> IndexMetadata | None:
         """找出前导列恰好等于连接键列的索引；找不到返回 None。"""
 
+        if reference.is_derived:
+            # 派生表没有索引，只能走哈希或嵌套循环。
+            return None
         try:
             table = self.catalog.get_table(reference.name)
         except CatalogError:
@@ -655,6 +782,219 @@ class QueryExecutionMixin:
                 return None
         return {column.name.lower() for column in relation.schema}
 
+    def _derived_schema(self, reference: TableRef) -> Schema:
+        """派生表/CTE 的输出模式。
+
+        HOW：列名取自子查询的输出名；类型只在能一眼看出时推断（字面量、直接列引用），
+        其余按 VARCHAR 占位——派生表只读，类型不参与强制转换，名称与顺序才是关键。
+        """
+
+        query = reference.query
+        assert query is not None  # noqa: S101 - is_derived 已保证
+        names = self._derived_output_names(query)
+        columns: list[Column] = []
+        for index, (item, name) in enumerate(zip(query.items, names, strict=True)):
+            columns.append(Column(name, self._infer_item_type(query, item, index)))
+        try:
+            return Schema.from_iterable(columns)
+        except ValueError as exc:
+            raise ExecutionError(
+                f"派生表 {reference.effective_name!r} 的输出列名无效: {exc}"
+            ) from exc
+
+    def _derived_output_names(self, query: Select) -> list[str]:
+        """派生表的输出列名；与 ``_output_names`` 同规则，但 `*` 递归展开内层来源。"""
+
+        names: list[str] = []
+        for item in query.items:
+            if isinstance(item.expression, Star):
+                for reference in self._source_refs(query):
+                    if item.expression.table is not None and (
+                        reference.effective_name.lower()
+                        != item.expression.table.lower()
+                    ):
+                        continue
+                    names.extend(self._relation_schema_of(reference).names())
+                continue
+            if item.alias:
+                names.append(item.alias)
+            elif isinstance(item.expression, ColumnRef):
+                names.append(item.expression.name)
+            else:
+                names.append(self._expression_output_name(item.expression))
+        return names
+
+    @staticmethod
+    def _expression_output_name(expression: Expr) -> str:
+        if isinstance(expression, FunctionCall):
+            return expression.name.lower()
+        if isinstance(expression, CaseExpression):
+            return "case"
+        if isinstance(expression, Subquery):
+            return "subquery"
+        return type(expression).__name__.lower()
+
+    @staticmethod
+    def _source_refs(query: Select) -> tuple[TableRef, ...]:
+        refs: list[TableRef] = []
+        if query.from_table is not None:
+            refs.append(query.from_table)
+        refs.extend(join.table for join in query.joins)
+        return tuple(refs)
+
+    def _infer_item_type(self, query: Select, item: SelectItem, index: int) -> DataType:
+        """粗略推断派生表一列的类型；推不出来就按 VARCHAR。"""
+
+        expression = item.expression
+        if isinstance(expression, Literal):
+            inferred = Value.infer(expression.value)
+            return DataType.VARCHAR if inferred.data_type is DataType.NULL else inferred.data_type
+        if isinstance(expression, ColumnRef):
+            for reference in self._source_refs(query):
+                try:
+                    schema = self._relation_schema_of(reference)
+                except (CatalogError, ExecutionError):
+                    continue
+                try:
+                    return schema.column(expression.name).data_type
+                except BinderError:
+                    continue
+        if index is not None and isinstance(expression, (BinaryOp, UnaryOp)):
+            return DataType.VARCHAR
+        return DataType.VARCHAR
+
+    def _relation_schema_of(self, reference: TableRef) -> Schema:
+        """任一 FROM 来源的模式（表 / 视图 / 派生表）。"""
+
+        if reference.is_derived:
+            return self._derived_schema(reference)
+        return self.catalog.get_relation(reference.name).schema
+
+    def _relation_columns_of(self, reference: TableRef) -> set[str] | None:
+        """任一 FROM 来源的列名集合；取不到返回 None。"""
+
+        if reference.is_derived:
+            try:
+                return {column.name.lower() for column in self._derived_schema(reference)}
+            except (ExecutionError, CatalogError, BinderError):
+                return None
+        return self._relation_columns(reference.name)
+
+    def _row_count_of(self, reference: TableRef) -> int:
+        """任一 FROM 来源的行数估计，用于连接策略选择。"""
+
+        if reference.is_derived:
+            # HOW：派生表没有统计信息，用一个中性估计值：太小会误选嵌套循环，
+            # 太大又会让哈希连接的内存预算判断失真。
+            return _DERIVED_ROW_ESTIMATE
+        try:
+            return int(self.catalog.get_table(reference.name).stats.row_count)
+        except CatalogError:
+            return _DERIVED_ROW_ESTIMATE
+
+    def _derived_contexts(
+        self,
+        reference: TableRef,
+        *,
+        allow_system_tables: bool,
+        needed: frozenset[str] | None,
+        row_order: bool,
+        prefilter: Callable[[_RowLookup], object] | None,
+        prefilter_needed: frozenset[str] | None,
+    ) -> Iterable[dict[str, object]]:
+        """执行派生表/CTE 的子查询，把结果行当作普通行上下文产出。
+
+        HOW：派生表不参与谓词下推（`_table_prefilter` 找不到目录元数据会自动放弃），
+        因而这里只需处理「物化 + 按需列裁剪 + 扫描前过滤」。
+        """
+
+        schema = self._derived_schema(reference)
+        relation = _DerivedRelation(reference.effective_name, schema)
+        result = self._execute_select(
+            reference.query,
+            schema.names(),
+            allow_system_tables=allow_system_tables,
+        )
+        trace = current_trace.get()
+        if trace is not None:
+            trace.scans.append(
+                {
+                    "table": reference.effective_name or "<derived>",
+                    "operator": "DerivedScan",
+                    "candidate_rows": len(result.rows),
+                }
+            )
+        template = self._context_template(reference, relation, needed, row_order)
+        view = (
+            self._context_template(reference, relation, prefilter_needed, False)
+            if prefilter is not None
+            else None
+        )
+        for slot_id, row in enumerate(result.rows):
+            if trace is not None:
+                trace.step()
+            typed = tuple(row)
+            if (
+                view is not None
+                and prefilter is not None
+                and not sql_truth(prefilter(_RowView(view.lookup, typed)))
+            ):
+                continue
+            yield self._table_context(
+                reference, typed, RowId(PageId(-1), slot_id), relation, template=template
+            )
+
+    def _empty_group_context(self, statement: Select) -> dict[str, object]:
+        """空输入聚合的基上下文：所有来源列取 NULL。
+
+        WHY：``SELECT o_year, SUM(...) FROM empty GROUP BY o_year`` 要按标准 SQL 返回
+        一行（``NULL`` 分组键 + ``SUM`` 为 NULL），而不是找不到列。此前这里只放内部键，
+        一旦 FROM 为空（或派生表筛出 0 行）投影里的列引用就会抛"执行时找不到列"。
+        """
+
+        context: dict[str, object] = {"__row_order__": [], "__row_ids__": {}}
+        references = [statement.from_table, *(join.table for join in statement.joins)]
+        for reference in references:
+            if reference is None:
+                continue
+            try:
+                nulls = self._null_context(reference, needed=None, row_order=False)
+            except (CatalogError, ExecutionError, BinderError):
+                continue
+            for key, value in nulls.items():
+                if not str(key).startswith("__"):
+                    context.setdefault(key, value)
+        return context
+
+    def _null_context(
+        self,
+        reference: TableRef,
+        *,
+        needed: frozenset[str] | None = None,
+        row_order: bool = True,
+    ) -> dict[str, object]:
+        relation = self._relation_for_reference(reference)
+        row = tuple(None for _column in relation.schema)
+        return self._table_context(
+            reference,
+            row,
+            RowId(PageId(-1), -1),
+            relation,
+            needed=needed,
+            row_order=row_order,
+        )
+
+    def _relation_for_reference(
+        self, reference: TableRef
+    ) -> TableMetadata | ViewMetadata | _DerivedRelation:
+        """把 FROM 来源解析成可提供 ``schema`` 的关系对象。"""
+
+        if reference.is_derived:
+            return _DerivedRelation(
+                reference.effective_name, self._derived_schema(reference)
+            )
+        return self.catalog.get_relation(reference.name)
+
     def _subquery_is_correlated(self, query: Select) -> bool:
         """子查询是否引用外层列（相关子查询）；含嵌套子查询时保守视为相关。"""
 
@@ -663,10 +1003,10 @@ class QueryExecutionMixin:
         for reference in (query.from_table, *(join.table for join in query.joins)):
             if reference is None:
                 continue
-            local.add(reference.name.lower())
-            if reference.alias:
-                local.add(reference.alias.lower())
-            local_columns |= self._relation_columns(reference.name) or set()
+            # HOW：起了别名时原表名在本层不可见，不能再算作"本地"，否则内层
+            # ``t AS u`` 会把外层 ``t.id`` 误判成本层引用，相关子查询退化成一次求值。
+            local.add(reference.effective_name.lower())
+            local_columns |= self._relation_columns_of(reference) or set()
         refs: list[ColumnRef] = []
         if _collect_column_ref_nodes(query, refs):
             return True
@@ -710,25 +1050,32 @@ class QueryExecutionMixin:
         right_qualifiers: set[str],
         left_columns: set[str],
         right_columns: set[str],
-    ) -> tuple[list[tuple[str, str]], tuple[Expr, ...]]:
-        """从连接条件里抽出等值键对（左列, 右列），其余原子作为残余谓词。
+        owners: Mapping[str, set[str]] | None = None,
+    ) -> tuple[list[tuple[str | None, str, str]], tuple[Expr, ...]]:
+        """从连接条件里抽出等值键对（左归属, 左列, 右列），其余原子作为残余谓词。
 
         HOW：同时处理两种写法——`JOIN ... ON a = b` 与逗号连接 `FROM a, b WHERE a.x = b.y`
         （后者解析成 CROSS 连接，谓词全在 WHERE 里）；未限定的列名用两侧模式列名判定归属。
+
+        WHY：键对必须带上左列的归属限定符。若只记列名，取值时会退化成裸列名，
+        而自连接（如 TPC-H Q8 里 `nation AS n1, nation AS n2`）会让裸列名变成
+        ``_AMBIGUOUS``，哈希探测静默失配、结果整片归零。``owners`` 是
+        「限定符 → 列名集合」映射，用于给未限定列名定出唯一归属。
         """
 
-        pairs: list[tuple[str, str]] = []
+        pairs: list[tuple[str | None, str, str]] = []
         residual: list[Expr] = []
         for atom in atoms:
             if isinstance(atom, BinaryOp) and atom.operator.upper() == "OR":
                 # WHY：像 Q19 那样把连接键写在每个 OR 分支里（`(p_partkey = l_partkey AND ...) OR ...`）时，
-                # 只有“每个分支都要求的等式”才能当连接键（它是必要条件，哈希连接不会漏行）。
+                # 「每个分支都要求的等式」一定是匹配行的必要条件，哈希连接不会漏行。
                 left_pairs, _left_residual = self._join_key_pairs(
                     self._conjunction_atoms(atom.left),
                     left_qualifiers,
                     right_qualifiers,
                     left_columns,
                     right_columns,
+                    owners,
                 )
                 right_pairs, _right_residual = self._join_key_pairs(
                     self._conjunction_atoms(atom.right),
@@ -736,9 +1083,18 @@ class QueryExecutionMixin:
                     right_qualifiers,
                     left_columns,
                     right_columns,
+                    owners,
                 )
-                common = [pair for pair in left_pairs if pair in right_pairs]
-                pairs.extend(pair for pair in common if pair not in pairs)
+                if left_pairs and right_pairs:
+                    # HOW：两侧分支各自都有等值键时，可以改用「所有分支键的并集」做探测键。
+                    # 理由：满足任一分支的行，必然在该分支配对列上相等，因此并集探测得到的
+                    # 候选集是真实匹配的超集，由残余 OR 谓词做最终判定；反过来若某个分支
+                    # 完全没有等值键（如 `a.x = b.y OR b.z > 5`），并集就会漏掉只满足
+                    # 该分支的行，此时必须退回「分支共同等式」以保证正确性。
+                    candidates = [*left_pairs, *right_pairs]
+                else:
+                    candidates = [pair for pair in left_pairs if pair in right_pairs]
+                pairs.extend(pair for pair in candidates if pair not in pairs)
                 residual.append(atom)
                 continue
             refs: list[ColumnRef] = []
@@ -768,12 +1124,49 @@ class QueryExecutionMixin:
                 right_columns,
             )
             if left_side == "left" and right_side == "right":
-                pairs.append((atom.left.name.lower(), atom.right.name.lower()))
+                pairs.append(
+                    (
+                        self._column_owner(atom.left, left_qualifiers, owners),
+                        atom.left.name.lower(),
+                        atom.right.name.lower(),
+                    )
+                )
             elif left_side == "right" and right_side == "left":
-                pairs.append((atom.right.name.lower(), atom.left.name.lower()))
+                pairs.append(
+                    (
+                        self._column_owner(atom.right, left_qualifiers, owners),
+                        atom.right.name.lower(),
+                        atom.left.name.lower(),
+                    )
+                )
             else:
                 residual.append(atom)
         return pairs, tuple(residual)
+
+    @staticmethod
+    def _column_owner(
+        column: ColumnRef,
+        qualifiers: set[str],
+        owners: Mapping[str, set[str]] | None,
+    ) -> str | None:
+        """列引用在指定一侧的归属限定符；无法唯一确定时返回 None。
+
+        HOW：写了限定符就直接用它（``_column_side`` 已确认它在正确的一侧）；
+        没写限定符时，用 ``owners`` 找出该侧唯一拥有这一列名的表。
+        WHY：归属必须唯一，否则宁可放弃键对（退回残余谓词逐行求值）也不能猜错表。
+        """
+
+        if column.table:
+            return column.table.lower()
+        if not owners:
+            return None
+        name = column.name.lower()
+        matches = [
+            qualifier
+            for qualifier in sorted(qualifiers)
+            if name in {item.lower() for item in owners.get(qualifier, ())}
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     @staticmethod
     def _column_side(
@@ -802,26 +1195,39 @@ class QueryExecutionMixin:
 
     @staticmethod
     def _compile_key_extractor(
-        pairs: tuple[tuple[str, str], ...],
+        pairs: tuple[tuple[str | None, str, str], ...],
         reference: TableRef,
         *,
         side: str,
     ) -> Callable[[dict[str, object]], tuple[object, ...]]:
-        """把连接键编译成从上下文取值的闭包；side 决定取 left 还是 right 列。"""
+        """把连接键编译成从上下文取值的闭包；side 决定取 left 还是 right 列。
+
+        HOW：左列优先用键对里记录的归属限定符（``pair[0]``）取值；只有归属未知时
+        才退回「本侧表名」和裸列名。右列固定属于连接右表，沿用 ``reference``。
+        WHY：多表连接（尤其自连接）里裸列名会被 ``_merge_context`` 标成 ``_AMBIGUOUS``，
+        拿它当连接键会静默失配，所以限定符优先、裸列名只作最后兜底。
+        """
 
         alias = (reference.alias or reference.name).lower()
         table_name = reference.name.lower()
-        index = 0 if side == "left" else 1
-        keys = tuple(f"{alias}.{pair[index]}" for pair in pairs)
-        fallback = tuple(f"{table_name}.{pair[index]}" for pair in pairs)
-        bare = tuple(pair[index] for pair in pairs)
+        if side == "left":
+            primary = tuple(
+                (f"{pair[0]}.{pair[1]}" if pair[0] else f"{alias}.{pair[1]}")
+                for pair in pairs
+            )
+            fallback = tuple(f"{table_name}.{pair[1]}" for pair in pairs)
+            bare = tuple(pair[1] for pair in pairs)
+        else:
+            primary = tuple(f"{alias}.{pair[2]}" for pair in pairs)
+            fallback = tuple(f"{table_name}.{pair[2]}" for pair in pairs)
+            bare = tuple(pair[2] for pair in pairs)
 
         def extract(context: dict[str, object]) -> tuple[object, ...]:
             values = []
-            for primary, secondary, plain in zip(keys, fallback, bare, strict=True):
-                value = context.get(primary, _MISSING)
+            for first, second, plain in zip(primary, fallback, bare, strict=True):
+                value = context.get(first, _MISSING)
                 if value is _MISSING:
-                    value = context.get(secondary, _MISSING)
+                    value = context.get(second, _MISSING)
                 if value is _MISSING:
                     # HOW：逗号连接的连接列常不带限定名，此时上下文里只有裸列名。
                     value = context.get(plain, _MISSING)
@@ -832,7 +1238,7 @@ class QueryExecutionMixin:
 
     def _choose_join_strategy(
         self,
-        pairs: list[tuple[str, str]],
+        pairs: list[tuple[str | None, str, str]],
         right_rows: int,
         left_rows: int | None,
         index_metadata: IndexMetadata | None,
@@ -861,7 +1267,7 @@ class QueryExecutionMixin:
         left_contexts: Iterable[dict[str, object]],
         right: list[dict[str, object]],
         *,
-        pairs: list[tuple[str, str]],
+        pairs: list[tuple[str | None, str, str]],
         residual: Callable[[dict[str, object]], object] | None,
         left_only: Callable[[dict[str, object]], object] | None,
         join_type: str,
@@ -881,7 +1287,7 @@ class QueryExecutionMixin:
         buckets: dict[tuple[object, ...], list[tuple[int, dict[str, object]]]] = {}
         for index, context in enumerate(right):
             key = right_key(context)
-            if any(value is None or value is _MISSING for value in key):
+            if not _key_is_usable(key):
                 continue
             buckets.setdefault(key, []).append((index, context))
         matched_right: set[int] = set()
@@ -891,7 +1297,7 @@ class QueryExecutionMixin:
                 continue
             key = left_key(left_context) if left_key is not None else ()
             matched = False
-            if not any(value is None or value is _MISSING for value in key):
+            if _key_is_usable(key):
                 for index, right_context in buckets.get(key, []):
                     merged = self._merge_context(left_context, right_context)
                     if residual is None or sql_truth(residual(merged)):
@@ -921,7 +1327,7 @@ class QueryExecutionMixin:
         self,
         left_contexts: Iterable[dict[str, object]],
         *,
-        pairs: list[tuple[str, str]],
+        pairs: list[tuple[str | None, str, str]],
         metadata: IndexMetadata,
         join_reference: TableRef,
         from_table: TableRef,
@@ -949,7 +1355,7 @@ class QueryExecutionMixin:
                 continue
             key = left_key(left_context)
             matched = False
-            if not any(value is None or value is _MISSING for value in key):
+            if _key_is_usable(key):
                 constraints = {
                     column: _IndexConstraint(allowed=[value])
                     for column, value in zip(columns, key, strict=True)
@@ -1079,6 +1485,16 @@ class QueryExecutionMixin:
         不通过的行根本不会构建完整上下文，全表扫描的分配成本随之下降。
         """
         trace = current_trace.get()
+        if reference.is_derived:
+            yield from self._derived_contexts(
+                reference,
+                allow_system_tables=allow_system_tables,
+                needed=needed,
+                row_order=row_order,
+                prefilter=prefilter,
+                prefilter_needed=prefilter_needed,
+            )
+            return
         try:
             relation = self.catalog.get_relation(reference.name)
         except CatalogError:
@@ -1133,6 +1549,33 @@ class QueryExecutionMixin:
         effective_predicate = self._fold_constants(
             self._scan_predicate(scan_plan, predicate)
         )
+        if (
+            needed is not None
+            and not needed
+            and not row_order
+            and effective_predicate is None
+            and prefilter is None
+        ):
+            # HOW：既不需要任何列值、也没有谓词时，逐行 JSON 解码与上下文构造全是纯开销；
+            # 改为按页槽目录统计活槽个数，再用同一个只读上下文重复产出。
+            # WHY：`SELECT COUNT(*) FROM lineitem` / `SELECT 1 FROM lineitem` 这类只关心
+            # 行数的全表查询，60,175 行实测 571 ms → 66 ms（口径见
+            # benchmarks/bench_scan_paths.py）；需要列值的查询撞的是解码下限，不走这里。
+            total = heap.count()
+            self._last_scan_kind = "SeqScan"
+            if trace is not None:
+                trace.scans.append(
+                    {
+                        "table": table.name,
+                        "operator": "SeqScan",
+                        "candidate_rows": total,
+                    }
+                )
+            alias = (reference.alias or reference.name).lower()
+            yield from repeat(
+                {"__row_ids__": {}, "__schemas__": {alias: table.schema}}, total
+            )
+            return
         candidates = None
         if scan_plan is None or scan_plan.kind == "IndexScan":
             candidates = self._candidate_row_ids(table, reference, effective_predicate)
@@ -1179,6 +1622,34 @@ class QueryExecutionMixin:
         for child in plan.children:
             result.extend(QueryExecutionMixin._scan_plans(child))
         return result
+
+    @staticmethod
+    def _plan_for_reference(
+        scan_plans: list[_PlanNodeLike], reference: TableRef | None
+    ) -> _PlanNodeLike | None:
+        """按表名/别名找扫描节点。
+
+        WHY：原来按下标取 ``scan_plans[join_index]``。一旦 FROM 里出现派生表（它不出现在
+        扫描节点列表里），下标就会整体错位，可能把另一张表的下推谓词套到错误的扫描上。
+        """
+
+        if reference is None or reference.is_derived or not scan_plans:
+            return None
+        wanted = {
+            reference.name.lower(),
+            (reference.alias or "").lower(),
+            reference.effective_name.lower(),
+        } - {""}
+        for node in scan_plans:
+            table = node.properties.get("table")
+            alias = node.properties.get("alias")
+            candidates = {
+                str(table).lower() if table is not None else "",
+                str(alias).lower() if alias is not None else "",
+            } - {""}
+            if candidates & wanted:
+                return node
+        return None
 
     @staticmethod
     def _plan_contains_kind(plan: _PlanNodeLike | None, kind: str) -> bool:
@@ -1707,18 +2178,22 @@ class QueryExecutionMixin:
             return None, True
         sink: set[str] = set()
         found_star = False
+        # HOW：投影与 HAVING 走"忽略聚合参数里的 `*`"的收集器——`COUNT(*)` 因此不再被
+        # 判成"需要全部列"，列裁剪才会真正收敛到空集；其余子句不可能合法出现聚合。
         for item in statement.items:
-            found_star |= _collect_column_refs(item.expression, sink)
+            found_star |= _collect_projection_needs(item.expression, sink)
         for expression in statement.group_by:
             found_star |= _collect_column_refs(expression, sink)
         for clause in statement.joins:
             found_star |= _collect_column_refs(clause.on, sink)
-        for expression in (statement.where, statement.having):
-            found_star |= _collect_column_refs(expression, sink)
+        if statement.where is not None:
+            found_star |= _collect_column_refs(statement.where, sink)
+        if statement.having is not None:
+            found_star |= _collect_projection_needs(statement.having, sink)
         for order_item in statement.order_by:
             found_star |= _collect_column_refs(order_item.expression, sink)
         if found_star:
-            # `COUNT(*)` 之类只需行数的聚合不引用具名列，但保守退回全列以免漏掉消费点。
+            # 仍遇到定位不到具名列的展开（例如子查询内部的 `*`）：保守退回全列。
             return None, False
         return frozenset(sink), False
 
@@ -1729,7 +2204,12 @@ class QueryExecutionMixin:
         needed: frozenset[str] | None,
         row_order: bool,
     ) -> _RowContextTemplate:
-        """获取（或建立）行上下文模板；限定名与裸列名去重后保持 schema 顺序。"""
+        """获取（或建立）行上下文模板；限定名与裸列名去重后保持 schema 顺序。
+
+        HOW：表被起了别名时只登记别名，不再登记原表名。标准 SQL 里别名会让原表名
+        在该层不可见；如果两个都登记，相关子查询的 ``t.id``（指外层 t）会被内层
+        ``t AS u`` 自己的行覆盖，把相关谓词算成恒真/恒假。
+        """
 
         alias = (reference.alias or reference.name).lower()
         table_name = reference.name.lower()
@@ -1743,11 +2223,7 @@ class QueryExecutionMixin:
             column_name = column.name.lower()
             if needed is not None and column_name not in needed:
                 continue
-            for candidate in (
-                f"{alias}.{column_name}",
-                f"{table_name}.{column_name}",
-                column_name,
-            ):
+            for candidate in (f"{alias}.{column_name}", column_name):
                 if candidate not in keys:
                     keys.append(candidate)
                     indices.append(index)
@@ -1758,7 +2234,7 @@ class QueryExecutionMixin:
             alias,
             table_name,
             table.schema,
-            {alias: table.schema, table_name: table.schema},
+            {alias: table.schema},
             row_order,
         )
         if len(self._context_templates) > 128:
@@ -1800,24 +2276,6 @@ class QueryExecutionMixin:
                 for column, value in zip(template.schema, row, strict=True)
             ]
         return context
-
-    def _null_context(
-        self,
-        reference: TableRef,
-        *,
-        needed: frozenset[str] | None = None,
-        row_order: bool = True,
-    ) -> dict[str, object]:
-        relation = self.catalog.get_relation(reference.name)
-        row = tuple(None for _column in relation.schema)
-        return self._table_context(
-            reference,
-            row,
-            RowId(PageId(-1), -1),
-            relation,
-            needed=needed,
-            row_order=row_order,
-        )
 
     def _merge_context(
         self, left: dict[str, object], right: dict[str, object]
@@ -1861,31 +2319,27 @@ class QueryExecutionMixin:
 
     def _output_names(self, statement: Select) -> list[str]:
         names: list[str] = []
-        table_refs: list[TableRef] = []
-        if statement.from_table is not None:
-            table_refs.append(statement.from_table)
-        table_refs.extend(join.table for join in statement.joins)
         for item in statement.items:
             if isinstance(item.expression, Star):
-                selected = table_refs
+                selected = self._source_refs(statement)
                 if item.expression.table:
-                    selected = [
+                    selected = tuple(
                         ref
-                        for ref in table_refs
-                        if ref.name.lower() == item.expression.table.lower()
-                        or (ref.alias or "").lower() == item.expression.table.lower()
-                    ]
+                        for ref in selected
+                        if ref.effective_name.lower() == item.expression.table.lower()
+                    )
                 for ref in selected:
-                    relation = self.catalog.get_relation(ref.name)
-                    names.extend(column.name for column in relation.schema)
+                    try:
+                        schema = self._relation_schema_of(ref)
+                    except (CatalogError, ExecutionError, BinderError):
+                        continue
+                    names.extend(column.name for column in schema)
             elif item.alias:
                 names.append(item.alias)
             elif isinstance(item.expression, ColumnRef):
                 names.append(item.expression.name)
-            elif isinstance(item.expression, FunctionCall):
-                names.append(item.expression.name.lower())
             else:
-                names.append(type(item.expression).__name__.lower())
+                names.append(self._expression_output_name(item.expression))
         return names
 
     def _uses_index(self, statement: Select) -> bool:

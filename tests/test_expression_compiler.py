@@ -6,6 +6,7 @@ NULL 传播和错误信息（含行列位置）上完全一致，这里逐例对
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -105,7 +106,8 @@ def test_statement_folding_keeps_constant_and_column_semantics(tmp_path: Path) -
         item = folded.items[0].expression
         assert isinstance(item, BinaryOp) and isinstance(item.left, ColumnRef) and isinstance(item.right, Literal)
         assert folded.where is not None and isinstance(folded.where.right, Literal)
-        assert folded.where.right.value == pytest.approx(0.05)
+        # DECIMAL 字面量走定点：折叠结果就是精确的 0.05，不再有浮点噪声
+        assert folded.where.right.value == Decimal("0.05")
         assert isinstance(folded.where.left, ColumnRef)
         # 原语句未被就地修改（仍是折叠前的结构）
         assert isinstance(statement.items[0].expression.right, Literal)
