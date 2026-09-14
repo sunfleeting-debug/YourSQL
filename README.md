@@ -186,6 +186,8 @@ SSH 场景执行 `python -m yoursql.cli --database demo.db --stdio`，由 OpenSS
 
 审计日志默认写入当前工作目录的 `logs/audit-YYYY-MM-DD.jsonl`，按日期分文件；目录会在首次写入时自动创建。通过 `Database(..., audit_path=...)` 可覆盖默认路径。标准日志配置仍可通过 `configure_logging(..., log_file=...)` 单独指定文件。
 
+工作台性能监控按查询采集排队、编译、执行、结果物化、页 I/O、缓存命中和淘汰数据；默认 `YOURSQL_SLOW_QUERY_MS=500`，超过阈值的查询摘要追加到 `logs/performance-YYYY-MM-DD.jsonl`。监控主指标是端到端 wall time，查询详情另显示优化器的 cost 估算（不是毫秒）。监控样本仅保留在当前服务进程内，重启后清空；`GET /api/monitor/summary`、`GET /api/monitor/queries` 和 `GET /api/monitor/queries/{query_id}` 需要 `SECURITY` 权限，前端“性能监控”工作区直接使用这些接口。SQL 和执行计划遵循工作台现有脱敏/有界返回规则。
+
 ## Web 数据库工作台
 
 构建后的前端由同一个标准库进程托管，原有 `/health`、`/metrics`、`/sql` 保持不变。
@@ -224,6 +226,7 @@ superblock 会记录 `payload_codec`，已有数据库打开时以文件记录�
 - 登录前：`GET /api/databases/available-before-login`、`POST /api/databases/select-before-login|import-before-login`
 - SQL：`POST /api/validate`、`POST /api/queries`、`GET /api/queries/{id}`、`GET /api/queries/{id}/results/{index}`、`POST /api/queries/{id}/cancel`
 - 历史：`GET /api/history`
+- 性能监控：`GET /api/monitor/summary`、`GET /api/monitor/queries`、`GET /api/monitor/queries/{query_id}`
 - 存储：`GET /api/storage`、`GET /api/storage/changes`、`GET /api/storage/pages/{page_id}`、`GET /api/storage/cache`、`POST /api/storage/cache/policy`、`GET /api/storage/indexes`、`GET /api/storage/indexes/{name}`
 
 切换与新建库用 `path` 字段（新建还可传 `page_size`、`buffer_pool_size`、`replacement_policy`）；导入用二进制 `.db` 文件体加 `X-YourSQL-File-Name` 文件名头。缓存响应的 `buffer_pool.eviction_order` 是当前策略下的升序淘汰队列，Pin 中的页不进入队列；拥有 `SECURITY` 权限时可在线切换 LRU/FIFO，切换不清空已有缓存帧，从下一次淘汰开始生效。

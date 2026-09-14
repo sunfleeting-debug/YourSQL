@@ -25,6 +25,7 @@ from yoursql.engine.services.inspection import (
 )
 from yoursql.engine.services.ssh import SSHAdapterError, SSHCommandClient, SSHStdioServer, serve_ssh_stdio
 from yoursql.engine.services.workbench import QueryTask, WebSession, Workbench
+from yoursql.engine.services.monitoring import PerformanceMonitor
 from yoursql.engine.services.workbench_sql import MAX_SQL, SQLSlice, redact_sql, split_sql
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "SSHStdioServer",
     "WebSession",
     "Workbench",
+    "PerformanceMonitor",
     "authorize_storage",
     "inspect_index",
     "inspect_page",

@@ -522,6 +522,28 @@ def test_storage_refresh_endpoints_are_incremental_and_readonly(service) -> None
     assert any(page["page_id"] == student_page for page in changes_after["pages"])
 
 
+def test_performance_monitor_routes_expose_query_and_storage_diagnostics(service) -> None:
+    """登录后的管理用户可以通过 HTTP 读取查询监控和缓存事件。"""
+    _, _, client = service
+    client.login()
+    task = client.query("SELECT id FROM student")
+
+    status, summary_response = client.request("/api/monitor/summary")
+    assert status == 200
+    summary = summary_response["data"]
+    assert summary["sampled_queries"] >= 1
+    assert "storage_events" in summary
+
+    status, queries_response = client.request("/api/monitor/queries?limit=1")
+    assert status == 200
+    assert queries_response["data"]["total"] >= 1
+    query_id = f'{task["id"]}:0'
+    status, detail_response = client.request(f"/api/monitor/queries/{query_id}")
+    assert status == 200
+    assert detail_response["data"]["query_id"] == query_id
+    assert detail_response["data"]["stages"]
+
+
 def test_storage_replacement_policy_can_be_switched_without_resetting_cache(service) -> None:
     database, _, client = service
     client.login()

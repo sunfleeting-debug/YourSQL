@@ -11,6 +11,7 @@ import { siblingDatabasePath } from './components/database/utils'
 import { QueryWorkspace } from './components/query'
 import { SchemaBrowser } from './components/schema'
 import { StoragePanel } from './components/storage'
+import { PerformancePanel } from './components/monitoring'
 import WorkbenchStatusBar from './components/layout/WorkbenchStatusBar'
 import { currentStatement, formatSQL } from './sql'
 import { workbenchClassName } from './view-classes'
@@ -514,6 +515,7 @@ export default function App() {
       setStorageVisited(true)
       setPipelineOpen(false)
     }
+    if (mode === 'monitor') setPipelineOpen(false)
     startModeTransition(() => setWorkspaceMode(mode))
   }
   function beginPipelineResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -619,6 +621,11 @@ export default function App() {
                     />
                   </div>
                 )
+              }
+              performancePane={
+                <div className="workspace-pane" hidden={workspaceMode !== 'monitor'}>
+                  <PerformancePanel active={workspaceMode === 'monitor'} />
+                </div>
               }
               editorRef={editor}
               onToggleSidebar={() => setLeftOpen(open => !open)}

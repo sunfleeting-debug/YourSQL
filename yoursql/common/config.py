@@ -184,6 +184,7 @@ class RuntimeConfig:
     max_tasks: int = 32
     history_entries: int = 200
     result_retention_bytes: int = 2_000_000
+    slow_query_ms: float = 500
     trace_max_steps: int | None = None
     payload_codec: PayloadCodecName = "json"
     database_config: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -213,6 +214,7 @@ class RuntimeConfig:
             result_retention_bytes=_env_int(
                 "YOURSQL_RESULT_RETENTION_BYTES", 2_000_000
             ),
+            slow_query_ms=_env_float("YOURSQL_SLOW_QUERY_MS", cls.slow_query_ms),
             trace_max_steps=_env_optional_int("YOURSQL_TRACE_MAX_STEPS"),
             payload_codec=_env_payload_codec(),
             database_config=DatabaseConfig.from_environment(),
@@ -253,6 +255,7 @@ class RuntimeConfig:
             "max_tasks": self.max_tasks,
             "history_entries": self.history_entries,
             "result_retention_bytes": self.result_retention_bytes,
+            "slow_query_ms": self.slow_query_ms,
         }
         invalid = next(
             (name for name, value in positive_limits.items() if value <= 0), None

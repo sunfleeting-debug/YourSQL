@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from threading import RLock
 from typing import Iterator
 
@@ -153,6 +154,7 @@ class BufferPool:
         self._evictions = 0
         self._revision = 0
         self._change_log: deque[tuple[int, int]] = deque(maxlen=4096)
+        self._event_log: deque[dict[str, object]] = deque(maxlen=4096)
         self._lock = RLock()
 
     @property
@@ -196,6 +198,19 @@ class BufferPool:
         self._revision += 1
         self._change_log.append((self._revision, int(page_id)))
 
+    def _record_event(self, action: str, page_id: int, **details: object) -> None:
+        """记录可供查询诊断查看的缓存事件。"""
+        event = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "page_id": int(page_id),
+            **details,
+        }
+        self._event_log.append(event)
+        trace = current_trace.get()
+        if trace is not None:
+            trace.event(action, int(page_id), **details)
+
     def _eviction_order_locked(self) -> list[int]:
         """返回当前可淘汰页的优先级；列表首项下一次最先被淘汰。"""
 
@@ -226,10 +241,19 @@ class BufferPool:
         if victim is None:
             raise StorageError("缓存已满且所有页都被 pin")
         page_id, frame = victim
+        writeback = frame.dirty
         if frame.dirty:
             self.disk.write(frame.page)
         del self._frames[page_id]
         self._evictions += 1
+        self._record_event(
+            "evict",
+            page_id,
+            dirty=writeback,
+            writeback=writeback,
+            policy=self.replacement_policy,
+            reason="capacity",
+        )
 
     def get_page(self, page_id: int, pin: bool = True) -> Page:
         """按页号读取缓存页。"""
@@ -366,6 +390,13 @@ class BufferPool:
                 limit=limit,
                 revision=self._revision,
             )
+
+    def events(self, limit: int = 100) -> list[dict[str, object]]:
+        """【前端特供】返回最近缓存淘汰事件，不读取磁盘也不改变缓存状态。"""
+        if limit < 1:
+            return []
+        with self._lock:
+            return [dict(event) for event in list(self._event_log)[-limit:]]
 
     def changes_since(self, revision: int) -> ChangeSet:
         """【前端特供】返回指定游标之后变化的页号，不读取磁盘也不触碰替换状态。"""

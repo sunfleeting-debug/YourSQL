@@ -42,6 +42,10 @@ def test_disk_buffer_pool_and_reuse(tmp_path: Path) -> None:
         buffer.unpin(other.page_id)
         assert buffer.stats()["evictions"] == 1
         assert buffer.stats()["misses"] == 2
+        event = buffer.events()[-1]
+        assert event["action"] == "evict"
+        assert event["policy"] == "fifo"
+        assert event["writeback"] is False
 
 
 def test_buffer_snapshot_exposes_eviction_order_for_lru_and_fifo(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 /** 应用页头：连接状态、工作区模式和当前用户操作。 */
 
-import { Braces, Database, FolderOpen, HardDrive, LogOut, ShieldCheck, UserRound } from 'lucide-react'
+import { Activity, Braces, Database, FolderOpen, HardDrive, LogOut, ShieldCheck, UserRound } from 'lucide-react'
 import type { PayloadCodecName, SessionInfo } from '../../types/common'
 import type { WorkspaceMode } from '../../app/types'
 import { statusDotClassName } from '../../view-classes'
@@ -76,6 +76,16 @@ export default function AppHeader({
             >
               <HardDrive size={13} />
               存储检查
+            </button>
+            <button
+              role="tab"
+              aria-selected={workspaceMode === 'monitor'}
+              className={workspaceMode === 'monitor' ? 'active' : ''}
+              onClick={() => onSwitchWorkspaceMode('monitor')}
+              disabled={modePending}
+            >
+              <Activity size={13} />
+              性能监控
             </button>
           </div>
         </nav>

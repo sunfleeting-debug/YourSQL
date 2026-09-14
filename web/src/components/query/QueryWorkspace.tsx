@@ -31,6 +31,7 @@ export interface QueryWorkspaceProps {
   dialect: Dialect | null
   tables: TableMeta[]
   history: History | null
+  performancePane: ReactNode
   pipelineStages: Stage[]
   pipelineOpen: boolean
   pipelineWidth: number
@@ -76,6 +77,7 @@ export default function QueryWorkspace({
   dialect,
   tables,
   history,
+  performancePane,
   pipelineStages,
   pipelineOpen,
   pipelineWidth,
@@ -195,6 +197,7 @@ export default function QueryWorkspace({
           />
         </div>
         {storagePane}
+        {performancePane}
       </div>
       {pipelineOpen && (
         <aside className={pipelineWorkspaceClassName(pipelineResizing)} aria-label="执行流水线工作区">

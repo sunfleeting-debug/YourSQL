@@ -39,6 +39,7 @@ from yoursql.engine.services.workbench_sql import (
     split_sql,
     stage,
 )
+from yoursql.engine.services.monitoring import PerformanceMonitor
 
 __all__ = ["QueryTask", "WebSession", "Workbench", "now"]
 
@@ -46,6 +47,18 @@ __all__ = ["QueryTask", "WebSession", "Workbench", "now"]
 def now() -> str:
     """【前端特供】返回工作台协议使用的标准化时间表示。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _metric_number(value: object) -> float:
+    """读取性能观测中的数字，避免异常产物破坏查询响应。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
+def _metric_integer(value: object) -> int:
+    """读取性能观测中的计数。"""
+    return int(_metric_number(value))
 
 
 @dataclass
@@ -75,6 +88,7 @@ class QueryTask:
     elapsed_ms: float = 0
     cancel: Event = field(default_factory=Event)
     deadline: float = 0
+    submitted_monotonic: float = field(default_factory=monotonic, repr=False)
 
 
 class Workbench:
@@ -94,6 +108,10 @@ class Workbench:
         if session_ttl is not None:
             self.settings = replace(self.settings, session_ttl_seconds=session_ttl)
         self.session_ttl = self.settings.session_ttl_seconds
+        self.monitor = PerformanceMonitor(
+            slow_threshold_ms=self.settings.slow_query_ms,
+            log_dir=Path("logs"),
+        )
         self._sessions: dict[str, WebSession] = {}
         self._tasks: OrderedDict[str, QueryTask] = OrderedDict()
         self._history: dict[str, deque[JsonObject]] = {}
@@ -726,9 +744,9 @@ class Workbench:
                 with self._lock:
                     task.state = "running"
                 remaining_bytes = self.settings.result_retention_bytes
-                for source in split_sql(
+                for statement_index, source in enumerate(split_sql(
                     task.sql, max_statements=self.settings.max_statements
-                ):
+                )):
                     # WHY：默认不截断流水线步数，避免复杂 JOIN 丢失执行信息；可用 YOURSQL_TRACE_MAX_STEPS 恢复上限。
                     trace = ExecutionTrace(
                         min(task.deadline, session.expires_at),
@@ -737,6 +755,7 @@ class Workbench:
                     )
                     stages: list[JsonObject] = []
                     statement_started = perf_counter()
+                    statement_started_at = now()
                     item: JsonObject = {
                         "sql": redact_sql(source.sql),
                         "source": source.location(),
@@ -863,6 +882,18 @@ class Workbench:
                                     "truncated": True,
                                 }
                             )
+                    self._record_performance(
+                        session,
+                        task,
+                        statement_index,
+                        statement_started_at,
+                        item,
+                        queue_wait_ms=(
+                            (started - task.submitted_monotonic) * 1000
+                            if statement_index == 0
+                            else 0.0
+                        ),
+                    )
                     with self._lock:
                         task.results.append(item)
                         self._history.setdefault(
@@ -903,6 +934,88 @@ class Workbench:
                 task.sql = ""  # 执行完成不保留未脱敏源码。
                 task.elapsed_ms = (perf_counter() - started) * 1000
                 session.active_task = None
+
+    def _record_performance(
+        self,
+        session: WebSession,
+        task: QueryTask,
+        statement_index: int,
+        started_at: str,
+        item: JsonObject,
+        *,
+        queue_wait_ms: float,
+    ) -> None:
+        """把单条语句的阶段和访问统计转换为监控观测。"""
+        stages = item.get("stages")
+        stage_items = stages if isinstance(stages, list) else []
+        compile_names = {
+            "tokens",
+            "ast",
+            "binding",
+            "logical_plan",
+            "optimized_plan",
+        }
+        compile_ms = sum(
+            _metric_number(stage_item.get("duration_ms"))
+            for stage_item in stage_items
+            if isinstance(stage_item, dict)
+            and stage_item.get("name") in compile_names
+        )
+        statistics_data: JsonObject = {}
+        for stage_item in reversed(stage_items):
+            if (
+                not isinstance(stage_item, dict)
+                or stage_item.get("name") != "statistics"
+            ):
+                continue
+            data = stage_item.get("data")
+            if isinstance(data, dict):
+                statistics_data = data
+            break
+        result_stats = item.get("stats")
+        result_stats = result_stats if isinstance(result_stats, dict) else {}
+        io_delta = statistics_data.get("io_delta")
+        io_delta = io_delta if isinstance(io_delta, dict) else {}
+        buffer_delta = statistics_data.get("buffer_delta")
+        buffer_delta = buffer_delta if isinstance(buffer_delta, dict) else {}
+        statement_ms = _metric_number(item.get("elapsed_ms"))
+        total_ms = statement_ms + queue_wait_ms
+        execute_ms = _metric_number(item.get("execution_ms"))
+        error = item.get("error")
+        error_code = error.get("code") if isinstance(error, dict) else None
+        observation: JsonObject = {
+            "query_id": f"{task.id}:{statement_index}",
+            "task_id": task.id,
+            "statement_index": statement_index,
+            "user": session.connection.user.name,
+            "sql": item.get("sql", ""),
+            "status": item.get("status", "error"),
+            "started_at": started_at,
+            "finished_at": now(),
+            "total_ms": total_ms,
+            "queue_wait_ms": queue_wait_ms,
+            "compile_ms": compile_ms,
+            "execute_ms": execute_ms,
+            "materialize_ms": max(statement_ms - compile_ms - execute_ms, 0.0),
+            "rows_examined": _metric_integer(result_stats.get("rows_examined")),
+            "rows_returned": _metric_integer(item.get("total_rows")),
+            "affected_rows": _metric_integer(item.get("affected_rows")),
+            "page_reads": _metric_integer(io_delta.get("page_reads")),
+            "page_writes": _metric_integer(io_delta.get("page_writes")),
+            "cache_hits": _metric_integer(buffer_delta.get("hits")),
+            "cache_misses": _metric_integer(buffer_delta.get("misses")),
+            "cache_evictions": _metric_integer(buffer_delta.get("evictions")),
+            "operator": result_stats.get("operator"),
+            "error_code": error_code,
+            "stages": stage_items,
+            "plan": item.get("plan"),
+            "plan_estimate": item.get("plan_estimate"),
+        }
+        try:
+            self.monitor.record(observation)
+        except (TypeError, ValueError, RecursionError):
+            # WHY：监控是旁路能力，某个异常产物不可 JSON 化时不能影响查询提交方。
+            return
 
     @staticmethod
     def _finish_stages(
@@ -1006,6 +1119,29 @@ class Workbench:
                 "limit": limit,
                 "retention": f"服务进程内每个用户最近 {self.settings.history_entries} 条；重启清空；不保存凭据、注释及字面量。",
             }
+
+    def monitoring_summary(self, session: WebSession) -> JsonObject:
+        """【前端特供】返回性能看板摘要和最近缓存淘汰事件。"""
+        with self.connection(session):
+            session.connection.authorize("SECURITY")
+            summary = self.monitor.summary()
+            summary["storage_events"] = self.database.buffer_pool.events(100)
+            summary["storage_policy"] = self.database.buffer_pool.replacement_policy
+            return summary
+
+    def monitoring_queries(
+        self, session: WebSession, *, slow_only: bool, limit: int
+    ) -> JsonObject:
+        """【前端特供】返回性能看板的查询列表。"""
+        with self.connection(session):
+            session.connection.authorize("SECURITY")
+            return self.monitor.queries(slow_only=slow_only, limit=limit)
+
+    def monitoring_detail(self, session: WebSession, query_id: str) -> JsonObject:
+        """【前端特供】返回单条查询的阶段明细和执行计划。"""
+        with self.connection(session):
+            session.connection.authorize("SECURITY")
+            return self.monitor.detail(query_id)
 
     def close(self) -> None:
         """关闭资源并释放关联状态。"""

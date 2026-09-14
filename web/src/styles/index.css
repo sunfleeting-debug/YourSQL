@@ -1,6 +1,7 @@
 @import url('./layout.css');
 @import url('./workbench.css');
 @import url('./schema-browser.css');
+@import url('./monitoring.css');
 :root {
   font-family: Inter, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   color: #202938;

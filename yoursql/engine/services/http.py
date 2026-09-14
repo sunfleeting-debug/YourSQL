@@ -505,6 +505,23 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 )
             elif not post and route == "/api/history":
                 data = workbench.history(session, offset, limit)
+            elif not post and route == "/api/monitor/summary":
+                data = workbench.monitoring_summary(session)
+            elif not post and route == "/api/monitor/queries":
+                slow_only = query.get("slow_only", ["0"])[0].lower() in {
+                    "1",
+                    "true",
+                }
+                data = workbench.monitoring_queries(
+                    session, slow_only=slow_only, limit=min(limit, 500)
+                )
+            elif (
+                not post
+                and len(parts) == 4
+                and parts[1] == "monitor"
+                and parts[2] == "queries"
+            ):
+                data = workbench.monitoring_detail(session, parts[3])
             elif not post and route.startswith("/api/storage"):
                 with workbench.connection(session):
                     if route == "/api/storage":

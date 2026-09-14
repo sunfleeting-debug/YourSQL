@@ -5,7 +5,7 @@ import type { PayloadCodecName } from '../types/common'
 import type { QueryTask } from '../types/query'
 import type { ReplacementPolicy } from '../types/storage'
 
-export type WorkspaceMode = 'sql' | 'storage'
+export type WorkspaceMode = 'sql' | 'storage' | 'monitor'
 export type DatabaseDialogMode = 'open' | 'create'
 
 export interface RunSource {
