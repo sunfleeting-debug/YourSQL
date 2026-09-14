@@ -1002,10 +1002,15 @@ class DatabaseCommandMixin:
                 self._eval_expr(statement.where, context)
             ):
                 targets.append(_DeleteTarget(record.row_id, record.row))
+        touched_page_ids: set[int] = set()
         for target in targets:
             self._update_indexes(table, target.row, target.row_id, insert=False)
             heap.delete(target.row_id)
+            touched_page_ids.add(int(target.row_id.page_id))
             table.row_count = max(0, table.row_count - 1)
+        heap.reclaim_empty_pages(touched_page_ids)
+        table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
+        table.first_page_id = table.page_ids[0] if table.page_ids else None
         return ExecutionResult(
             affected_rows=len(targets), message=f"DELETE {len(targets)}"
         )
@@ -1254,9 +1259,22 @@ class DatabaseCommandMixin:
                 CatalogError(f"索引 {statement.name!r} 不存在"), statement
             )
         self.catalog.drop_index(statement.name)
+        try:
+            # WHY：先提交逻辑删除，再回收物理页；物理回收中断时最多留下孤儿页，
+            # 不能让重启后的目录继续指向已经写成 FREE 的索引根页。
+            self._persist_catalog()
+            self.buffer_pool.flush_all()
+        except Exception:
+            # 目录写入失败时恢复当前进程的目录对象，物理索引仍由 manager 保留。
+            self.catalog.create_index(metadata)
+            raise
         tree = self.index_manager.drop(statement.name)
         if tree is not None:
-            tree.destroy()
+            try:
+                tree.destroy()
+            finally:
+                # 即使物理回收中途失败，内存中也不再暴露已逻辑删除的索引。
+                self.index_manager.drop(statement.name)
         elif metadata.root_page_id is not None:
             # 兼容目录存在但进程内索引尚未加载的异常场景。
             self.buffer_pool.delete_page(int(metadata.root_page_id))

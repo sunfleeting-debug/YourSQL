@@ -7,7 +7,7 @@ export interface RawByteField {
 }
 
 export interface PayloadInspection {
-  kind: 'yspl' | 'index' | 'catalog'
+  kind: 'yspl' | 'index' | 'catalog' | 'free'
   title: string
   summary: string
   fields: RawByteField[]
@@ -16,7 +16,9 @@ export interface PayloadInspection {
 const YSPL_MAGIC = [0x59, 0x53, 0x50, 0x4c]
 const INDEX_MAGIC = [0x4d, 0x42, 0x49, 0x58]
 const CATALOG_MAGIC = [0x4d, 0x43, 0x41, 0x54, 0x32]
+const FREE_MAGIC = [0x4d, 0x46, 0x52, 0x31]
 const CATALOG_CHAIN_HEADER_SIZE = CATALOG_MAGIC.length + 8
+const FREE_CHAIN_HEADER_SIZE = FREE_MAGIC.length + 8
 
 function formatHex(bytes: number[]): string {
   return bytes.map(value => value.toString(16).padStart(2, '0')).join(' ')
@@ -85,6 +87,41 @@ function catalogEncoding(bytes: number[]): string {
 function catalogChainTarget(bytes: number[]): string {
   const nextPageId = littleEndianUint64(bytes)
   return nextPageId === 0n ? '链尾（0）' : `#${nextPageId.toString()}`
+}
+
+function freeChainTarget(bytes: number[]): string {
+  const nextPageId = littleEndianUint64(bytes)
+  return nextPageId === 0n ? '链尾（NULL）' : `#${nextPageId.toString()}`
+}
+
+/** 解析 FREE 页的 MFR1 + uint64 后继指针，供页面详情直接显示 free-list 链路。 */
+export function inspectFreePagePayload(bytes: number[], masked = false): PayloadInspection | null {
+  if (masked || bytes.length < FREE_MAGIC.length || !FREE_MAGIC.every((value, index) => bytes[index] === value)) return null
+
+  const fields: RawByteField[] = [{ label: '魔数', value: `${formatHex(FREE_MAGIC)} · MFR1` }]
+  if (bytes.length < FREE_CHAIN_HEADER_SIZE) {
+    return {
+      kind: 'free',
+      title: 'MFR1 空闲页链指针',
+      summary: '已识别 FREE 页魔数，但后继页号不完整',
+      fields: [...fields, { label: '链头', value: `${bytes.length} / ${FREE_CHAIN_HEADER_SIZE} B` }]
+    }
+  }
+
+  const nextPageBytes = bytes.slice(FREE_MAGIC.length, FREE_CHAIN_HEADER_SIZE)
+  fields.push(
+    { label: '链头', value: `${FREE_CHAIN_HEADER_SIZE} B · MFR1 + uint64 小端页号` },
+    { label: '下一空闲页', value: freeChainTarget(nextPageBytes) },
+    { label: '当前 payload', value: `${bytes.length} B` },
+    { label: '解析状态', value: freeChainTarget(nextPageBytes) === '链尾（NULL）' ? '链尾' : '指针有效' }
+  )
+
+  return {
+    kind: 'free',
+    title: 'MFR1 空闲页链指针',
+    summary: freeChainTarget(nextPageBytes) === '链尾（NULL）' ? 'free-list 链尾页' : 'free-list 链中页 · 指向下一空闲页',
+    fields
+  }
 }
 
 function catalogValueSummary(value: JsonValue): string {
@@ -277,7 +314,12 @@ export function inspectYsplPayload(bytes: number[], masked = false): PayloadInsp
   }
 }
 
-/** 统一识别存储页中的 MCAT2 目录链、MBIX 索引与普通 YSPL payload。 */
+/** 统一识别存储页中的 FREE 链、MCAT2 目录链、MBIX 索引与普通 YSPL payload。 */
 export function inspectStoragePayload(bytes: number[], masked = false, pageType?: string): PayloadInspection | null {
-  return inspectCatalogPayload(bytes, masked, pageType === 'catalog') ?? inspectIndexPayload(bytes, masked) ?? inspectYsplPayload(bytes, masked)
+  return (
+    (pageType === 'free' ? inspectFreePagePayload(bytes, masked) : null) ??
+    inspectCatalogPayload(bytes, masked, pageType === 'catalog') ??
+    inspectIndexPayload(bytes, masked) ??
+    inspectYsplPayload(bytes, masked)
+  )
 }

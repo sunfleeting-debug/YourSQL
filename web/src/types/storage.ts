@@ -24,6 +24,11 @@ export interface PageHeader {
   index_node_type?: string
   index_level?: number
   index_key_count?: number
+  free_page_format?: string
+  free_page_next_id?: number | null
+  free_page_next_offset?: number | null
+  free_page_is_tail?: boolean
+  free_page_error?: string
 }
 
 export interface RawPayload {
@@ -136,6 +141,8 @@ export interface StorageSnapshot {
   files: { name: string; size_bytes: number }[]
   free_page_count: number
   free_pages: number[]
+  free_list_head?: number | null
+  free_list_format?: string
   system_tables?: JsonObject[] | 'MASKED'
   storage_revision?: number
   buffer_pool: BufferPoolSnapshot
@@ -155,6 +162,8 @@ export interface StoragePageChanges {
   page_size?: number
   free_pages?: number[]
   free_page_count?: number
+  free_list_head?: number | null
+  free_list_format?: string
   truncated: boolean
   note?: string
 }

@@ -20,6 +20,7 @@ from yoursql.storage.page import (
     Page,
     PageType,
     SlottedPage,
+    decode_free_page_next,
 )
 from yoursql.engine.catalog import TableMetadata
 from yoursql.engine.runtime.database import Database
@@ -172,6 +173,33 @@ def page_header(
             )
         except YourSQLError:
             result.update({"index_format": "unknown", "index_node_type": "corrupt"})
+    elif page.page_type is PageType.FREE:
+        try:
+            next_page_id = decode_free_page_next(page.payload)
+            result.update(
+                {
+                    "free_page_format": (
+                        "linked_page_v1" if page.payload else "legacy_empty"
+                    ),
+                    "free_page_next_id": next_page_id,
+                    "free_page_next_offset": (
+                        None
+                        if next_page_id is None
+                        else next_page_id * page.page_size
+                    ),
+                    "free_page_is_tail": bool(page.payload) and next_page_id is None,
+                }
+            )
+        except YourSQLError as exc:
+            result.update(
+                {
+                    "free_page_format": "corrupt",
+                    "free_page_next_id": None,
+                    "free_page_next_offset": None,
+                    "free_page_is_tail": False,
+                    "free_page_error": str(exc),
+                }
+            )
     if database is not None:
         table = _table_for_page(database, page.page_id)
         if table is not None:
@@ -241,7 +269,9 @@ def storage_snapshot(
         "page_size": disk.page_size,
         "next_page_id": metadata.next_page_id,
         "free_pages": list(metadata.free_pages)[offset : offset + limit],
-        "free_page_count": len(metadata.free_pages),
+        "free_page_count": metadata.free_page_count,
+        "free_list_head": metadata.free_list_head,
+        "free_list_format": metadata.free_list_format,
         "named_pages": dict(metadata.named_pages),
         "system_tables": [table.to_dict() for table in database.catalog.system_tables()]
         if _is_admin(database)
@@ -298,7 +328,9 @@ def storage_page_changes(database: Database, since: int, limit: int) -> JsonObje
         "total": disk.page_count,
         "page_size": disk.page_size,
         "free_pages": list(metadata.free_pages),
-        "free_page_count": len(metadata.free_pages),
+        "free_page_count": metadata.free_page_count,
+        "free_list_head": metadata.free_list_head,
+        "free_list_format": metadata.free_list_format,
         "truncated": False,
     }
 

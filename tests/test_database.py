@@ -4,6 +4,7 @@ import pytest
 
 from yoursql.common import AuthorizationError, BinderError, CatalogError, ExecutionError
 from yoursql.engine.runtime.database import Database
+from yoursql.storage import PageType
 
 
 def test_course_core_sql_and_restart_persistence(tmp_path: Path) -> None:
@@ -22,6 +23,29 @@ def test_course_core_sql_and_restart_persistence(tmp_path: Path) -> None:
         result = db.execute("SELECT * FROM student ORDER BY id;")
         assert result.rows == [(2, "Bob", 17)]
         assert db.execute("SHOW TABLES;").rows == [("student",)]
+
+
+def test_delete_all_rows_reclaims_heap_page_and_reuses_it(tmp_path: Path) -> None:
+    path = tmp_path / "delete-reclaim.db"
+    with Database(path) as db:
+        db.execute("CREATE TABLE t(id INT, name VARCHAR);")
+        db.execute("INSERT INTO t VALUES (1, 'Alice'), (2, 'Bob');")
+        table = db.catalog.get_table("t")
+        page_id = int(table.page_ids[0])
+
+        result = db.execute("DELETE FROM t;")
+
+        assert result.affected_rows == 2
+        assert table.page_ids == []
+        assert table.first_page_id is None
+        assert db.disk.read(page_id).page_type is PageType.FREE
+
+        db.execute("INSERT INTO t VALUES (3, 'Carol');")
+        assert [int(value) for value in table.page_ids] == [page_id]
+        assert db.execute("SELECT * FROM t;").rows == [(3, "Carol")]
+
+    with Database(path) as db:
+        assert db.execute("SELECT * FROM t;").rows == [(3, "Carol")]
 
 
 def test_update_constraints_and_persistence(tmp_path: Path) -> None:

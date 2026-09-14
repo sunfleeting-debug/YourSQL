@@ -556,8 +556,9 @@ class _TreeMutationMixin(_TreeContext):
             if self._destroyed:
                 return
             if self._persistent:
-                for page_id in self._physical_page_ids_unlocked():
-                    self._delete_page(page_id)
+                page_ids = self._physical_page_ids_unlocked()
+                if self._buffer_pool is not None:
+                    self._buffer_pool.delete_pages(page_ids)
             self._keys.clear()
             self._values.clear()
             self._destroyed = True

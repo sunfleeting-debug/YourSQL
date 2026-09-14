@@ -648,6 +648,8 @@ function structureFacts(detail: StoragePageDetail, focus: StructureFocus): PageF
   if (focus === 'superblock') {
     const metadata = recordValue(detail.metadata)
     const freePages = Array.isArray(metadata.free_pages) ? metadata.free_pages : []
+    const freePageCount = typeof metadata.free_page_count === 'number' ? metadata.free_page_count : freePages.length
+    const freeListHead = metadata.free_list_head === null ? '链尾（空）' : textValue(metadata.free_list_head)
     const namedPages = recordValue(metadata.named_pages)
     return [
       { label: '页大小', value: byteValue(metadata.page_size ?? detail.page_size), raw: payloadFact() },
@@ -658,7 +660,9 @@ function structureFacts(detail: StoragePageDetail, focus: StructureFocus): PageF
         raw: payloadFact()
       },
       { label: '下一页号', value: textValue(metadata.next_page_id), code: true, raw: payloadFact() },
-      { label: '空闲页', value: `${freePages.length} 页`, raw: payloadFact() },
+      { label: '空闲页', value: `${freePageCount} 页`, raw: payloadFact() },
+      { label: '空闲链头', value: freeListHead, code: true, raw: payloadFact() },
+      { label: '空闲链格式', value: textValue(metadata.free_list_format), code: true, raw: payloadFact() },
       { label: '命名页', value: `${Object.keys(namedPages).length} 个`, raw: payloadFact() },
       { label: 'Payload', value: byteValue(detail.payload_size), raw: exactFact(detail, 18, 4) },
       { label: '页内空闲', value: byteValue(detail.free_space), raw: derivedFact('页大小 − Payload') },
@@ -1034,7 +1038,11 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
   const slots = detail.slots ?? []
   const layout = detail.physical_layout
   const binaryLayout = layout?.physical === true && layout.format === 'double_ended_v2'
-  const payloadLabel = detail.type === 'catalog' ? '目录链 Payload' : 'Payload'
+  const reusableSlotIds = new Set([
+    ...(layout?.slots ?? []).filter(slot => slot.deleted).map(slot => slot.slot_id),
+    ...slots.filter(slot => slot.deleted).map(slot => slot.slot_id)
+  ])
+  const payloadLabel = detail.type === 'catalog' ? '目录链 Payload' : detail.type === 'free' ? 'Free-list 指针' : 'Payload'
   const viewport = useRef<HTMLDivElement>(null)
   const pan = useRef({ active: false, x: 0, y: 0, left: 0, top: 0 })
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -1345,6 +1353,10 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
               槽目录
             </span>
             <span>
+              <i className="page-key slot-reusable" />
+              可复用槽位
+            </span>
+            <span>
               <i className="page-key record" />
               记录区
             </span>
@@ -1411,6 +1423,7 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
               const partialText = cell.fraction < 1 ? ` · 页尾 ${cell.bytes.length}/${slotWidth} B` : ''
               const segmentKinds = Array.from(new Set(cell.segments.map(segment => segment.kind)))
               const mixedText = segmentKinds.length > 1 ? ` · ${segmentKinds.length} 类边界切分` : ''
+              const cellHasReusableSlot = cell.segments.some(segment => segment.slotIds.some(slotId => reusableSlotIds.has(slotId)))
               const previousCell = cells[cell.index - 1]
               const firstSegment = cell.segments[0]
               const previousSegment = previousCell?.segments[previousCell.segments.length - 1]
@@ -1422,7 +1435,8 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
               const cellTooltip = () => {
                 const range = rangeText(cell.offset, cell.offset + cell.bytes.length - 1)
                 const slots = cell.slotIds.length ? ` · 槽位 ${cell.slotIds.join(', ')}` : ''
-                return `${range} · ${kindLabel(cell.kind)}${slots}${partialText}${mixedText}`
+                const slotState = cellHasReusableSlot ? ' · 可复用槽位' : ''
+                return `${range} · ${kindLabel(cell.kind)}${slotState}${slots}${partialText}${mixedText}`
               }
               const tooltipText = cellTooltip()
               return (
@@ -1439,6 +1453,7 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
                     grouped: groupSelected,
                     hasSlot: cell.slotIds.length > 0,
                     slotLinked: cell.slotIds.some(slotId => slotId === selectedSlotId),
+                    slotReusable: cellHasReusableSlot,
                     partial: cell.fraction < 1,
                     boundary: cellBoundary
                   })}
@@ -1455,7 +1470,12 @@ function PageGrid({ detail, onCellDetail, onSelectTable, onOpenIndex }: Props) {
                     return (
                       <span
                         aria-hidden="true"
-                        className={pageCellSegmentClassName({ kind: segment.kind, masked: segment.masked, boundary })}
+                        className={pageCellSegmentClassName({
+                          kind: segment.kind,
+                          masked: segment.masked,
+                          slotReusable: segment.slotIds.some(slotId => reusableSlotIds.has(slotId)),
+                          boundary
+                        })}
                         key={`${segment.kind}-${segment.offset}-${segmentIndex}`}
                         style={{ left: `${segment.start}%`, width: `${segment.end - segment.start}%` }}
                       />

@@ -12,13 +12,14 @@ export interface PageCellClassNameOptions {
   grouped: boolean
   hasSlot: boolean
   slotLinked: boolean
+  slotReusable?: boolean
   partial: boolean
   boundary?: 'region' | 'slot' | null
 }
 
 /** 页面画布单格：基础类 + 类型 + 选中态 + 边界切分。 */
 export function pageCellClassName(options: PageCellClassNameOptions): string {
-  const { kind, masked, active, grouped, hasSlot, slotLinked, partial, boundary } = options
+  const { kind, masked, active, grouped, hasSlot, slotLinked, slotReusable, partial, boundary } = options
   return classNames(
     'page-cell',
     'page-cell-v2',
@@ -28,6 +29,7 @@ export function pageCellClassName(options: PageCellClassNameOptions): string {
     grouped && 'group-selected',
     hasSlot && 'has-slot',
     slotLinked && 'slot-linked',
+    slotReusable && 'slot-reusable',
     partial && 'partial',
     boundary === 'region' && 'region-boundary',
     boundary === 'slot' && 'slot-boundary'
@@ -35,11 +37,17 @@ export function pageCellClassName(options: PageCellClassNameOptions): string {
 }
 
 /** 单格内部的边界分段块。 */
-export function pageCellSegmentClassName(options: { kind: string; masked: boolean; boundary?: 'region' | 'slot' | null }): string {
+export function pageCellSegmentClassName(options: {
+  kind: string
+  masked: boolean
+  slotReusable?: boolean
+  boundary?: 'region' | 'slot' | null
+}): string {
   return classNames(
     'page-cell-segment',
     options.kind,
     options.masked && 'masked',
+    options.slotReusable && 'slot-reusable',
     options.boundary && 'cut',
     options.boundary === 'region' && 'region-cut',
     options.boundary === 'slot' && 'slot-cut'

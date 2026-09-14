@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { encodeManualPayload } from '../../payload-codec'
-import { inspectCatalogPayload, inspectIndexPayload, inspectStoragePayload, inspectYsplPayload } from './raw-bytes'
+import { inspectCatalogPayload, inspectFreePagePayload, inspectIndexPayload, inspectStoragePayload, inspectYsplPayload } from './raw-bytes'
 
 describe('存储原始字节解析', () => {
   it('解码魔数后的小端长度文本帧', () => {
@@ -18,6 +18,26 @@ describe('存储原始字节解析', () => {
 
     expect(inspection?.title).toBe('YSPL 手写 TLV')
     expect(inspection?.fields).toContainEqual({ label: '解码值', value: '[15,"Hello World"]' })
+  })
+
+  it('解析 MFR1 空闲页的后继指针', () => {
+    const nextPage = [0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    const bytes = [0x4d, 0x46, 0x52, 0x31, ...nextPage]
+
+    const inspection = inspectFreePagePayload(bytes)
+
+    expect(inspection?.title).toBe('MFR1 空闲页链指针')
+    expect(inspection?.fields).toContainEqual({ label: '下一空闲页', value: '#42' })
+    expect(inspectStoragePayload(bytes, false, 'free')?.kind).toBe('free')
+  })
+
+  it('识别 MFR1 链尾页', () => {
+    const bytes = [0x4d, 0x46, 0x52, 0x31, ...Array(8).fill(0)]
+
+    const inspection = inspectFreePagePayload(bytes)
+
+    expect(inspection?.summary).toBe('free-list 链尾页')
+    expect(inspection?.fields).toContainEqual({ label: '下一空闲页', value: '链尾（NULL）' })
   })
 
   it('解析 MBIX 索引页中的手写 payload', () => {

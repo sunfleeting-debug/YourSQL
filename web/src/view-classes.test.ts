@@ -17,12 +17,12 @@ const tokens = (value: string) => value.split(/\s+/).filter(Boolean)
 const referenceCell = (options: Parameters<typeof pageCellClassName>[0]) =>
   `page-cell page-cell-v2 ${options.kind} ${options.masked ? 'masked' : ''} ${options.active ? 'selected' : ''} ${
     options.grouped ? 'group-selected' : ''
-  } ${options.hasSlot ? 'has-slot' : ''} ${options.slotLinked ? 'slot-linked' : ''} ${
+  } ${options.hasSlot ? 'has-slot' : ''} ${options.slotLinked ? 'slot-linked' : ''} ${options.slotReusable ? 'slot-reusable' : ''} ${
     options.partial ? 'partial' : ''
   } ${options.boundary === 'region' ? 'region-boundary' : ''} ${options.boundary === 'slot' ? 'slot-boundary' : ''}`
 
 const referenceSegment = (options: Parameters<typeof pageCellSegmentClassName>[0]) =>
-  `page-cell-segment ${options.kind} ${options.masked ? 'masked' : ''} ${options.boundary ? 'cut' : ''} ${
+  `page-cell-segment ${options.kind} ${options.masked ? 'masked' : ''} ${options.slotReusable ? 'slot-reusable' : ''} ${options.boundary ? 'cut' : ''} ${
     options.boundary === 'region' ? 'region-cut' : ''
   } ${options.boundary === 'slot' ? 'slot-cut' : ''}`
 
@@ -56,6 +56,7 @@ describe('视图类名纯函数', () => {
             grouped: !masked,
             hasSlot: kind === 'record',
             slotLinked: kind === 'record' && masked,
+            slotReusable: kind === 'record' && masked,
             partial: kind === 'free',
             boundary
           }
@@ -67,7 +68,7 @@ describe('视图类名纯函数', () => {
 
   it('分段块、页面方块、地图容器与应用外壳的类名 token 一致', () => {
     for (const boundary of ['region', 'slot', null] as const) {
-      const segment = { kind: 'record', masked: boundary === null, boundary }
+      const segment = { kind: 'record', masked: boundary === null, slotReusable: boundary === null, boundary }
       expect(tokens(pageCellSegmentClassName(segment))).toEqual(tokens(referenceSegment(segment)))
     }
     for (const linked of [true, false]) {

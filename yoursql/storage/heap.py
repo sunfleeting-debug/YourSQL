@@ -209,6 +209,27 @@ class TableHeap:
         self._write_slotted(slotted)
         return True
 
+    def reclaim_empty_pages(self, page_ids: Iterable[int]) -> tuple[int, ...]:
+        """回收指定范围内已没有有效记录的 HEAP 页。"""
+
+        known_page_ids = set(self.page_ids)
+        candidates: list[int] = []
+        for page_id in dict.fromkeys(int(value) for value in page_ids):
+            if page_id not in known_page_ids:
+                continue
+            slotted = self._read_slotted(page_id)
+            if not slotted.live_slots():
+                candidates.append(page_id)
+        if not candidates:
+            return ()
+
+        # WHY：先由 BufferPool 批量写入 FREE 页，再更新表页列表，避免表目录先丢失
+        # 页面而磁盘回收失败时出现悬空或不可追踪的物理页。
+        self.buffer_pool.delete_pages(candidates)
+        reclaimed = set(candidates)
+        self.page_ids[:] = [page_id for page_id in self.page_ids if page_id not in reclaimed]
+        return tuple(candidates)
+
     # HOW: 按页号列表遍历有效槽位，逐条产生记录地址和解码后的字段值。
     def scan(self) -> Iterator[HeapRecord]:
         """按页和槽顺序扫描输入中的有效记录。"""

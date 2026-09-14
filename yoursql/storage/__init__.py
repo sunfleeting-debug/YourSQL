@@ -32,6 +32,8 @@ from yoursql.storage.page import (
     SlottedPageBinary,
     SlottedPageBinaryLayout,
     SlottedPageLayoutInfo,
+    decode_free_page_next,
+    encode_free_page_payload,
 )
 
 __all__ = [
@@ -60,6 +62,8 @@ __all__ = [
     "LiveSlot",
     "SlotEntry",
     "SlotLocation",
+    "decode_free_page_next",
+    "encode_free_page_payload",
     "SingleFileDatabase",
     "SlottedPage",
     "SlottedPageBinary",

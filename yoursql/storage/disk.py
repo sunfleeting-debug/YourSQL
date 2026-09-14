@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -13,7 +14,12 @@ from yoursql.common.codec import PayloadCodec, PayloadCodecName, decode_payload
 from yoursql.common.codec import payload_codec as get_payload_codec
 from yoursql.common.errors import StorageError
 from yoursql.common.trace import current_trace
-from yoursql.storage.page import Page, PageType
+from yoursql.storage.page import (
+    Page,
+    PageType,
+    decode_free_page_next,
+    encode_free_page_payload,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,9 @@ class DiskMetadata:
     next_page_id: int
     free_pages: tuple[int, ...]
     named_pages: Mapping[str, int]
+    free_list_head: int | None
+    free_page_count: int
+    free_list_format: str
 
     def __getitem__(self, key: str) -> object:
         """兼容存储检查适配层的旧映射式读取。"""
@@ -34,7 +43,16 @@ class DiskMetadata:
     def __iter__(self) -> Iterator[str]:
         """返回对象的迭代器。"""
         return iter(
-            ("page_size", "page_count", "next_page_id", "free_pages", "named_pages")
+            (
+                "page_size",
+                "page_count",
+                "next_page_id",
+                "free_pages",
+                "named_pages",
+                "free_list_head",
+                "free_page_count",
+                "free_list_format",
+            )
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -45,6 +63,9 @@ class DiskMetadata:
             "next_page_id": self.next_page_id,
             "free_pages": list(self.free_pages),
             "named_pages": dict(self.named_pages),
+            "free_list_head": self.free_list_head,
+            "free_page_count": self.free_page_count,
+            "free_list_format": self.free_list_format,
         }
 
 
@@ -78,7 +99,7 @@ class DiskIOStats:
 class DiskManager:
     """以固定页大小读写一个数据库文件。"""
 
-    FORMAT_VERSION = 1
+    FORMAT_VERSION = 2
 
     def __init__(
         self,
@@ -99,6 +120,11 @@ class DiskManager:
         exists = self.path.exists() and self.path.stat().st_size > 0
         self._file = self.path.open("r+b" if exists else "w+b")
         self._free_pages: set[int] = set()
+        self._free_page_next: dict[int, int | None] = {}
+        self._free_list_head: int | None = None
+        # HOW：旧版 superblock 仍可能携带 free_pages 数组；首次发生元数据写入时
+        # 再转换为链式布局，避免仅打开旧库就改写文件。
+        self._legacy_free_pages: set[int] = set()
         self._next_page_id = 1
         self._named_pages: dict[str, int] = {}
         if exists:
@@ -127,6 +153,11 @@ class DiskManager:
                 next_page_id=self._next_page_id,
                 free_pages=tuple(sorted(self._free_pages)),
                 named_pages=dict(self._named_pages),
+                free_list_head=self._free_list_head,
+                free_page_count=len(self._free_pages),
+                free_list_format=(
+                    "legacy_array" if self._legacy_free_pages else "linked_page_v1"
+                ),
             )
 
     def _ensure_open(self) -> None:
@@ -165,7 +196,23 @@ class DiskManager:
         if stored_codec != self.payload_codec.name:
             raise StorageError("superblock payload 编码字段与实际编码不一致")
         self._next_page_id = max(1, int(data.get("next_page_id", 1)))
-        self._free_pages = {int(value) for value in data.get("free_pages", [])}
+        if "free_list_head" in data:
+            raw_head = data.get("free_list_head")
+            self._free_list_head = (
+                None if raw_head in {None, 0} else int(raw_head)
+            )
+            declared_count = int(data.get("free_page_count", 0))
+            if declared_count < 0:
+                raise StorageError("superblock 空闲页数量不能为负数")
+            self._load_free_list(declared_count)
+        else:
+            raw_free_pages = data.get("free_pages", [])
+            if not isinstance(raw_free_pages, list):
+                raise StorageError("superblock free_pages 不是数组")
+            self._free_pages = {int(value) for value in raw_free_pages}
+            if any(page_id <= 0 or page_id >= self._next_page_id for page_id in self._free_pages):
+                raise StorageError("superblock free_pages 包含越界页号")
+            self._legacy_free_pages = set(self._free_pages)
         raw_named = data.get("named_pages", {})
         self._named_pages = (
             {str(key): int(value) for key, value in raw_named.items()}
@@ -180,11 +227,66 @@ class DiskManager:
             "version": self.FORMAT_VERSION,
             "page_size": self.page_size,
             "next_page_id": self._next_page_id,
-            "free_pages": sorted(self._free_pages),
+            "free_list_head": self._free_list_head,
+            "free_page_count": len(self._free_pages),
             "named_pages": self._named_pages,
             "payload_codec": self.payload_codec.name,
         }
+        if self._legacy_free_pages:
+            # 只读 peek 需要准确反映尚未迁移的旧页；真正写回前会先完成迁移。
+            data["version"] = 1
+            data.pop("free_list_head")
+            data.pop("free_page_count")
+            data["free_pages"] = sorted(self._legacy_free_pages)
         return self.payload_codec.encode(data)
+
+    def _load_free_list(self, declared_count: int) -> None:
+        """读取并校验链式 free-list。"""
+
+        current = self._free_list_head
+        visited: set[int] = set()
+        while current is not None:
+            if current <= 0 or current >= self._next_page_id:
+                raise StorageError(f"free-list 页号 {current} 越界")
+            if current in visited:
+                raise StorageError("free-list 存在循环")
+            if declared_count and len(visited) >= declared_count:
+                raise StorageError("free-list 实际长度超过 superblock 记录")
+            visited.add(current)
+            page = Page.from_bytes(self._read_raw(current), page_size=self.page_size)
+            if page.page_type is not PageType.FREE:
+                raise StorageError(f"free-list 页 {current} 不是 FREE 页")
+            if page.page_id != current:
+                raise StorageError(f"free-list 页头页号不匹配：文件偏移={current}，页头={page.page_id}")
+            next_page_id = decode_free_page_next(page.payload)
+            self._free_page_next[current] = next_page_id
+            current = next_page_id
+
+        if declared_count != len(visited):
+            raise StorageError(
+                f"free-list 长度不一致，superblock={declared_count}，实际={len(visited)}"
+            )
+        self._free_pages = visited
+
+    def _ensure_linked_free_list(self) -> None:
+        """把旧版 free_pages 数组一次转换为页内后继指针。"""
+
+        if not self._legacy_free_pages:
+            return
+        ordered = sorted(self._legacy_free_pages)
+        for index, page_id in enumerate(ordered):
+            next_page_id = ordered[index + 1] if index + 1 < len(ordered) else None
+            self._write_raw(
+                Page(
+                    page_id,
+                    self.page_size,
+                    PageType.FREE,
+                    encode_free_page_payload(next_page_id),
+                )
+            )
+            self._free_page_next[page_id] = next_page_id
+        self._free_list_head = ordered[0]
+        self._legacy_free_pages.clear()
 
     def _read_raw(self, page_id: int) -> bytes:
         """从数据库文件读取原始页字节。"""
@@ -211,6 +313,7 @@ class DiskManager:
 
     def _write_superblock(self) -> None:
         """将当前 superblock 写回数据库文件。"""
+        self._ensure_linked_free_list()
         self._write_raw(
             Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload())
         )
@@ -234,15 +337,22 @@ class DiskManager:
         """分配新的数据库页。"""
         with self._lock:
             self._ensure_open()
-            if self._free_pages:
-                # WHY：优先复用已释放页可以避免文件无意义增长；取最小页号也让分配结果稳定可复现。
-                page_id = min(self._free_pages)
-                self._free_pages.remove(page_id)
+            self._ensure_linked_free_list()
+            if self._free_list_head is not None:
+                page_id = self._free_list_head
+                next_page_id = self._free_page_next.get(page_id)
+                if page_id not in self._free_pages:
+                    raise StorageError(f"free-list 页 {page_id} 未登记")
             else:
                 # WHY：next_page_id 单调推进，保证新页不会覆盖已有页；文件只扩展、不收缩。
                 page_id = self._next_page_id
-                self._next_page_id += 1
             page = Page(page_id, self.page_size, page_type, payload)
+            if self._free_list_head is not None:
+                self._free_list_head = next_page_id
+                self._free_page_next.pop(page_id, None)
+                self._free_pages.remove(page_id)
+            else:
+                self._next_page_id += 1
             self._write_raw(page)
             # WHY：先写出实际页，再发布分配元数据，避免 superblock 先指向尚未物化的页；
             # 两次写入尚非原子操作，崩溃恢复机制列入 TODO。
@@ -256,12 +366,61 @@ class DiskManager:
             self._check_page_id(page_id)
             if page_id == 0:
                 raise StorageError("不能释放 superblock")
-            # WHY：先将物理页重置为 FREE，再把页号发布到空闲集合，避免元数据已复用而页头仍残留旧类型。
-            self._write_raw(Page.empty(page_id, self.page_size, PageType.FREE))
-            self._free_pages.add(int(page_id))
+            self._ensure_linked_free_list()
+            normalized = int(page_id)
+            if normalized in self._free_pages:
+                raise StorageError(f"页 {page_id} 已经是 FREE 页")
+            # WHY：FREE 页本身携带链表后继，superblock 只需保存链头，避免释放大索引
+            # 时让第 0 页的 JSON 随 free-page 数量膨胀。
+            self._write_raw(
+                Page(
+                    normalized,
+                    self.page_size,
+                    PageType.FREE,
+                    encode_free_page_payload(self._free_list_head),
+                )
+            )
+            self._free_page_next[normalized] = self._free_list_head
+            self._free_pages.add(normalized)
+            self._free_list_head = normalized
             for key, value in tuple(self._named_pages.items()):
                 if value == page_id:
                     # WHY：释放页后清除命名指针，避免 named_pages 指向已回收页。
+                    del self._named_pages[key]
+            self._write_superblock()
+
+    def free_many(self, page_ids: Iterable[int]) -> None:
+        """批量释放页面，并只重写一次 free-list 元数据。"""
+
+        with self._lock:
+            self._ensure_open()
+            normalized_ids = tuple(dict.fromkeys(int(page_id) for page_id in page_ids))
+            if not normalized_ids:
+                return
+            self._ensure_linked_free_list()
+            for page_id in normalized_ids:
+                self._check_page_id(page_id)
+                if page_id == 0:
+                    raise StorageError("不能释放 superblock")
+                if page_id in self._free_pages:
+                    raise StorageError(f"页 {page_id} 已经是 FREE 页")
+
+            next_page_id = self._free_list_head
+            for page_id in normalized_ids:
+                self._write_raw(
+                    Page(
+                        page_id,
+                        self.page_size,
+                        PageType.FREE,
+                        encode_free_page_payload(next_page_id),
+                    )
+                )
+                self._free_page_next[page_id] = next_page_id
+                self._free_pages.add(page_id)
+                next_page_id = page_id
+            self._free_list_head = next_page_id
+            for key, value in tuple(self._named_pages.items()):
+                if value in normalized_ids:
                     del self._named_pages[key]
             self._write_superblock()
 
@@ -305,6 +464,7 @@ class DiskManager:
             self._ensure_open()
             self._check_page_id(page_id)
             if page_id == 0:
+                # WHY：peek 不应改写磁盘；旧版数组会在这里原样展示，首次写入时才迁移。
                 return Page(
                     0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload()
                 )

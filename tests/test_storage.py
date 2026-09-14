@@ -4,6 +4,7 @@ import pytest
 
 from yoursql.common import RowId, StorageError
 from yoursql.storage import BufferPool, DiskManager, Page, PageType, SlottedPage, TableHeap
+from yoursql.storage.page import decode_free_page_next
 
 
 def test_page_round_trip_and_crc(tmp_path: Path) -> None:
@@ -46,6 +47,29 @@ def test_disk_buffer_pool_and_reuse(tmp_path: Path) -> None:
         assert event["action"] == "evict"
         assert event["policy"] == "fifo"
         assert event["writeback"] is False
+
+
+def test_linked_free_list_persists_without_superblock_growth(tmp_path: Path) -> None:
+    path = tmp_path / "linked-free-list.db"
+    with DiskManager(path, page_size=1024) as disk:
+        pages = [disk.allocate(PageType.CATALOG, b"payload") for _ in range(300)]
+        page_ids = [page.page_id for page in pages]
+
+        disk.free_many(page_ids)
+
+        metadata = disk.metadata()
+        assert metadata.free_page_count == len(page_ids)
+        assert metadata.free_list_head == page_ids[-1]
+        assert metadata.free_list_format == "linked_page_v1"
+        assert len(disk.peek(0).payload) < disk.page_size - Page.HEADER_SIZE
+        assert decode_free_page_next(disk.read(page_ids[-1]).payload) == page_ids[-2]
+
+    with DiskManager(path, page_size=1024) as disk:
+        metadata = disk.metadata()
+        assert metadata.free_page_count == len(page_ids)
+        assert metadata.free_list_head == page_ids[-1]
+        reused = disk.allocate(PageType.HEAP, b"reused")
+        assert reused.page_id == page_ids[-1]
 
 
 def test_buffer_snapshot_exposes_eviction_order_for_lru_and_fifo(tmp_path: Path) -> None:
@@ -252,6 +276,37 @@ def test_table_heap_reuses_slots_and_persists(tmp_path: Path) -> None:
         buffer = BufferPool(disk)
         restored = TableHeap(buffer, page_ids)
         assert [row for _rid, row in restored.scan()] == [(3, "Carol"), (2, "Bob")]
+
+
+def test_table_heap_reclaims_empty_pages_into_free_list(tmp_path: Path) -> None:
+    path = tmp_path / "heap-reclaim.db"
+    with DiskManager(path) as disk:
+        buffer = BufferPool(disk, capacity=2)
+        heap = TableHeap(buffer)
+        first = heap.insert((1, "Alice"))
+        second = heap.insert((2, "Bob"))
+        page_id = int(first.page_id)
+        assert int(second.page_id) == page_id
+
+        assert heap.delete(first)
+        assert heap.delete(second)
+        assert heap.reclaim_empty_pages([page_id]) == (page_id,)
+        assert heap.page_ids == []
+        assert disk.read(page_id).page_type is PageType.FREE
+        assert disk.metadata().free_list_head == page_id
+
+
+def test_table_heap_reclaim_ignores_pages_outside_table(tmp_path: Path) -> None:
+    path = tmp_path / "heap-reclaim-filter.db"
+    with DiskManager(path) as disk:
+        buffer = BufferPool(disk, capacity=2)
+        heap = TableHeap(buffer)
+        row_id = heap.insert((1, "Alice"))
+        page_id = int(row_id.page_id)
+
+        assert heap.reclaim_empty_pages([page_id + 100, page_id]) == ()
+        assert heap.page_ids == [page_id]
+        assert disk.read(page_id).page_type is PageType.HEAP
 
 
 def test_double_ended_slotted_page_layout() -> None:

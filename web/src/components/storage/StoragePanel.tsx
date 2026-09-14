@@ -350,19 +350,96 @@ function PageAssociation({
   )
 }
 
-function PagePayloadWorkbench({ detail, jsonDetail, raw }: { detail: StoragePageDetail; jsonDetail: JsonObject | null; raw: RawPayload | null }) {
+function freePageOffset(value: number | null | undefined): string {
+  return typeof value === 'number' ? `0x${value.toString(16)} · ${value.toLocaleString()} B` : '—'
+}
+
+/** 【前端特供】展示 FREE 页的链式后继，并允许从当前页直接定位下一空闲页。 */
+function FreePageInfo({ detail, onSelectPage }: { detail: StoragePageDetail; onSelectPage?: (pageId: string) => void }) {
+  const nextPageId = detail.free_page_next_id
+  const hasNextPage = typeof nextPageId === 'number'
+  const status = detail.free_page_error ?? (hasNextPage ? '指针有效' : detail.free_page_is_tail ? '链尾' : '兼容格式或指针不可用')
+  const layoutText = detail.free_page_format === 'linked_page_v1' ? 'linked_page_v1 · MFR1 + uint64' : (detail.free_page_format ?? '—')
+  return (
+    <section className="selected-payload-special free-page-info" aria-label="空闲页链结构摘要">
+      <div className="selected-payload-special-heading">
+        <strong>空闲页链</strong>
+        <span>FREE 页专用结构</span>
+      </div>
+      <dl>
+        <div>
+          <dt>布局</dt>
+          <dd>
+            <code>{layoutText}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>当前页</dt>
+          <dd>
+            <code>#{detail.page_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>下一空闲页</dt>
+          <dd>
+            {hasNextPage && onSelectPage ? (
+              <button type="button" className="free-page-next-link" onClick={() => onSelectPage(String(nextPageId))}>
+                <code>#{nextPageId}</code>
+                <ArrowRight size={12} />
+              </button>
+            ) : (
+              <code>{hasNextPage ? `#${nextPageId}` : '链尾（NULL）'}</code>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>下一页偏移</dt>
+          <dd>
+            <code>{hasNextPage ? freePageOffset(detail.free_page_next_offset) : '—'}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>状态</dt>
+          <dd>
+            <code>{status}</code>
+          </dd>
+        </div>
+      </dl>
+    </section>
+  )
+}
+
+function PagePayloadWorkbench({
+  detail,
+  jsonDetail,
+  raw,
+  onSelectPage
+}: {
+  detail: StoragePageDetail
+  jsonDetail: JsonObject | null
+  raw: RawPayload | null
+  onSelectPage?: (pageId: string) => void
+}) {
   return (
     <section className="storage-page-workbench" aria-label="页面级信息">
       <div className="storage-page-workbench-heading">
         <strong>页面信息</strong>
       </div>
+      {detail.type === 'free' && <FreePageInfo detail={detail} onSelectPage={onSelectPage} />}
       {jsonDetail && (
         <details className="storage-json-details" open>
           <summary>结构化页字段</summary>
           <JsonTree key={`page-${detail.page_id}`} value={jsonDetail} />
         </details>
       )}
-      {raw && <RawPreview payload={raw} title={detail.type === 'catalog' ? '目录链 Payload' : 'Payload'} pageWide pageType={detail.type} />}
+      {raw && (
+        <RawPreview
+          payload={raw}
+          title={detail.type === 'catalog' ? '目录链 Payload' : detail.type === 'free' ? 'Free-list 指针 Payload' : 'Payload'}
+          pageWide
+          pageType={detail.type}
+        />
+      )}
       {detail.raw_page && <RawPreview payload={detail.raw_page} title="整页字节" pageWide pageType={detail.type} />}
       {detail.note && <p className="hint">{detail.note}</p>}
     </section>
@@ -1215,7 +1292,9 @@ export default function StoragePanel({
           total: value.total ?? current.total,
           page_size: value.page_size ?? current.page_size,
           free_pages: value.free_pages ?? current.free_pages,
-          free_page_count: value.free_page_count ?? current.free_page_count
+          free_page_count: value.free_page_count ?? current.free_page_count,
+          free_list_head: value.free_list_head ?? current.free_list_head,
+          free_list_format: value.free_list_format ?? current.free_list_format
         }
       })
     } catch (error) {
@@ -1762,7 +1841,7 @@ export default function StoragePanel({
                           )}
                         </section>
                       )}
-                      {pageDetail && <PagePayloadWorkbench detail={pageDetail} jsonDetail={jsonDetail} raw={raw} />}
+                      {pageDetail && <PagePayloadWorkbench detail={pageDetail} jsonDetail={jsonDetail} raw={raw} onSelectPage={selectPage} />}
                     </>
                   )}
                   {tab === 'buffer' && currentCache && (
@@ -2014,6 +2093,10 @@ export default function StoragePanel({
                       <p key={note}>{note}</p>
                     ))}
                     <p>空闲页：{snapshot.free_pages.join(', ') || '当前快照范围内无空闲页'}</p>
+                    <p>
+                      空闲链：{snapshot.free_list_format ?? '—'} · 头{' '}
+                      {typeof snapshot.free_list_head === 'number' ? `#${snapshot.free_list_head}` : '链尾（空）'}
+                    </p>
                   </details>
                   <div className="snapshot-time">更新 {new Date(snapshot.snapshot_at).toLocaleTimeString()}</div>
                 </>

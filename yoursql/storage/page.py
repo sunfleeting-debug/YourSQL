@@ -37,6 +37,12 @@ SLOT_ENTRY = struct.Struct("<HHBB")
 SLOT_ENTRY_SIZE = SLOT_ENTRY.size
 SLOT_DELETED = 1
 
+# FREE 页不再是完全空白页，而是保存 free-list 的后继页号。
+# 采用固定二进制布局，避免把空闲页号重新编码成会膨胀的 JSON。
+FREE_PAGE_MAGIC = b"MFR1"
+FREE_PAGE_HEADER = struct.Struct("<4sQ")
+FREE_PAGE_HEADER_SIZE = FREE_PAGE_HEADER.size
+
 
 @dataclass(frozen=True)
 class SlotEntry:
@@ -185,6 +191,28 @@ def _page_type_from_code(code: int) -> PageType:
     if code < 1 or code > len(values):
         raise StorageError(f"未知页类型编码 {code}")
     return values[code - 1]
+
+
+def encode_free_page_payload(next_page_id: int | None) -> bytes:
+    """编码 FREE 页的后继页号；0 表示链尾。"""
+
+    normalized = 0 if next_page_id is None else int(next_page_id)
+    if normalized < 0:
+        raise StorageError("FREE 页后继页号不能为负数")
+    return FREE_PAGE_HEADER.pack(FREE_PAGE_MAGIC, normalized)
+
+
+def decode_free_page_next(payload: bytes) -> int | None:
+    """解析 FREE 页的后继页号；兼容旧版空 FREE 页。"""
+
+    if not payload:
+        return None
+    if len(payload) != FREE_PAGE_HEADER_SIZE:
+        raise StorageError("FREE 页 payload 长度非法")
+    magic, next_page_id = FREE_PAGE_HEADER.unpack(payload)
+    if magic != FREE_PAGE_MAGIC:
+        raise StorageError("FREE 页 magic 非法")
+    return None if next_page_id == 0 else int(next_page_id)
 
 
 @dataclass
