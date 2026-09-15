@@ -3181,6 +3181,10 @@
   background: #d2b26f;
   border-color: #c29d51;
 }
+.full-storage .page-tile.directory {
+  background: #6eb5a7;
+  border-color: #4e9d8d;
+}
 .full-storage .page-tile.free {
   background: #c3ccd2;
   border-color: #aebbc2;
@@ -3647,6 +3651,9 @@
 }
 .full-storage .page-map .page-tile.index {
   --page-color: #be963f;
+}
+.full-storage .page-map .page-tile.directory {
+  --page-color: #5eaa9b;
 }
 .full-storage .page-map .page-tile.free {
   --page-color: #aebbc2;
@@ -6097,6 +6104,38 @@
   font-size: 11px;
   font-weight: 600;
 }
+.directory-page-info {
+  margin-top: 9px;
+}
+.directory-entry-table-wrap {
+  margin-top: 8px;
+  overflow-x: auto;
+}
+.directory-entry-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: #607a80;
+  font-size: 9px;
+}
+.directory-entry-table th,
+.directory-entry-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid #edf2f3;
+  text-align: left;
+}
+.directory-entry-table th {
+  color: #899ba0;
+  font-size: 8px;
+  font-weight: 500;
+}
+.directory-entry-table td:last-child,
+.directory-entry-table th:last-child {
+  text-align: right;
+}
+.directory-entry-table code {
+  color: #5b817b;
+  font-size: 9px;
+}
 .storage-page-associations {
   margin-top: 9px;
   padding: 9px 10px;
@@ -6546,7 +6585,8 @@
   width: 7px;
   height: 7px;
 }
-.superblock-named-pages {
+.superblock-root-pages,
+.superblock-logical-pages {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -6555,17 +6595,22 @@
   color: #8d9fa3;
   font-size: 8px;
 }
-.superblock-named-pages > span {
+.superblock-root-pages > span,
+.superblock-logical-pages > span {
   margin-right: 2px;
   color: #7d9296;
 }
-.superblock-named-pages code {
+.superblock-root-pages code,
+.superblock-logical-pages code {
   padding: 3px 5px;
   border: 1px solid #e7e1cf;
   border-radius: 3px;
   background: #fffdf7;
   color: #806d45;
   font-size: 8px;
+}
+.superblock-logical-pages {
+  margin-top: 5px;
 }
 @media (max-width: 700px) {
   .storage-heading-title {

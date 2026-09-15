@@ -371,7 +371,7 @@ function cellDescription(cell: PageCell, binaryLayout: boolean): string {
   return '非 HEAP 页的 payload 区域。'
 }
 
-type StructureFocus = 'header' | 'inner-header' | 'superblock'
+type StructureFocus = 'header' | 'inner-header' | 'superblock' | 'directory'
 
 interface PageFact {
   label: string
@@ -608,12 +608,14 @@ function regionValue(region: StorageRegion | undefined): string {
 function structureFocus(detail: StoragePageDetail, selection?: PageGridSelection | null): StructureFocus | null {
   if (selection?.kind === 'header') return 'header'
   if (selection?.kind === 'inner-header') return 'inner-header'
-  return detail.type === 'superblock' ? 'superblock' : null
+  if (detail.type === 'superblock') return 'superblock'
+  return detail.type === 'directory' ? 'directory' : null
 }
 
 function structureTitle(focus: StructureFocus): string {
   if (focus === 'header') return '页头'
   if (focus === 'inner-header') return '页内头'
+  if (focus === 'directory') return '命名页目录'
   return '超级块'
 }
 
@@ -622,6 +624,7 @@ function pageTypeLabel(type: string): string {
   if (type === 'catalog') return '目录页'
   if (type === 'heap') return '堆表页'
   if (type === 'index') return '索引页'
+  if (type === 'directory') return '命名页目录页'
   if (type === 'free') return '空闲页'
   return type || '—'
 }
@@ -663,7 +666,23 @@ function structureFacts(detail: StoragePageDetail, focus: StructureFocus): PageF
       { label: '空闲页', value: `${freePageCount} 页`, raw: payloadFact() },
       { label: '空闲链头', value: freeListHead, code: true, raw: payloadFact() },
       { label: '空闲链格式', value: textValue(metadata.free_list_format), code: true, raw: payloadFact() },
-      { label: '命名页', value: `${Object.keys(namedPages).length} 个`, raw: payloadFact() },
+      { label: 'Catalog 根页', value: textValue(metadata.catalog_page_id), code: true, raw: payloadFact() },
+      { label: '目录根页', value: textValue(metadata.directory_root_page), code: true, raw: payloadFact() },
+      { label: '目录页链', value: textValue(metadata.directory_page_count, '0') + ' 页', raw: payloadFact() },
+      { label: '逻辑命名项', value: `${Object.keys(namedPages).length} 个`, raw: payloadFact() },
+      { label: 'Payload', value: byteValue(detail.payload_size), raw: exactFact(detail, 18, 4) },
+      { label: '页内空闲', value: byteValue(detail.free_space), raw: derivedFact('页大小 − Payload') },
+      { label: '校验', value: textValue(detail.crc32), code: true, raw: exactFact(detail, 22, 4) }
+    ]
+  }
+  if (focus === 'directory') {
+    const directory = detail.directory
+    return [
+      { label: '页号', value: `#${detail.page_id}`, code: true, raw: exactFact(detail, 10, 8) },
+      { label: '格式', value: textValue(directory?.format ?? detail.directory_format), code: true, raw: payloadFact() },
+      { label: '目录根页', value: textValue(directory?.root_page_id), code: true, raw: payloadFact() },
+      { label: '当前项数', value: textValue(directory?.entry_count ?? detail.directory_entry_count, '0'), raw: payloadFact() },
+      { label: '下一目录页', value: textValue(directory?.next_page_id ?? detail.directory_next_page_id), code: true, raw: payloadFact() },
       { label: 'Payload', value: byteValue(detail.payload_size), raw: exactFact(detail, 18, 4) },
       { label: '页内空闲', value: byteValue(detail.free_space), raw: derivedFact('页大小 − Payload') },
       { label: '校验', value: textValue(detail.crc32), code: true, raw: exactFact(detail, 22, 4) }
@@ -734,9 +753,15 @@ function SuperblockByteMap({ detail }: { detail: StoragePageDetail }) {
           ))}
         </div>
       </div>
+      <div className="superblock-root-pages">
+        <span>固定根指针</span>
+        <code>catalog · #{textValue(metadata.catalog_page_id, '未设置')}</code>
+        <code>directory · #{textValue(metadata.directory_root_page, '未设置')}</code>
+        <code>目录链 · {textValue(metadata.directory_page_count, '0')} 页</code>
+      </div>
       {namedEntries.length > 0 && (
-        <div className="superblock-named-pages">
-          <span>命名页</span>
+        <div className="superblock-logical-pages">
+          <span>逻辑命名项</span>
           {namedEntries.map(([name, page]) => (
             <code key={name}>
               {name} · #{textValue(page)}
@@ -759,7 +784,15 @@ export function PageStructureSummary({ detail, selection = null }: { detail: Sto
       <div className="page-structure-summary-heading">
         <div>
           <strong>{structureTitle(focus)}</strong>
-          <span>{focus === 'superblock' ? '数据库级元数据页' : focus === 'inner-header' ? '槽位布局控制头' : '固定二进制页头'}</span>
+          <span>
+            {focus === 'superblock'
+              ? '固定根指针与数据库级元数据'
+              : focus === 'directory'
+                ? '可扩展命名页目录链'
+                : focus === 'inner-header'
+                  ? '槽位布局控制头'
+                  : '固定二进制页头'}
+          </span>
         </div>
         <code>{selection ? selection.range : `页 #${detail.page_id}`}</code>
       </div>

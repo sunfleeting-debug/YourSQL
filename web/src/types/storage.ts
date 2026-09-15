@@ -29,6 +29,10 @@ export interface PageHeader {
   free_page_next_offset?: number | null
   free_page_is_tail?: boolean
   free_page_error?: string
+  directory_format?: string
+  directory_next_page_id?: number | null
+  directory_entry_count?: number
+  directory_error?: string
 }
 
 export interface RawPayload {
@@ -84,6 +88,20 @@ export interface StorageLayout {
   }>
 }
 
+export interface DirectoryPageEntry {
+  name: string
+  page_id: number
+}
+
+export interface DirectoryPageInfo {
+  format: string
+  next_page_id: number | null
+  entry_count: number
+  entries: DirectoryPageEntry[]
+  root_page_id: number | null
+  error?: string
+}
+
 export interface StoragePageDetail extends PageHeader {
   readonly: boolean
   offset: number
@@ -102,6 +120,7 @@ export interface StoragePageDetail extends PageHeader {
   catalog?: JsonValue
   catalog_content?: JsonObject
   metadata?: JsonValue
+  directory?: DirectoryPageInfo
   index_node?: JsonObject
   note?: string
 }
@@ -143,6 +162,10 @@ export interface StorageSnapshot {
   free_pages: number[]
   free_list_head?: number | null
   free_list_format?: string
+  catalog_page_id?: number | null
+  directory_root_page?: number | null
+  directory_page_count?: number
+  named_pages?: Record<string, number>
   system_tables?: JsonObject[] | 'MASKED'
   storage_revision?: number
   buffer_pool: BufferPoolSnapshot
@@ -164,6 +187,10 @@ export interface StoragePageChanges {
   free_page_count?: number
   free_list_head?: number | null
   free_list_format?: string
+  catalog_page_id?: number | null
+  directory_root_page?: number | null
+  directory_page_count?: number
+  named_pages?: Record<string, number>
   truncated: boolean
   note?: string
 }

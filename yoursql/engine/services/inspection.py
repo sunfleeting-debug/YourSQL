@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Mapping
 
 from yoursql.common import JsonObject
+from yoursql.common.codec import PayloadCodec
 from yoursql.common.errors import YourSQLError
 from yoursql.storage.heap import TableHeap
 from yoursql.storage.index import index_page_info
@@ -22,6 +23,7 @@ from yoursql.storage.page import (
     SlottedPage,
     decode_free_page_next,
 )
+from yoursql.storage.disk import decode_directory_page_payload
 from yoursql.engine.catalog import TableMetadata
 from yoursql.engine.runtime.database import Database
 
@@ -92,12 +94,14 @@ def _index_pages(
     return bindings
 
 
-def _display_row(raw: bytes | None, masked: bool) -> list[object] | None:
+def _display_row(
+    raw: bytes | None, masked: bool, codec: PayloadCodec
+) -> list[object] | None:
     """内部权限页非管理员只返回同列数的占位值，保留槽位结构。"""
 
     if raw is None:
         return None
-    row = list(TableHeap._decode(raw))
+    row = list(TableHeap._decode(raw, codec))
     return ["MASKED"] * len(row) if masked else row
 
 
@@ -136,6 +140,7 @@ def page_header(
     database: Database | None = None,
     *,
     index_pages: Mapping[int, list[IndexPageBinding]] | None = None,
+    payload_codec: PayloadCodec | None = None,
 ) -> JsonObject:
     """【前端特供】构造工作台展示用的页头摘要。"""
     result: JsonObject = {
@@ -200,6 +205,32 @@ def page_header(
                     "free_page_error": str(exc),
                 }
             )
+    elif page.page_type is PageType.DIRECTORY:
+        directory_codec = payload_codec
+        if directory_codec is None and database is not None:
+            directory_codec = database.disk.payload_codec
+        if directory_codec is None:
+            return result
+        try:
+            next_page_id, entries = decode_directory_page_payload(
+                page.payload, directory_codec
+            )
+            result.update(
+                {
+                    "directory_format": "named_page_directory_v1",
+                    "directory_next_page_id": next_page_id,
+                    "directory_entry_count": len(entries),
+                }
+            )
+        except YourSQLError as exc:
+            result.update(
+                {
+                    "directory_format": "corrupt",
+                    "directory_next_page_id": None,
+                    "directory_entry_count": 0,
+                    "directory_error": str(exc),
+                }
+            )
     if database is not None:
         table = _table_for_page(database, page.page_id)
         if table is not None:
@@ -248,6 +279,7 @@ def storage_snapshot(
             database.buffer_pool.peek_page(page_id),
             None if map_only else database,
             index_pages=index_pages,
+            payload_codec=disk.payload_codec,
         )
         for page_id in range(offset, min(offset + limit, disk.page_count))
     ]
@@ -272,6 +304,9 @@ def storage_snapshot(
         "free_page_count": metadata.free_page_count,
         "free_list_head": metadata.free_list_head,
         "free_list_format": metadata.free_list_format,
+        "catalog_page_id": metadata.catalog_page_id,
+        "directory_root_page": metadata.directory_root_page,
+        "directory_page_count": metadata.directory_page_count,
         "named_pages": dict(metadata.named_pages),
         "system_tables": [table.to_dict() for table in database.catalog.system_tables()]
         if _is_admin(database)
@@ -331,6 +366,10 @@ def storage_page_changes(database: Database, since: int, limit: int) -> JsonObje
         "free_page_count": metadata.free_page_count,
         "free_list_head": metadata.free_list_head,
         "free_list_format": metadata.free_list_format,
+        "catalog_page_id": metadata.catalog_page_id,
+        "directory_root_page": metadata.directory_root_page,
+        "directory_page_count": metadata.directory_page_count,
+        "named_pages": dict(metadata.named_pages),
         "truncated": False,
     }
 
@@ -505,7 +544,7 @@ def inspect_page(
                         "slot_id": slot_id,
                         "deleted": raw is None,
                         "record_bytes": len(raw) if raw else 0,
-                        "row": _display_row(raw, masked),
+                        "row": _display_row(raw, masked, database.payload_codec),
                         "page_offset": page_offset,
                         "byte_length": byte_length,
                         "slot_directory_offset": directory_offset,
@@ -533,6 +572,32 @@ def inspect_page(
         result["catalog_content"] = _catalog_content(database, admin)
     elif page.page_type == PageType.SUPERBLOCK:
         result["metadata"] = database.disk.metadata().to_dict()
+    elif page.page_type == PageType.DIRECTORY:
+        try:
+            next_page_id, entries = decode_directory_page_payload(
+                page.payload, database.disk.payload_codec
+            )
+            result["directory"] = {
+                "format": "named_page_directory_v1",
+                "next_page_id": next_page_id,
+                "entry_count": len(entries),
+                "entries": [
+                    {"name": name, "page_id": page_id}
+                    for name, page_id in sorted(entries.items())
+                ],
+                "root_page_id": database.disk.metadata().directory_root_page,
+            }
+            result["note"] = "可扩展命名页目录链；superblock 只保存目录根页号。"
+        except YourSQLError as exc:
+            result["directory"] = {
+                "format": "corrupt",
+                "next_page_id": None,
+                "entry_count": 0,
+                "entries": [],
+                "root_page_id": database.disk.metadata().directory_root_page,
+                "error": str(exc),
+            }
+            result["note"] = "命名页目录页无法解码，请检查原始字节。"
     elif page.page_type == PageType.INDEX:
         # INDEX 页现在是真实 B+Tree 节点；旧数据库留下的空根页仍由 index_page_info
         result["index_node"] = index_page_info(

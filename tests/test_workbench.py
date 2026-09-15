@@ -449,6 +449,40 @@ def test_storage_is_bounded_readonly_and_admin_can_inspect_internal_catalog(serv
     assert database.disk.io_stats() == before_io
 
 
+def test_storage_reads_manual_payload_rows_after_reopening_database(tmp_path: Path) -> None:
+    """工作台检查页应按数据库实际格式解码手写二进制行记录。"""
+
+    path = tmp_path / "manual-workbench.db"
+    with Database(path, config=DatabaseConfig(payload_codec="manual")) as writer:
+        writer.execute(
+            "CREATE TABLE student(id INT PRIMARY KEY, name VARCHAR); "
+            "INSERT INTO student VALUES (1, 'Alice');"
+        )
+
+    # HOW：默认配置从 superblock 识别 manual，模拟用户直接打开已有二进制 .db。
+    with Database(path) as database:
+        with HTTPService(database, legacy_anonymous=False) as http:
+            client = Client(f"http://{http.address[0]}:{http.address[1]}")
+            status, response = client.request(
+                "/api/auth/login",
+                {"username": "admin", "password": "admin"},
+                headers={"Accept": "application/json"},
+            )
+            assert status == 200
+            page_id = int(database.catalog.get_table("student").page_ids[0])
+
+            status, response = client.request(
+                f"/api/storage/pages/{page_id}",
+                headers={"Accept": "application/json"},
+            )
+
+            assert status == 200
+            assert response["data"]["slots"][0]["row"] == [1, "Alice"]
+            assert response["data"]["slots"][0]["storage_encoding"].startswith(
+                "manual "
+            )
+
+
 def test_storage_masks_internal_permission_pages_for_non_admin(service) -> None:
     database, _, client = service
     client.login()
@@ -466,6 +500,38 @@ def test_storage_masks_internal_permission_pages_for_non_admin(service) -> None:
     assert page["table_name"] == "MASKED"
     assert "raw_page" not in page and "raw_payload" not in page
     assert page["slots"][0]["row"] == ["MASKED", "MASKED"]
+
+
+def test_storage_exposes_directory_roots_and_directory_page_details(service) -> None:
+    """工作台应区分 superblock 根指针与可扩展命名页目录内容。"""
+
+    database, _, client = service
+    client.login()
+    catalog_page_id = database.disk.named_page("catalog")
+    assert catalog_page_id is not None
+    database.disk.register_named_page("catalog_alias", catalog_page_id)
+    database.disk.sync()
+
+    storage = client.request("/api/storage?limit=2")[1]["data"]
+    directory_page_id = storage["directory_root_page"]
+    assert storage["catalog_page_id"] == catalog_page_id
+    assert isinstance(directory_page_id, int)
+    assert storage["directory_page_count"] >= 1
+    assert storage["named_pages"]["catalog_alias"] == catalog_page_id
+
+    map_page = client.request(
+        f"/api/storage?offset={directory_page_id}&limit=1&fields=map"
+    )[1]["data"]["pages"][0]
+    assert map_page["directory_entry_count"] == 1
+    assert map_page["directory_next_page_id"] is None
+
+    directory = client.request(f"/api/storage/pages/{directory_page_id}")[1]["data"]
+    assert directory["type"] == "directory"
+    assert directory["directory_format"] == "named_page_directory_v1"
+    assert directory["directory"]["root_page_id"] == directory_page_id
+    assert directory["directory"]["entry_count"] >= 1
+    assert {entry["name"] for entry in directory["directory"]["entries"]} == {"catalog_alias"}
+    assert "MDIR1" in directory["raw_payload"]["text"] or directory["raw_payload"]["encoding"] == "binary"
 
 
 def test_storage_map_mode_defers_table_and_index_labels(service, monkeypatch) -> None:

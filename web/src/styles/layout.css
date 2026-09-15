@@ -1214,6 +1214,10 @@
   background: #fff9ed;
   color: #b6a071;
 }
+.page-tile.directory {
+  background: #eef8f5;
+  color: #5e9f91;
+}
 .page-tile.free {
   background: #f3f5f7;
   color: #a5b1ba;

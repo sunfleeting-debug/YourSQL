@@ -40,6 +40,9 @@ class DiskMetadata:
     next_page_id: int
     free_pages: tuple[int, ...]
     named_pages: Mapping[str, int]
+    catalog_page_id: int | None
+    directory_root_page: int | None
+    directory_page_count: int
     free_list_head: int | None
     free_page_count: int
     free_list_format: str
@@ -58,6 +61,9 @@ class DiskMetadata:
                 "next_page_id",
                 "free_pages",
                 "named_pages",
+                "catalog_page_id",
+                "directory_root_page",
+                "directory_page_count",
                 "free_list_head",
                 "free_page_count",
                 "free_list_format",
@@ -72,6 +78,9 @@ class DiskMetadata:
             "next_page_id": self.next_page_id,
             "free_pages": list(self.free_pages),
             "named_pages": dict(self.named_pages),
+            "catalog_page_id": self.catalog_page_id,
+            "directory_root_page": self.directory_root_page,
+            "directory_page_count": self.directory_page_count,
             "free_list_head": self.free_list_head,
             "free_page_count": self.free_page_count,
             "free_list_format": self.free_list_format,
@@ -103,6 +112,39 @@ class DiskIOStats:
             "bytes_read": self.bytes_read,
             "bytes_written": self.bytes_written,
         }
+
+
+def decode_directory_page_payload(
+    payload: bytes, payload_codec: PayloadCodec
+) -> tuple[int | None, dict[str, int]]:
+    """解码单个命名页目录页，返回后继页号与逻辑命名项。"""
+
+    if len(payload) < _DIRECTORY_HEADER.size:
+        raise StorageError("命名页目录页头不完整")
+    magic, raw_next = _DIRECTORY_HEADER.unpack(payload[: _DIRECTORY_HEADER.size])
+    if magic != _DIRECTORY_MAGIC:
+        raise StorageError("命名页目录魔数错误")
+    try:
+        data, _codec = decode_payload(
+            payload[_DIRECTORY_HEADER.size :], payload_codec
+        )
+    except (PayloadCodecError, TypeError, ValueError) as exc:
+        raise StorageError("命名页目录 payload 损坏") from exc
+    if not isinstance(data, Mapping):
+        raise StorageError("命名页目录 payload 不是对象")
+    entries: dict[str, int] = {}
+    for raw_name, raw_page_id in data.items():
+        name = str(raw_name).strip().lower()
+        if not name or name == "catalog" or name in entries:
+            raise StorageError("命名页目录包含重复或保留名称")
+        try:
+            page_id = int(raw_page_id)
+        except (TypeError, ValueError) as exc:
+            raise StorageError("命名页目录包含无效页号") from exc
+        if page_id <= 0:
+            raise StorageError("命名页目录包含空页号")
+        entries[name] = page_id
+    return (None if raw_next == 0 else int(raw_next), entries)
 
 
 class DiskManager:
@@ -176,6 +218,9 @@ class DiskManager:
                 next_page_id=self._next_page_id,
                 free_pages=tuple(sorted(self._free_pages)),
                 named_pages=named_pages,
+                catalog_page_id=self._catalog_page_id,
+                directory_root_page=self._directory_root_page,
+                directory_page_count=len(self._directory_page_ids),
                 free_list_head=self._free_list_head,
                 free_page_count=len(self._free_pages),
                 free_list_format=(

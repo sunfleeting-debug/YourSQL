@@ -31,6 +31,7 @@ import type {
   ReplacementPolicy,
   StorageCacheSnapshot,
   StorageBufferPoolDemo,
+  DirectoryPageInfo,
   StorageIndexSnapshot,
   StoragePageChanges,
   StoragePageDetail,
@@ -122,9 +123,13 @@ const PageMapTiles = memo(function PageMapTiles({
                 ? ' · 空闲链尾'
                 : ''
             : ''
+        const directoryLinkText =
+          page.type === 'directory' && typeof page.directory_entry_count === 'number'
+            ? ` · ${page.directory_entry_count} 项${typeof page.directory_next_page_id === 'number' ? ` · 后继 #${page.directory_next_page_id}` : ''}`
+            : ''
         const pageText = `#${page.page_id} · ${PAGE_TYPE_LABELS[page.type] ?? page.type}`
         const usageText = `${used} B 已用 · ${page.free_space} B 空闲`
-        const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}${freeLinkText}`
+        const tooltipText = `${pageText} · ${usageText}${cacheText}${linkText}${freeLinkText}${directoryLinkText}`
 
         return (
           <button
@@ -409,6 +414,89 @@ function FreePageInfo({ detail, onSelectPage }: { detail: StoragePageDetail; onS
   )
 }
 
+/** 【前端特供】展示可扩展命名页目录链的当前页与目录项。 */
+function DirectoryPageInfo({ detail, onSelectPage }: { detail: StoragePageDetail; onSelectPage?: (pageId: string) => void }) {
+  const directory: DirectoryPageInfo | undefined = detail.directory
+  if (!directory) return null
+  const nextPageId = directory.next_page_id
+  const hasNextPage = typeof nextPageId === 'number'
+  return (
+    <section className="selected-payload-special directory-page-info" aria-label="命名页目录结构摘要">
+      <div className="selected-payload-special-heading">
+        <strong>命名页目录</strong>
+        <span>可扩展 DIRECTORY 页链</span>
+      </div>
+      <dl>
+        <div>
+          <dt>格式</dt>
+          <dd>
+            <code>{directory.format}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>当前页</dt>
+          <dd>
+            <code>#{detail.page_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>目录根页</dt>
+          <dd>
+            <code>{typeof directory.root_page_id === 'number' ? `#${directory.root_page_id}` : '未设置'}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>下一目录页</dt>
+          <dd>
+            {hasNextPage && onSelectPage ? (
+              <button type="button" className="free-page-next-link" onClick={() => onSelectPage(String(nextPageId))}>
+                <code>#{nextPageId}</code>
+                <ArrowRight size={12} />
+              </button>
+            ) : (
+              <code>{hasNextPage ? `#${nextPageId}` : '链尾（NULL）'}</code>
+            )}
+          </dd>
+        </div>
+      </dl>
+      {directory.entries.length > 0 ? (
+        <div className="directory-entry-table-wrap">
+          <table className="directory-entry-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>页号</th>
+              </tr>
+            </thead>
+            <tbody>
+              {directory.entries.map(entry => (
+                <tr key={`${entry.name}-${entry.page_id}`}>
+                  <td>
+                    <code>{entry.name}</code>
+                  </td>
+                  <td>
+                    {onSelectPage ? (
+                      <button type="button" className="free-page-next-link" onClick={() => onSelectPage(String(entry.page_id))}>
+                        <code>#{entry.page_id}</code>
+                        <ArrowRight size={12} />
+                      </button>
+                    ) : (
+                      <code>#{entry.page_id}</code>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="stage-note">此目录页没有逻辑命名项。</p>
+      )}
+      {directory.error && <p className="hint">{directory.error}</p>}
+    </section>
+  )
+}
+
 function PagePayloadWorkbench({
   detail,
   jsonDetail,
@@ -426,6 +514,7 @@ function PagePayloadWorkbench({
         <strong>页面信息</strong>
       </div>
       {detail.type === 'free' && <FreePageInfo detail={detail} onSelectPage={onSelectPage} />}
+      {detail.type === 'directory' && <DirectoryPageInfo detail={detail} onSelectPage={onSelectPage} />}
       {jsonDetail && (
         <details className="storage-json-details" open>
           <summary>结构化页字段</summary>
@@ -435,7 +524,15 @@ function PagePayloadWorkbench({
       {raw && (
         <RawPreview
           payload={raw}
-          title={detail.type === 'catalog' ? '目录链 Payload' : detail.type === 'free' ? 'Free-list 指针 Payload' : 'Payload'}
+          title={
+            detail.type === 'catalog'
+              ? '目录链 Payload'
+              : detail.type === 'directory'
+                ? '命名页目录 Payload'
+                : detail.type === 'free'
+                  ? 'Free-list 指针 Payload'
+                  : 'Payload'
+          }
           pageWide
           pageType={detail.type}
         />
@@ -1294,7 +1391,11 @@ export default function StoragePanel({
           free_pages: value.free_pages ?? current.free_pages,
           free_page_count: value.free_page_count ?? current.free_page_count,
           free_list_head: value.free_list_head ?? current.free_list_head,
-          free_list_format: value.free_list_format ?? current.free_list_format
+          free_list_format: value.free_list_format ?? current.free_list_format,
+          catalog_page_id: value.catalog_page_id !== undefined ? value.catalog_page_id : current.catalog_page_id,
+          directory_root_page: value.directory_root_page !== undefined ? value.directory_root_page : current.directory_root_page,
+          directory_page_count: value.directory_page_count ?? current.directory_page_count,
+          named_pages: value.named_pages ?? current.named_pages
         }
       })
     } catch (error) {

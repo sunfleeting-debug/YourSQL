@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { encodeManualPayload } from '../../payload-codec'
-import { inspectCatalogPayload, inspectFreePagePayload, inspectIndexPayload, inspectStoragePayload, inspectYsplPayload } from './raw-bytes'
+import {
+  inspectCatalogPayload,
+  inspectDirectoryPayload,
+  inspectFreePagePayload,
+  inspectIndexPayload,
+  inspectStoragePayload,
+  inspectYsplPayload
+} from './raw-bytes'
 
 describe('存储原始字节解析', () => {
   it('解码魔数后的小端长度文本帧', () => {
@@ -106,5 +113,17 @@ describe('存储原始字节解析', () => {
     expect(inspection?.summary).toContain('链尾页')
     expect(inspection?.fields).toContainEqual({ label: '编码', value: 'YSPL 手写 payload' })
     expect(inspection?.fields).toContainEqual({ label: '解析状态', value: '目录 payload 跨页分片，当前页片段不足以独立解码' })
+  })
+
+  it('解析 MDIR1 命名页目录链页', () => {
+    const nextPage = [0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+    const bytes = [0x4d, 0x44, 0x49, 0x52, 0x31, ...nextPage, ...Array.from(new TextEncoder().encode('{"catalog_alias":7}'))]
+
+    const inspection = inspectDirectoryPayload(bytes)
+
+    expect(inspection?.title).toBe('MDIR1 命名页目录链页')
+    expect(inspection?.fields).toContainEqual({ label: '下一页', value: '#42' })
+    expect(inspection?.fields).toContainEqual({ label: '目录摘要', value: '命名项 1 个' })
+    expect(inspectStoragePayload(bytes, false, 'directory')?.kind).toBe('directory')
   })
 })

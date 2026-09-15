@@ -30,6 +30,7 @@ export const PAGE_TYPE_LABELS: Record<string, string> = {
   catalog: '目录与权限',
   heap: '表记录与槽位',
   index: 'B+Tree 索引页',
+  directory: '命名页目录',
   free: '可复用空闲页'
 }
 
@@ -38,6 +39,7 @@ export const PAGE_TYPE_LEGEND = [
   { type: 'catalog', label: '目录' },
   { type: 'heap', label: '表记录' },
   { type: 'index', label: '索引' },
+  { type: 'directory', label: '命名目录' },
   { type: 'free', label: '空闲' }
 ]
 

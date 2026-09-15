@@ -7,7 +7,7 @@ export interface RawByteField {
 }
 
 export interface PayloadInspection {
-  kind: 'yspl' | 'index' | 'catalog' | 'free'
+  kind: 'yspl' | 'index' | 'catalog' | 'directory' | 'free'
   title: string
   summary: string
   fields: RawByteField[]
@@ -17,8 +17,10 @@ const YSPL_MAGIC = [0x59, 0x53, 0x50, 0x4c]
 const INDEX_MAGIC = [0x4d, 0x42, 0x49, 0x58]
 const CATALOG_MAGIC = [0x4d, 0x43, 0x41, 0x54, 0x32]
 const FREE_MAGIC = [0x4d, 0x46, 0x52, 0x31]
+const DIRECTORY_MAGIC = [0x4d, 0x44, 0x49, 0x52, 0x31]
 const CATALOG_CHAIN_HEADER_SIZE = CATALOG_MAGIC.length + 8
 const FREE_CHAIN_HEADER_SIZE = FREE_MAGIC.length + 8
+const DIRECTORY_CHAIN_HEADER_SIZE = DIRECTORY_MAGIC.length + 8
 
 function formatHex(bytes: number[]): string {
   return bytes.map(value => value.toString(16).padStart(2, '0')).join(' ')
@@ -207,6 +209,45 @@ export function inspectCatalogPayload(bytes: number[], masked = false, allowLega
   }
 }
 
+function directoryValueSummary(value: JsonValue | undefined): string {
+  if (value === undefined) return '无法独立解码'
+  if (!isObject(value)) return formatJson(value)
+  return `命名项 ${Object.keys(value).length} 个`
+}
+
+/** 解析 MDIR1 命名页目录页，展示链指针和当前页的逻辑命名项。 */
+export function inspectDirectoryPayload(bytes: number[], masked = false): PayloadInspection | null {
+  if (masked || bytes.length < DIRECTORY_MAGIC.length || !DIRECTORY_MAGIC.every((value, index) => bytes[index] === value)) return null
+
+  const fields: RawByteField[] = [{ label: '魔数', value: `${formatHex(DIRECTORY_MAGIC)} · MDIR1` }]
+  if (bytes.length < DIRECTORY_CHAIN_HEADER_SIZE) {
+    return {
+      kind: 'directory',
+      title: 'MDIR1 命名页目录链页',
+      summary: '已识别目录页魔数，但链头不完整',
+      fields: [...fields, { label: '链头', value: `${bytes.length} / ${DIRECTORY_CHAIN_HEADER_SIZE} B` }]
+    }
+  }
+
+  const nextPageBytes = bytes.slice(DIRECTORY_MAGIC.length, DIRECTORY_CHAIN_HEADER_SIZE)
+  const body = bytes.slice(DIRECTORY_CHAIN_HEADER_SIZE)
+  const decoded = decodeCatalogBody(body)
+  const nextPageId = littleEndianUint64(nextPageBytes)
+  fields.push(
+    { label: '链头', value: `${DIRECTORY_CHAIN_HEADER_SIZE} B · MDIR1 + uint64 小端页号` },
+    { label: '下一页', value: nextPageId === 0n ? '链尾（0）' : `#${nextPageId.toString()}` },
+    { label: '编码', value: decoded.encoding },
+    { label: '当前片段', value: `${body.length} B` },
+    { label: '目录摘要', value: directoryValueSummary(decoded.value) }
+  )
+  return {
+    kind: 'directory',
+    title: 'MDIR1 命名页目录链页',
+    summary: nextPageId === 0n ? '命名页目录链尾页' : '命名页目录链中页 · 指向后续目录页',
+    fields
+  }
+}
+
 function decodeIndexPayload(bytes: number[]): { value: JsonObject; encoding: string } | null {
   const body = new Uint8Array(bytes.slice(INDEX_MAGIC.length))
   try {
@@ -318,6 +359,7 @@ export function inspectYsplPayload(bytes: number[], masked = false): PayloadInsp
 export function inspectStoragePayload(bytes: number[], masked = false, pageType?: string): PayloadInspection | null {
   return (
     (pageType === 'free' ? inspectFreePagePayload(bytes, masked) : null) ??
+    (pageType === 'directory' ? inspectDirectoryPayload(bytes, masked) : null) ??
     inspectCatalogPayload(bytes, masked, pageType === 'catalog') ??
     inspectIndexPayload(bytes, masked) ??
     inspectYsplPayload(bytes, masked)
