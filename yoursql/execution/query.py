@@ -22,7 +22,13 @@ from yoursql.common import (
     sql_truth,
 )
 from yoursql.common.types import PageId, RowId
-from yoursql.execution.evaluator import _AGGREGATE_NAMES, _AMBIGUOUS, _MISSING, constant_value
+from yoursql.execution.evaluator import (
+    _AGGREGATE_NAMES,
+    _AMBIGUOUS,
+    _MISSING,
+    _walk_expressions,
+    constant_value,
+)
 from yoursql.sql.ast import (
     BetweenPredicate,
     BinaryOp,
@@ -34,6 +40,7 @@ from yoursql.sql.ast import (
     InPredicate,
     IsNull,
     Literal,
+    OrderItem,
     Select,
     SelectItem,
     Star,
@@ -214,6 +221,122 @@ class _DerivedRelation:
     schema: Schema
 
 
+@dataclass(frozen=True)
+class _AggregateSpec:
+    """语句里出现的一个聚合：节点身份、名称、去重标记与参数求值器。
+
+    HOW：用节点 ``id`` 当键——查询层采集与求值器看到的是同一个 ``FunctionCall`` 对象
+    （已实测核对），所以求值器能 O(1) 查回预计算结果。
+    """
+
+    key: int
+    name: str
+    distinct: bool
+    star: bool
+    evaluator: Callable[[dict[str, object]], object] | None
+
+    def new_accumulator(self) -> "_AggregateAccumulator":
+        return _AggregateAccumulator(self.name, distinct=self.distinct, star=self.star)
+
+
+class _AggregateAccumulator:
+    """单个聚合在一个分组上的流式累加器。
+
+    WHY：原先的分组把**每行的完整上下文**都留在内存里（单组聚合 35.5 MB / 60,175 行），
+    聚合求值再对每个聚合各遍历一遍组列表。``COUNT / SUM / AVG / MIN / MAX`` 都是可结合的，
+    边扫边累积即可：内存从 O(行数) 降到 O(组数)，遍历次数从"每个聚合一遍"降到一遍。
+    ``DISTINCT`` 必须记住出现过的值（与批量求值同样需要），但集合规模受去重后基数限制。
+    """
+
+    __slots__ = (
+        "name",
+        "distinct",
+        "star",
+        "count",
+        "total",
+        "minimum",
+        "maximum",
+        "seen",
+    )
+
+    def __init__(self, name: str, *, distinct: bool, star: bool) -> None:
+        self.name = name
+        self.distinct = distinct
+        self.star = star
+        self.count = 0
+        # HOW：初值取 int 0，与内置 sum() 的起点一致；按扫描顺序累加，浮点/定点的结果
+        # 与"先收集成列表再 sum()"逐位相同。
+        self.total: object = 0
+        self.minimum: object = None
+        self.maximum: object = None
+        self.seen: dict[object, None] | None = {} if distinct else None
+
+    def add(self, value: object) -> None:
+        if self.star:
+            # COUNT(*) 连 NULL 行也计数。
+            self.count += 1
+            return
+        if value is None:
+            return
+        if self.seen is not None:
+            # HOW：DISTINCT 保持首次出现顺序，收尾时再算——与 dict.fromkeys 的语义一致。
+            self.seen[value] = None
+            return
+        self.count += 1
+        if self.name == "sum" or self.name == "avg":
+            self.total = self.total + value
+        elif self.name == "min":
+            if self.minimum is None or value < self.minimum:
+                self.minimum = value
+        elif self.name == "max":
+            if self.maximum is None or value > self.maximum:
+                self.maximum = value
+
+    def value(self) -> object:
+        if self.star:
+            return self.count
+        if self.seen is not None:
+            items = list(self.seen)
+            if self.name == "count":
+                return len(items)
+            if not items:
+                return None
+            if self.name == "sum":
+                return sum(items)
+            if self.name == "avg":
+                return sum(items) / len(items)
+            if self.name == "min":
+                return min(items)
+            return max(items)
+        if self.name == "count":
+            return self.count
+        if self.name == "sum":
+            return None if self.count == 0 else self.total
+        if self.name == "avg":
+            return None if self.count == 0 else self.total / self.count
+        if self.name == "min":
+            return self.minimum
+        return self.maximum
+
+
+class _GroupState:
+    """一个分组在扫描期间的状态：代表行 + 各聚合的累加器。
+
+    ``sample`` 取该组第一行的上下文——非聚合投影项（MySQL 式的宽松语义）与 ORDER BY
+    仍按"组内任意一行"求值，这一点与原实现一致。
+    """
+
+    __slots__ = ("sample", "accumulators")
+
+    def __init__(
+        self,
+        sample: dict[str, object] | None,
+        accumulators: list["_AggregateAccumulator"],
+    ) -> None:
+        self.sample = sample
+        self.accumulators = accumulators
+
+
 @dataclass
 class _IndexConstraint:
     """单列索引条件的交集；用于按联合索引前缀生成扫描边界。"""
@@ -248,8 +371,10 @@ class QueryExecutionMixin:
             trace.check()
         previous_scan_kind = self._last_scan_kind
         previous_join_kinds = self._join_kinds
+        previous_join_notes = self._join_notes
         self._last_scan_kind = None
         self._join_kinds = []
+        self._join_notes = []
         if statement.union is not None:
             left = self._execute_select(
                 replace(statement, union=None),
@@ -306,24 +431,47 @@ class QueryExecutionMixin:
                 self._compile_expr(expression) for expression in statement.group_by
             ]
             having = self._compile_expr(statement.having)
-            groups: dict[tuple[object, ...], list[dict[str, object]]] = {}
+            specs = self._compile_aggregates(statement)
+            # HOW：边扫边累积（内存 O(组数)），不再为每个分组留着全部行上下文。
+            states: dict[tuple[object, ...], _GroupState] = {}
             for context in contexts:
                 if trace is not None:
                     trace.step()
                 key = tuple(expression(context) for expression in group_keys)
-                groups.setdefault(key, []).append(context)
+                current = states.get(key)
+                if current is None:
+                    current = _GroupState(
+                        context, [spec.new_accumulator() for spec in specs]
+                    )
+                    states[key] = current
+                elif current.sample is None:
+                    current.sample = context
+                for accumulator, spec in zip(
+                    current.accumulators, specs, strict=True
+                ):
+                    if spec.star or spec.evaluator is None:
+                        accumulator.add(None)
+                    else:
+                        accumulator.add(spec.evaluator(context))
             # HOW：只有"无 GROUP BY 的聚合"才在空输入上产出单行；带 GROUP BY 时
             # 没有分组键就没有行（标准 SQL 语义），多造一行 NULL 会污染结果。
-            if has_aggregate and not groups and not statement.group_by:
-                groups[()] = []
+            if has_aggregate and not states and not statement.group_by:
+                states[()] = _GroupState(
+                    None, [spec.new_accumulator() for spec in specs]
+                )
             grouped_rows: list[dict[str, object]] = []
-            for group in groups.values():
+            for current in states.values():
                 base = (
-                    dict(group[0])
-                    if group
+                    dict(current.sample)
+                    if current.sample is not None
                     else self._empty_group_context(statement)
                 )
-                base["__group__"] = group
+                base["__agg__"] = {
+                    spec.key: accumulator.value()
+                    for spec, accumulator in zip(
+                        specs, current.accumulators, strict=True
+                    )
+                }
                 if statement.having is None or sql_truth(having(base)):
                     grouped_rows.append(base)
             grouped = grouped_rows
@@ -352,6 +500,22 @@ class QueryExecutionMixin:
             if (streamable and statement.limit is not None)
             else None
         )
+        # HOW：有排序时限行无法靠提前终止扫描省事（前 k 名要靠全表比较才能确定），
+        # 但可以不物化全部行——优化器标注 top_n 时按"排序-截断"只留前 k 个候选。
+        top_n = (
+            self._plan_top_n(plan)
+            if (
+                plan is not None
+                and statement.order_by
+                and not statement.distinct
+                and not (statement.group_by or has_aggregate)
+            )
+            else None
+        )
+        # HOW：排序键只编译一次（下面的 top-N 会反复用它排序-截断）。
+        order_keys = (
+            self._compile_order_keys(statement.order_by) if statement.order_by else ()
+        )
         seen: set[tuple[object, ...]] = set()
         for context in grouped:
             if trace is not None:
@@ -374,6 +538,11 @@ class QueryExecutionMixin:
                     continue
                 seen.add(row_key)
             projected.append((row_key, context, aliases))
+            if top_n is not None and len(projected) >= 2 * top_n:
+                # HOW：排序-截断（sort-truncate）：用同一套比较器只保留当前最小的 top_n 个，
+                # 被丢弃的行不可能进入最终前 k 名；内存因此从 O(行数) 降到 O(top_n)。
+                self._sort_projected(projected, order_keys)
+                del projected[top_n:]
             if stop_after is not None and len(projected) >= stop_after:
                 break
         if statement.distinct:
@@ -384,35 +553,8 @@ class QueryExecutionMixin:
             for item in projected:
                 unique.setdefault(item[0], item)
             projected = list(unique.values())
-        for order_item in reversed(statement.order_by):
-            evaluator = self._compile_expr(order_item.expression)
-            by_alias = (
-                isinstance(order_item.expression, ColumnRef)
-                and not order_item.expression.table
-            )
-            alias_key = order_item.expression.name.lower() if by_alias else ""
-
-            def key(
-                item: tuple[tuple[object, ...], dict[str, object], dict[str, object]],
-            ) -> tuple[int, object]:
-                value = item[2].get(alias_key, _MISSING) if by_alias else _MISSING
-                if value is _MISSING:
-                    value = evaluator(item[1])
-                nulls_first = (
-                    order_item.nulls_first
-                    if order_item.nulls_first is not None
-                    else order_item.descending
-                )
-                if value is None:
-                    return (0 if nulls_first else 1, 0)
-                return (1 if nulls_first else 0, value)
-
-            try:
-                projected.sort(key=key, reverse=order_item.descending)
-            except TypeError:
-                projected.sort(
-                    key=lambda item: repr(key(item)), reverse=order_item.descending
-                )
+        if order_keys:
+            self._sort_projected(projected, order_keys)
         if statement.offset:
             projected = projected[statement.offset :]
         if statement.limit is not None:
@@ -431,17 +573,143 @@ class QueryExecutionMixin:
         )
         scan_kind = self._last_scan_kind
         join_kinds = self._join_kinds
+        join_notes = self._join_notes
         self._last_scan_kind = previous_scan_kind
         self._join_kinds = previous_join_kinds
+        self._join_notes = previous_join_notes
         if scan_kind is not None:
             stats["operator"] = scan_kind
         elif uses_index:
             stats["operator"] = "IndexScan"
         if join_kinds:
             stats["joins"] = list(join_kinds)
+        if join_notes:
+            # HOW：只在真的发生降级时挂这个键，避免污染正常的 stats 形状。
+            stats["join_degrade"] = list(join_notes)
         return ExecutionResult(
             tuple(names), [item[0] for item in projected], stats=stats
         )
+
+    # ----- 聚合 -----
+
+    def _compile_aggregates(self, statement: Select) -> list[_AggregateSpec]:
+        """列出语句里出现的聚合，并为每个聚合编译"取参数值"的求值器。
+
+        HOW：用 ``_walk_expressions`` 遍历——与"这条语句有没有聚合"（``_contains_aggregate``）
+        用的是同一个遍历器，所以"判定有聚合"和"找得到聚合"必然一致：都能进 CASE 分支，
+        都不会把子查询内部的聚合算到外层。
+        """
+
+        found: dict[int, _AggregateSpec] = {}
+        expressions: list[Expr | None] = [item.expression for item in statement.items]
+        expressions.append(statement.having)
+        expressions.extend(item.expression for item in statement.order_by)
+        for expression in expressions:
+            if expression is None:
+                continue
+            for node in _walk_expressions(expression):
+                if not isinstance(node, FunctionCall):
+                    continue
+                name = node.name.lower()
+                if name not in _AGGREGATE_NAMES or id(node) in found:
+                    continue
+                star = not node.args or isinstance(node.args[0], Star)
+                found[id(node)] = _AggregateSpec(
+                    key=id(node),
+                    name=name,
+                    distinct=bool(node.distinct),
+                    star=star,
+                    evaluator=None if star else self._compile_expr(node.args[0]),
+                )
+        return list(found.values())
+
+    # ----- 排序与限行 -----
+
+    def _compile_order_keys(
+        self, order_by: tuple[OrderItem, ...]
+    ) -> tuple[tuple[Callable[[object], object], bool], ...]:
+        """把 ORDER BY 编译成 ``(取值函数, 是否降序)`` 列表。
+
+        HOW：**从最后一列往前**返回，配合逐列稳定排序即为多列字典序。返回值必须能在
+        循环外算一次、循环内反复用——top-N 的"排序-截断"会对同一份排序键调用上千次，
+        每次重新编译表达式会把优化本身的开销吃掉（实测能吃掉一半收益）。
+        """
+
+        compiled: list[tuple[Callable[[object], object], bool]] = []
+        for order_item in reversed(order_by):
+            evaluator = self._compile_expr(order_item.expression)
+            by_alias = (
+                isinstance(order_item.expression, ColumnRef)
+                and not order_item.expression.table
+            )
+            alias_key = order_item.expression.name.lower() if by_alias else ""
+            nulls_first = (
+                order_item.nulls_first
+                if order_item.nulls_first is not None
+                else order_item.descending
+            )
+
+            def key(
+                item: tuple[tuple[object, ...], dict[str, object], dict[str, object]],
+                evaluator: Callable[[object], object] = evaluator,
+                by_alias: bool = by_alias,
+                alias_key: str = alias_key,
+                nulls_first: bool = nulls_first,
+            ) -> tuple[int, object]:
+                value = item[2].get(alias_key, _MISSING) if by_alias else _MISSING
+                if value is _MISSING:
+                    value = evaluator(item[1])
+                if value is None:
+                    return (0 if nulls_first else 1, 0)
+                return (1 if nulls_first else 0, value)
+
+            compiled.append((key, order_item.descending))
+        return tuple(compiled)
+
+    @staticmethod
+    def _sort_projected(
+        projected: list[
+            tuple[tuple[object, ...], dict[str, object], dict[str, object]]
+        ],
+        order_keys: tuple[tuple[Callable[[object], object], bool], ...],
+    ) -> None:
+        """按已编译的排序键就地排序。
+
+        逐列稳定排序：每列的方向（ASC/DESC）与 NULL 位置（NULLS FIRST/LAST）独立生效；
+        值不可比较时退回 ``repr`` 比较，保证极端的混合类型列也能给出确定的顺序。
+        """
+
+        for key, descending in order_keys:
+            try:
+                projected.sort(key=key, reverse=descending)
+            except TypeError:
+                projected.sort(
+                    key=lambda item, key=key: repr(key(item)), reverse=descending
+                )
+
+    @staticmethod
+    def _plan_top_n(plan: object) -> int | None:
+        """读取 ``limit_pushdown`` 规则标在 Sort 节点上的 ``top_n``。
+
+        WHY：``ORDER BY ... LIMIT k`` 只需要前 k 行，却会物化全部行再全量排序。
+        让优化器在计划里标注"这次排序只要前 k 行"，运行时才能据此压制内存；
+        关掉规则时标注消失，运行时自动退回全量排序——规则因此是可现场演示的。
+        """
+
+        stack: list[object] = [plan]
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            properties = getattr(node, "properties", None)
+            if isinstance(properties, dict):
+                value = properties.get("top_n")
+                if isinstance(value, int) and value > 0:
+                    return value
+            children = getattr(node, "children", None)
+            if isinstance(children, tuple):
+                stack.extend(children)
+        return None
 
     # ----- 扫描与连接上下文 -----
     def _iter_select_contexts(
@@ -663,7 +931,7 @@ class QueryExecutionMixin:
             right_rows = self._row_count_of(join.table)
             # HOW：左侧行数按首表统计粗估（左侧可能已被连接放大，这里宁可偏低以便优先选哈希）。
             left_rows = self._row_count_of(statement.from_table)
-            strategy = self._choose_join_strategy(
+            strategy, degrade_note = self._choose_join_strategy(
                 pairs, right_rows, left_rows, index_metadata
             )
             self._join_kinds.append(
@@ -673,6 +941,8 @@ class QueryExecutionMixin:
                     "nested_loop": "NestedLoop",
                 }[strategy]
             )
+            if degrade_note is not None:
+                self._join_notes.append(degrade_note)
             if strategy == "index" and index_metadata is not None:
                 # HOW：索引连接不需要物化右表（内存与扫描成本都省掉）。
                 contexts = self._index_join(
@@ -1242,25 +1512,49 @@ class QueryExecutionMixin:
         right_rows: int,
         left_rows: int | None,
         index_metadata: IndexMetadata | None,
-    ) -> str:
-        """按实测代价选择连接策略：hash / index / nested_loop。"""
+    ) -> tuple[str, str | None]:
+        """按实测代价选择连接策略，返回 ``(策略, 降级原因)``。
+
+        HOW：三种策略**在同一层比较取最小代价**，而不是"哈希装不下才考虑索引"。
+        旧写法 ``if hash_fits and hash_cost <= nested_cost: return "hash"`` 有缺陷：
+        ``hash = 0.22µs·R + 0.05µs·L`` 对任意 ``L,R ≥ 1`` 都小于
+        ``nested = 10.4µs·L·R``（L=R=1 时 0.27µs vs 10.4µs），所以只要右表装得进内存
+        就永远返回 hash，"小表驱动 + 右表有索引"这类索引连接的典型场景根本不可达——
+        它的启用门槛被抬到了内存预算边界（256MB ÷ 464B ≈ 578,524 行）。
+        同层取最小值之后，索引连接才会在该赢的时候赢（实测 2 行 × 20,000 行：
+        索引 2.8ms < 哈希 4.4ms）。
+        """
 
         if not pairs:
-            return "nested_loop"
+            return "nested_loop", None
         right_count = max(1, right_rows)
         left_count = max(1, left_rows or right_count)
-        hash_cost = (
-            right_count * _JOIN_HASH_BUILD_COST + left_count * _JOIN_HASH_PROBE_COST
-        )
         hash_fits = right_count * _JOIN_CONTEXT_BYTES <= _JOIN_HASH_MEMORY_BUDGET
-        nested_cost = left_count * right_count * _JOIN_NESTED_LOOP_PAIR_COST
-        if hash_fits and hash_cost <= nested_cost:
-            return "hash"
+        candidates: list[tuple[float, str]] = []
+        if hash_fits:
+            candidates.append(
+                (
+                    right_count * _JOIN_HASH_BUILD_COST
+                    + left_count * _JOIN_HASH_PROBE_COST,
+                    "hash",
+                )
+            )
         if index_metadata is not None:
-            index_cost = left_count * _JOIN_INDEX_LOOKUP_COST
-            if index_cost < min(hash_cost if hash_fits else nested_cost, nested_cost):
-                return "index"
-        return "nested_loop"
+            # HOW：索引连接不物化右表，代价是左表每行一次索引等值查找。
+            candidates.append((left_count * _JOIN_INDEX_LOOKUP_COST, "index"))
+        candidates.append(
+            (left_count * right_count * _JOIN_NESTED_LOOP_PAIR_COST, "nested_loop")
+        )
+        # HOW：min() 取第一个最小值，因此并列时优先级是 hash > index > nested_loop。
+        strategy = min(candidates, key=lambda item: item[0])[1]
+        note: str | None = None
+        if strategy == "nested_loop" and not hash_fits:
+            note = (
+                f"哈希连接建侧 {right_count} 行超出内存预算"
+                f"（{_JOIN_HASH_MEMORY_BUDGET // (1024 * 1024)}MB ÷ {_JOIN_CONTEXT_BYTES}B），"
+                f"且右表连接列无可用索引，已退回嵌套循环（{left_count} × {right_count} 对配对）"
+            )
+        return strategy, note
 
     def _hash_join(
         self,

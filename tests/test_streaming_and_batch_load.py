@@ -38,6 +38,52 @@ def test_limit_stops_scanning_early(tmp_path: Path) -> None:
         assert ordered.stats["rows_examined"] == 400, ordered.stats
 
 
+def test_order_by_limit_topn_matches_full_sort(tmp_path: Path) -> None:
+    """排序 + 限行的有界堆 top-N 必须与全量排序逐值一致。
+
+    WHY：top-N 用"排序-截断"只保留前 k 个候选，是一处会**静默改结果**的优化（排序键方向、
+    NULL 位置、多键组合都可能写错），所以两种路径的结果要逐条对上。
+    """
+
+    rows = [
+        (index, None if index % 7 == 0 else index % 11, f"v{index % 5}")
+        for index in range(120)
+    ]
+    queries = [
+        "SELECT id, score FROM ranked ORDER BY score LIMIT 9;",
+        "SELECT id, score FROM ranked ORDER BY score DESC LIMIT 9;",
+        "SELECT id, score FROM ranked ORDER BY score ASC NULLS FIRST LIMIT 9;",
+        "SELECT id, score FROM ranked ORDER BY score DESC NULLS LAST LIMIT 9;",
+        "SELECT id, score FROM ranked ORDER BY score ASC NULLS LAST LIMIT 9;",
+        "SELECT id, score, label FROM ranked ORDER BY score DESC, label ASC LIMIT 17;",
+        "SELECT id, score FROM ranked ORDER BY score LIMIT 9 OFFSET 4;",
+    ]
+    path = tmp_path / "topn.db"
+    with Database(path) as database:
+        database.execute("CREATE TABLE ranked(id INT, score INT, label VARCHAR);")
+        database.insert_rows("ranked", rows)
+        # top-N 真的启用了（否则这条用例会空跑）
+        plan = database.compile(queries[0]).optimized_plan
+        assert plan is not None
+        assert _find_node(plan, "Sort").properties["top_n"] == 9
+        enabled = [(sql, database.execute(sql).rows) for sql in queries]
+
+    # 关掉规则 → 退回全量排序；两条路径必须逐值一致
+    with Database(path, disabled_rules=("limit_pushdown",)) as plain:
+        for sql, expected in enabled:
+            assert plain.execute(sql).rows == expected, sql
+
+
+def _find_node(plan: object, kind: str) -> object:
+    stack = [plan]
+    while stack:
+        node = stack.pop()
+        if getattr(node, "kind", "") == kind:
+            return node
+        stack.extend(getattr(node, "children", ()) or ())
+    raise AssertionError(f"计划里没有 {kind} 节点")
+
+
 def test_join_pushes_single_table_predicates_to_scans(tmp_path: Path) -> None:
     """JOIN 查询里只引用单表的 WHERE 条件应下推到该表扫描。"""
 

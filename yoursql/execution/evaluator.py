@@ -806,37 +806,15 @@ class ExpressionEvaluator:
     def _eval_function(
         self, function: FunctionCall, context: dict[str, object]
     ) -> object:
-        """执行内置标量/聚合函数；聚合输入由查询层放入 ``__group__``。"""
+        """执行内置标量/聚合函数；聚合值由查询层在扫描时累积进 ``__agg__``。"""
 
         name = function.name.lower()
-        group = context.get("__group__")
-        if name in _AGGREGATE_NAMES and isinstance(group, list):
-            if name == "count":
-                if not function.args or isinstance(function.args[0], Star):
-                    return len(group)
-                values = [self._eval_expr(function.args[0], item) for item in group]
-                return (
-                    len({value for value in values if value is not None})
-                    if function.distinct
-                    else sum(value is not None for value in values)
-                )
-            values = (
-                [self._eval_expr(function.args[0], item) for item in group]
-                if function.args
-                else []
-            )
-            values = [value for value in values if value is not None]
-            if function.distinct:
-                values = list(dict.fromkeys(values))
-            if not values:
-                return None
-            if name == "sum":
-                return sum(values)
-            if name == "avg":
-                return sum(values) / len(values)
-            if name == "min":
-                return min(values)
-            return max(values)
+        if name in _AGGREGATE_NAMES:
+            # HOW：聚合值由查询层"边扫边累积"后放进上下文（内存 O(组数)），这里只查一次表；
+            # 不再做"每个聚合各自遍历一遍整组行上下文"的旧做法。
+            table = context.get("__agg__")
+            if isinstance(table, dict) and id(function) in table:
+                return table[id(function)]
         values = [self._eval_expr(argument, context) for argument in function.args]
         if name in {"lower", "upper", "length", "len", "abs"} and not values:
             raise _with_node_location(

@@ -85,7 +85,9 @@ def test_inner_join_predicates_are_pushed_to_each_scan(tmp_path: Path) -> None:
         assert join is not None
         assert all(child.kind == "Filter" for child in join.children)
         scans = _scan_nodes(optimized)
-        assert [scan.kind for scan in scans] == ["SeqScan", "IndexScan"]
+        # HOW：连接重排（join_reordering）会按行数决定驱动表，所以只断言两侧各走什么路径，
+        # 不绑定先后顺序——本用例要固定的是"谓词被下推到每个扫描节点"。
+        assert sorted(scan.kind for scan in scans) == ["IndexScan", "SeqScan"]
         assert all("pushed_predicate" in scan.properties for scan in scans)
 
 
@@ -130,7 +132,10 @@ def test_rule_catalogue_is_enumerable() -> None:
     assert len(names) >= 2, "验收要求至少两条可枚举的优化规则"
     assert len(names) == len(set(names)), "规则名不应重复"
     assert all(rule.summary.strip() for rule in catalogue)
-    assert all(rule.stage in {"expression", "predicate", "access-path"} for rule in catalogue)
+    assert all(
+        rule.stage in {"expression", "predicate", "access-path", "join", "cardinality"}
+        for rule in catalogue
+    )
     # 默认实例启用全部规则，顺序与清单一致。
     assert [rule.name for rule in Optimizer().enabled_rules] == names
 
@@ -239,7 +244,63 @@ def test_fired_rules_survive_plan_cache_hit(tmp_path: Path) -> None:
 
 def test_explain_rules_marks_disabled_state() -> None:
     text = Optimizer(disabled_rules=("predicate_pushdown",)).explain_rules()
-    assert "4/5 条启用" in text
+    assert "6/7 条启用" in text
     assert "[关闭] predicate_pushdown" in text
     assert "[启用] constant_folding" in text
-    assert "5/5 条启用" in Optimizer().explain_rules()
+    assert "7/7 条启用" in Optimizer().explain_rules()
+
+
+# --- limit_pushdown：限行下推 ---
+
+
+def test_limit_pushdown_moves_limit_below_projection(tmp_path: Path) -> None:
+    """投影不改变基数时，LIMIT 应越过投影贴近扫描（并在计划里留痕）。"""
+
+    with Database(tmp_path / "limit-pushdown.db") as db:
+        db.execute("CREATE TABLE items(id INT);")
+        db.insert_rows("items", [(index,) for index in range(30)])
+
+        sql = "SELECT id FROM items LIMIT 4;"
+        plan = db.compile(sql).optimized_plan
+        assert plan is not None
+        assert plan.kind == "Project"
+        assert plan.children[0].kind == "Limit"
+        assert plan.children[0].properties["pushed"] is True
+        assert "limit_pushdown" in plan.properties["rules"]
+        assert db.execute(sql).rows == [(0,), (1,), (2,), (3,)]
+
+
+def test_limit_pushdown_marks_top_n_for_sorted_limit(tmp_path: Path) -> None:
+    """排序 + 限行只需要前 k 行 → Sort 上应标注 top_n，供运行时有界堆使用。"""
+
+    with Database(tmp_path / "limit-topn.db") as db:
+        db.execute("CREATE TABLE items(id INT, rank_no INT);")
+        db.insert_rows("items", [(index, 30 - index) for index in range(30)])
+
+        sql = "SELECT id FROM items ORDER BY rank_no LIMIT 4;"
+        plan = db.compile(sql).optimized_plan
+        assert plan is not None
+        sort = _find_node(plan, "Sort")
+        assert sort is not None
+        assert sort.properties["top_n"] == 4
+        assert "limit_pushdown" in plan.properties["rules"]
+        assert db.execute(sql).rows == [(29,), (28,), (27,), (26,)]
+
+
+def test_disabling_limit_pushdown_drops_top_n(tmp_path: Path) -> None:
+    """关掉规则后计划里不再有 top_n——规则是可现场演示的。"""
+
+    with Database(
+        tmp_path / "limit-topn-off.db", disabled_rules=("limit_pushdown",)
+    ) as db:
+        db.execute("CREATE TABLE items(id INT, rank_no INT);")
+        db.insert_rows("items", [(index, 30 - index) for index in range(30)])
+
+        sql = "SELECT id FROM items ORDER BY rank_no LIMIT 4;"
+        plan = db.compile(sql).optimized_plan
+        assert plan is not None
+        sort = _find_node(plan, "Sort")
+        assert sort is not None
+        assert "top_n" not in sort.properties
+        assert "limit_pushdown" not in plan.properties.get("rules", ())
+        assert db.execute(sql).rows == [(29,), (28,), (27,), (26,)]

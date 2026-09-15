@@ -68,7 +68,7 @@ class RewriteRule:
 
     name: str
     summary: str
-    stage: str  # expression / predicate / access-path
+    stage: str  # expression / predicate / access-path / join / cardinality
     togglable: bool = True
 
 
@@ -98,6 +98,16 @@ DEFAULT_RULES: tuple[RewriteRule, ...] = (
         "index_selection",
         "按谓词列与索引元数据选择 IndexScan（覆盖索引走只读路径）",
         "access-path",
+    ),
+    RewriteRule(
+        "join_reordering",
+        "等值键贪心重排连接顺序：先取最小的表，再逐张接入有等值键的表，避免首层退化成笛卡尔积",
+        "join",
+    ),
+    RewriteRule(
+        "limit_pushdown",
+        "限行下推：LIMIT 越过不改变基数的投影贴近扫描；排序只需前 k 行时标注 top_n 交给有界堆",
+        "cardinality",
     ),
 )
 
@@ -402,6 +412,9 @@ class Optimizer:
             rewritten_statement = (
                 self._rewrite_statement(statement) if statement is not None else None
             )
+            # HOW：连接重排要读表行数，而 _rewrite_statement 是无状态的类方法，
+            # 所以放在这里（持有 statistics 的实例方法）执行。
+            rewritten_statement = self._reorder_joins_in_statement(rewritten_statement)
             base_plan = plan
             if rewritten_statement is not None and rewritten_statement != statement:
                 # HOW：先用折叠后的 AST 重建计划，再做访问路径和谓词下推，确保
@@ -432,6 +445,127 @@ class Optimizer:
         if isinstance(value, (list, tuple)):
             return tuple(str(item) for item in value)
         return ()
+
+    def _reorder_joins_in_statement(self, statement: Statement | None) -> Statement | None:
+        """把连接重排应用到语句里的 SELECT，能穿透 ``EXPLAIN`` 包裹。
+
+        WHY：重排要改的是 AST（在重建计划之前），而 ``EXPLAIN`` 是独立语句类型，
+        真正的 SELECT 在 ``Explain.statement`` 里。只认顶层 ``Select`` 会让
+        ``EXPLAIN SELECT ...`` 整条跳过重排——于是 EXPLAIN 显示 ``FROM`` 的书写顺序、
+        实际执行却按重排后的顺序跑，**计划与执行不一致**，现场用它演示也看不到规则生效。
+        这里与 ``_rewrite_statement`` 对 ``Explain`` 的处理保持一致。
+        """
+
+        if statement is None:
+            return None
+        if isinstance(statement, Select):
+            return self._reorder_joins(statement)
+        if isinstance(statement, Explain):
+            inner = statement.statement
+            if isinstance(inner, Select):
+                reordered = self._reorder_joins(inner)
+                if reordered is not inner:
+                    return replace(statement, statement=reordered)
+        return statement
+
+    def _reorder_joins(self, statement: Select) -> Select:
+        """按等值键贪心重排连接顺序（``join_reordering`` 规则）。
+
+        WHY：执行层只按 ``FROM`` 的书写顺序逐层连接。若第一层两张表在条件里没有可用的
+        等值键，第一层就退化成笛卡尔积，后面怎么连都救不回来——实测同一逻辑查询只改
+        ``FROM`` 的书写顺序，最坏差 50 倍以上（lineitem ⋈ orders ⋈ customer 的 6 种写法
+        里有 2 种 >45s 超时，因为 lineitem 与 customer 之间没有直接连接列）。
+
+        HOW：只在**全 INNER/CROSS** 时重排。INNER 下 ``ON`` 与 ``WHERE`` 等价，所以把
+        ``ON`` 合并进 ``WHERE`` 之后可以自由重排；外连接顺序敏感，直接不动。代价只用现成
+        的表行数（``TableStats.row_count``），不引入新统计。
+        """
+
+        if not _rule_enabled("join_reordering"):
+            return statement
+        if statement.from_table is None or not statement.joins:
+            return statement
+        if any(join.join_type not in {"INNER", "CROSS"} for join in statement.joins):
+            return statement
+        tables = [statement.from_table, *(join.table for join in statement.joins)]
+        if any(table.is_derived for table in tables):
+            # 派生表没有统计信息，排序没有依据。
+            return statement
+        names = [table.effective_name.lower() for table in tables]
+        if len(set(names)) != len(names):
+            return statement
+        by_name = {table.effective_name.lower(): table for table in tables}
+        for table in tables:
+            # HOW：统计按**表名**索引，别名不在其中；视图也没有统计。
+            # 拿不准行数就不重排——否则会把"没统计"误当成"0 行"而把大表排到最前面。
+            if table.name.lower() not in self.statistics.tables:
+                return statement
+
+        # 收集等值连接边（INNER 下 ON 与 WHERE 等价，合并起来一起看）。
+        atoms: list[Expr] = []
+        if statement.where is not None:
+            atoms.extend(self._split_conjunction(statement.where))
+        for join in statement.joins:
+            if join.on is not None:
+                atoms.extend(self._split_conjunction(join.on))
+        known = set(names)
+        edges: set[frozenset[str]] = set()
+        for atom in atoms:
+            pair = self._equi_join_pair(atom)
+            if pair is not None and pair[0] in known and pair[1] in known:
+                edges.add(frozenset(pair))
+        if not edges:
+            # 一张表都连不上——本来就是笛卡尔积，换顺序没有意义。
+            return statement
+
+        def cost(name: str) -> tuple[int, str]:
+            # HOW：按真实表名取行数（别名取不到统计）；行数并列时按别名定序，
+            # 保证同一个查询的不同书写顺序都收敛到同一个执行顺序。
+            return (max(0, self.statistics.get(by_name[name].name).row_count), name)
+
+        remaining = sorted(names, key=cost)
+        chosen = [remaining.pop(0)]
+        while remaining:
+            connected = [
+                name
+                for name in remaining
+                if any(frozenset((name, picked)) in edges for picked in chosen)
+            ]
+            # HOW：与已连接集合有等值键的优先；一张都接不上的（必须做笛卡尔积）排最后。
+            pool = sorted(connected or remaining, key=cost)
+            chosen.append(pool[0])
+            remaining.remove(pool[0])
+        if chosen == names:
+            return statement
+
+        _fire("join_reordering")
+        return replace(
+            statement,
+            from_table=by_name[chosen[0]],
+            joins=tuple(
+                JoinClause(join_type="CROSS", table=by_name[name], on=None)
+                for name in chosen[1:]
+            ),
+            # HOW：原来挂在各级 INNER JOIN 上的 ON 合并进 WHERE——对 INNER 二者等价，
+            # 且执行层本来就会从 WHERE 为 INNER/CROSS 推断连接键。
+            where=self._combine_conjunction(atoms),
+        )
+
+    @classmethod
+    def _equi_join_pair(cls, atom: Expr) -> tuple[str, str] | None:
+        """识别 ``a.x = b.y`` 形式的等值连接谓词，返回两侧的归属限定符。"""
+
+        if not isinstance(atom, BinaryOp) or atom.operator != "=":
+            return None
+        left, right = atom.left, atom.right
+        if not isinstance(left, ColumnRef) or not isinstance(right, ColumnRef):
+            return None
+        if not left.table or not right.table:
+            return None
+        first, second = left.table.lower(), right.table.lower()
+        if first == second:
+            return None
+        return first, second
 
     def _rewrite(
         self, plan: object, *, index_columns: Mapping[str, Collection[str]]
@@ -492,6 +626,47 @@ class Optimizer:
             properties = dict(plan.properties)
             properties["predicate"] = residual
             return replace(plan, properties=properties, children=(pushed,))
+
+        if plan.kind == "Limit" and len(plan.children) == 1:
+            child = self._rewrite(plan.children[0], index_columns=index_columns)
+            limit_value = plan.properties.get("limit")
+            offset_value = plan.properties.get("offset") or 0
+            usable = (
+                _rule_enabled("limit_pushdown")
+                and isinstance(limit_value, int)
+                and limit_value >= 0
+            )
+            if usable:
+                needed = limit_value + int(offset_value)
+                # HOW（a）排序只需要前 k 行：把 k 标在 Sort 上，运行时据此用大小为 k 的
+                # 有界堆，不必物化全部行再全量排序。k 不小于预计行数时标了也没收益。
+                if child.kind == "Sort" and needed < self.estimate_plan(child).rows:
+                    _fire("limit_pushdown")
+                    properties = dict(child.properties)
+                    properties["top_n"] = needed
+                    return replace(
+                        plan, children=(replace(child, properties=properties),)
+                    )
+                # HOW（b）投影不改变基数（非 DISTINCT）时，让 LIMIT 越过投影贴近扫描，
+                # 这样"限行尽量早生效"这件事在计划里是看得见的，而不是只发生在运行时。
+                if child.kind == "Project" and not child.properties.get("distinct"):
+                    _fire("limit_pushdown")
+                    pushed = PlanNode(
+                        "Limit",
+                        {
+                            "limit": limit_value,
+                            "offset": int(offset_value),
+                            "pushed": True,
+                        },
+                        child.children,
+                        plan.statement,
+                    )
+                    return replace(child, children=(pushed,))
+            return (
+                replace(plan, children=(child,))
+                if child != plan.children[0]
+                else plan
+            )
 
         properties = {
             key: self._rewrite_plan_value(value)

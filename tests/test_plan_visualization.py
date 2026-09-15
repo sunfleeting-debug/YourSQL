@@ -143,7 +143,7 @@ def test_cli_rules_listing_and_plan_rendering(tmp_path: Path, capsys) -> None:
     rules_text = capsys.readouterr().out
     assert "constant_folding" in rules_text
     assert "predicate_pushdown" in rules_text
-    assert "5/5 条启用" in rules_text
+    assert "7/7 条启用" in rules_text
 
     assert main(["--database", str(database_path), "--sql", JOIN_SQL, "--plan", "mermaid"]) == 0
     mermaid = capsys.readouterr().out
@@ -205,4 +205,4 @@ def test_database_accepts_disabled_rules(tmp_path: Path) -> None:
         assert "index_selection" in db.optimizer.disabled_rules
         text = db.optimizer.explain_rules()
         assert "[关闭] index_selection" in text
-        assert "4/5 条启用" in text
+        assert "6/7 条启用" in text

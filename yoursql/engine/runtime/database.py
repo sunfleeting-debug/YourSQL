@@ -243,6 +243,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self._last_scan_kind: str | None = None
         # HOW：记录本次 SELECT 每个连接采用的策略（HashJoin / IndexNestedLoop / NestedLoop）。
         self._join_kinds: list[str] = []
+        # HOW：记录连接策略的降级原因（例如哈希建侧超出内存预算而退回嵌套循环）。
+        # WHY：这类降级会让耗时从毫秒级跳到小时级，必须在 stats 里说出来而不是静静跑下去。
+        self._join_notes: list[str] = []
         self._lock = RLock()
         self.system_catalog = SystemCatalog(self)
         system_tables_changed = self.system_catalog.ensure_tables()
