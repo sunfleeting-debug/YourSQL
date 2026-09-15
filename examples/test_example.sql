@@ -56,3 +56,23 @@ INSERT INTO txn_demo VALUES (2, 'committed');
 COMMIT;
 
 SELECT id, note FROM txn_demo ORDER BY id;   -- 只应看到 (2, 'committed')
+
+-- ── 查询优化：limit 下推与连接顺序重排 ────────────────────────────────────────
+-- limit_pushdown：排序 + 限行时在 Sort 上标注 top_n，运行时有界堆只保留前 k 行。
+EXPLAIN
+SELECT id FROM employees ORDER BY id DESC LIMIT 2;   -- 结果 3, 2
+
+-- join_reordering：三张独立小表（不动上面的 employees / departments）。
+CREATE TABLE IF NOT EXISTS jr_a (k INT, v VARCHAR);
+CREATE TABLE IF NOT EXISTS jr_b (k INT, a_k INT);
+CREATE TABLE IF NOT EXISTS jr_c (a_k INT, w VARCHAR);
+INSERT INTO jr_a VALUES (1, 'x'), (2, 'y'), (3, 'z');
+INSERT INTO jr_b VALUES (1, 1), (2, 1), (3, 2);
+INSERT INTO jr_c VALUES (1, 'p'), (2, 'q');
+
+-- 故意用最差的书写顺序：a 与 c 之间没有直接等值键，按书写顺序首层会退化成笛卡尔积。
+-- 优化器按行数贪心重排为 (jr_c ⋈ jr_b) ⋈ jr_a，结果与书写顺序无关。
+EXPLAIN
+SELECT a.v, c.w
+FROM jr_a AS a, jr_c AS c, jr_b AS b
+WHERE a.k = b.a_k AND b.k = c.a_k;   -- 结果 (x, p), (x, q)

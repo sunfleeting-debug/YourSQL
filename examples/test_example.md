@@ -1,6 +1,6 @@
 # 基础查询优化复现用例
 
-本用例覆盖：常量折叠、恒真/恒假条件消除、`AND` / `OR` 规则化简、常量表达式索引匹配、显式谓词下推、逗号连接的连接键推断与不相关子查询复用。
+本用例覆盖：常量折叠、恒真/恒假条件消除、`AND` / `OR` 规则化简、常量表达式索引匹配、显式谓词下推、逗号连接的连接键推断与不相关子查询复用、限行下推（`limit_pushdown`）、连接顺序重排（`join_reordering`）。
 
 ## 运行
 
@@ -40,7 +40,7 @@ Remove-Item -LiteralPath .\tmp\optimizer-example.db -Force -ErrorAction Silently
 .venv\Scripts\python.exe -m yoursql.cli --rules
 ```
 
-预期输出 5 条规则（`constant_folding` / `boolean_simplification` / `predicate_elimination` / `predicate_pushdown` / `index_selection`），每条带执行阶段与说明，开头为 `优化规则 5/5 条启用：`。
+预期输出 7 条规则（`constant_folding` / `boolean_simplification` / `predicate_elimination` / `predicate_pushdown` / `index_selection` / `join_reordering` / `limit_pushdown`），每条带执行阶段与说明，开头为 `优化规则 7/7 条启用：`。
 
 ### 开关一条规则，观察计划变化
 
@@ -65,6 +65,78 @@ Project [..., rules=['index_selection', 'predicate_pushdown']]
 关掉 `index_selection` 后，末行变为 `SeqScan [table='employees', pushed_predicate=…]`，根节点的 `rules` 只剩 `['predicate_pushdown']`。
 
 `--plan` 只编译不执行，所以不会写库；取值 `text` / `mermaid` / `dot` / `json`。命中规则同时会写进 `plan.properties["rules"]`，EXPLAIN 的 JSON（`to_dict()`）里也能看到。
+
+### limit 下推（`limit_pushdown`）
+
+排序 + 限行时，`Sort` 上会被标注 `top_n`，运行时只用有界堆保留前 `k` 行，不再全量排序：
+
+```powershell
+.venv\Scripts\python.exe -m yoursql.cli --database .\tmp\optimizer-example.db `
+    --sql "SELECT id FROM employees ORDER BY id DESC LIMIT 2;" --plan text
+```
+
+预期（实际输出；结果为 `3, 2`）：
+
+```text
+Limit [limit=2, offset=0, rules=['limit_pushdown']]
+  Sort [order_by=[… id …, descending=True, nulls_first=None], top_n=2]
+    Project [items=[… id …], distinct=False]
+      SeqScan [table='employees', alias=None]
+```
+
+关掉规则后 `top_n` 消失，`Sort` 退回全量排序（其余计划形状不变）：
+
+```powershell
+.venv\Scripts\python.exe -m yoursql.cli --database .\tmp\optimizer-example.db `
+    --sql "SELECT id FROM employees ORDER BY id DESC LIMIT 2;" --plan text --disable-rule limit_pushdown
+```
+
+规模上的差别在 `lineitem`（60,175 行）上才明显：`ORDER BY l_extendedprice LIMIT 10` 由 **627.6 ms / 峰值 55.5 MB** 降到 **475.0 ms / 1.16 MB**（内存降 48 倍），结果逐值一致。覆盖 `NULLS FIRST/LAST`、多键、`DESC`、`OFFSET` 的组合断言见 [`tests/test_streaming_and_batch_load.py`](../tests/test_streaming_and_batch_load.py)。
+
+### 连接顺序重排（`join_reordering`）
+
+对全 INNER/CROSS 的等值连接，按表行数贪心重排：先取最小的表，再逐张接入"与已连接集合有等值键"的表。
+
+```powershell
+.venv\Scripts\python.exe -m yoursql.cli --database .\tmp\optimizer-example.db `
+    --sql "SELECT a.v, c.w FROM jr_a AS a, jr_c AS c, jr_b AS b WHERE a.k = b.a_k AND b.k = c.a_k;" --plan text
+```
+
+书写顺序是 `jr_a, jr_c, jr_b`（`jr_a` 与 `jr_c` 之间没有直接等值键，按书写顺序首层会退化成 `3 × 2` 的笛卡尔积）。优化后的执行顺序变为 `(jr_c ⋈ jr_b) ⋈ jr_a`（`jr_c` 2 行最小，`jr_b` 与它有等值键 `b.k = c.a_k`）：
+
+```text
+Project [… rules=['join_reordering', 'predicate_pushdown']]
+  Filter [predicate=… b.k = c.a_k AND a.k = b.a_k …]
+    Join [join_type='CROSS', on=None]
+      Join [join_type='CROSS', on=None]
+        SeqScan [table='jr_c', alias='c']
+        SeqScan [table='jr_b', alias='b']
+      SeqScan [table='jr_a', alias='a']
+```
+
+关掉规则后计划保持书写顺序（`jr_a` 与 `jr_c` 先连）：
+
+```powershell
+.venv\Scripts\python.exe -m yoursql.cli --database .\tmp\optimizer-example.db `
+    --sql "SELECT a.v, c.w FROM jr_a AS a, jr_c AS c, jr_b AS b WHERE a.k = b.a_k AND b.k = c.a_k;" `
+    --plan text --disable-rule join_reordering
+```
+
+预期（实际输出）：
+
+```text
+Project […]
+  Filter [predicate=… a.k = b.a_k AND b.k = c.a_k …]
+    Join [join_type='CROSS', on=None]
+      Join [join_type='CROSS', on=None]
+        SeqScan [table='jr_a', alias='a']
+        SeqScan [table='jr_c', alias='c']
+      SeqScan [table='jr_b', alias='b']
+```
+
+两种顺序的结果都是 `(x, p)`、`(x, q)`。真正拉开差距的是三张大表：`lineitem ⋈ orders ⋈ customer` 的 6 种 `FROM` 写法里，重排关闭时有 **2 种 >60 s 超时**，开启后 **6 种全部在 1.18–1.65 s 完成**且结果指纹一致。
+
+> **注意** `EXPLAIN` 也能看到重排：`EXPLAIN SELECT ...` 的计划会穿透 `EXPLAIN` 节点取到内层 SELECT，因此脚本里的 `EXPLAIN` 与实际执行的连接顺序一致。
 
 ### 计划可视化
 
