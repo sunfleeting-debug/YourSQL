@@ -3,31 +3,64 @@
   "benchmark": "TPC-H",
   "query_id": "Q6",
   "scale_factor": 0.01,
-  "data_source": "D:\\WorkSpace\\projects\\9_ImportantProjects\\03_inClass\\1\\YourSQL\\benchmarks\\third_party\\tpch_sf001\\lineitem.tbl",
+  "data_source": "F:\\MyProject\\SQL编译器\\benchmarks\\third_party\\tpch_sf001\\lineitem.tbl",
   "method": "各引擎装载同一份 lineitem.tbl，预热 1 次、静置后计时；仅统计查询耗时，装载单独记录",
-  "semantics_note": "TPC-H Q6 折扣谓词在两套数值语义下命中行数不同：DuckDB 默认把字面量 `0.06 ± 0.01` 精确折叠为 DECIMAL 0.05/0.07，多命中 l_discount = 0.07 的 391 行；SQLite/YourSQL 用 IEEE double 得到 0.06999999999999999 会排除这些行。同语义组已给 DuckDB 加显式 DOUBLE 转换，DECIMAL 变体仅作参考。",
+  "semantics_note": "TPC-H Q6 折扣谓词在两套数值语义下命中行数不同：DuckDB 默认把字面量 `0.06 ± 0.01` 精确折叠为 DECIMAL 0.05/0.07，多命中 l_discount = 0.07 的 391 行；SQLite 用 IEEE double 得到 0.06999999999999999 会排除这些行。YourSQL 完成 DECIMAL 定点化后已归入 DECIMAL 语义组，与 DuckDB（DECIMAL 列）逐值一致；double 组保留 SQLite ×2 与 DuckDB DOUBLE 变体作为对照。",
   "engines": [
     {
+      "engine": "YourSQL",
+      "version": "0.1.0",
+      "semantics": "decimal",
+      "storage": "行存 · 4096B 页 · B+Tree（本查询无可用索引）",
+      "database": "F:\\MyProject\\SQL编译器\\benchmarks\\results\\tpch_sf001_yoursql-1.db",
+      "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
+      "rows_loaded": 60175,
+      "load_seconds": 1.894388799999433,
+      "storage_config": {
+        "page_size": 16384,
+        "buffer_pool_size": 256
+      },
+      "settle_seconds": 2.0,
+      "warmup": 1,
+      "iterations": 5,
+      "times_seconds": [
+        0.7627773000003799,
+        0.6625000999993063,
+        0.6283692999995765,
+        1.0341959999996106,
+        0.5604466000004322
+      ],
+      "mean_seconds": 0.7296578599998611,
+      "median_seconds": 0.6625000999993063,
+      "min_seconds": 0.5604466000004322,
+      "result": [
+        [
+          1193053.2253
+        ]
+      ],
+      "rows_returned": 1
+    },
+    {
       "engine": "SQLite（文件库）",
-      "version": "3.50.4",
+      "version": "3.53.1",
       "semantics": "double",
       "storage": "行存 · 8KB 默认页（本查询无索引）",
       "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
       "rows_loaded": 60175,
-      "load_seconds": 0.6656350999837741,
-      "settle_seconds": 5.0,
+      "load_seconds": 0.6289183999997476,
+      "settle_seconds": 2.0,
       "warmup": 1,
       "iterations": 5,
       "times_seconds": [
-        0.008840500027872622,
-        0.00931049999780953,
-        0.009094599983654916,
-        0.009122800023760647,
-        0.008244099968578666
+        0.010705900000175461,
+        0.00955560000056721,
+        0.020780200000444893,
+        0.010462799999913841,
+        0.010253299999931187
       ],
-      "mean_seconds": 0.008922500000335277,
-      "median_seconds": 0.009094599983654916,
-      "min_seconds": 0.008244099968578666,
+      "mean_seconds": 0.012351560000206518,
+      "median_seconds": 0.010462799999913841,
+      "min_seconds": 0.00955560000056721,
       "result": [
         [
           734493.7281
@@ -37,25 +70,25 @@
     },
     {
       "engine": "SQLite（内存库）",
-      "version": "3.50.4",
+      "version": "3.53.1",
       "semantics": "double",
       "storage": "行存 · 8KB 默认页（本查询无索引）",
       "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE('1994-01-01', '+1 year') AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
       "rows_loaded": 60175,
-      "load_seconds": 0.467886800004635,
-      "settle_seconds": 5.0,
+      "load_seconds": 0.6399740000006204,
+      "settle_seconds": 2.0,
       "warmup": 1,
       "iterations": 5,
       "times_seconds": [
-        0.004795900022145361,
-        0.004657500016037375,
-        0.004590299970004708,
-        0.004658700025174767,
-        0.004683700040914118
+        0.004789999999957217,
+        0.008439799999905517,
+        0.004894900000181224,
+        0.00574629999937315,
+        0.004953200000272773
       ],
-      "mean_seconds": 0.004677220014855266,
-      "median_seconds": 0.004658700025174767,
-      "min_seconds": 0.004590299970004708,
+      "mean_seconds": 0.005764839999937976,
+      "median_seconds": 0.004953200000272773,
+      "min_seconds": 0.004789999999957217,
       "result": [
         [
           734493.7281
@@ -71,20 +104,20 @@
       "query_note": "DuckDB 默认按 DECIMAL 精确折叠折扣常量，这里显式转 DOUBLE 以对齐 SQLite/YourSQL 的 IEEE double 语义",
       "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE '1995-01-01' AND \"l_discount\" BETWEEN CAST(0.06 AS DOUBLE) - CAST(0.01 AS DOUBLE) AND CAST(0.06 AS DOUBLE) + CAST(0.01 AS DOUBLE) AND \"l_quantity\" < 24",
       "rows_loaded": 60175,
-      "load_seconds": 0.1738169000018388,
-      "settle_seconds": 5.0,
+      "load_seconds": 0.21031159999984084,
+      "settle_seconds": 2.0,
       "warmup": 1,
       "iterations": 5,
       "times_seconds": [
-        0.0017400000360794365,
-        0.0015297000063583255,
-        0.0010444000363349915,
-        0.0013728999765589833,
-        0.0017822000081650913
+        0.0016152999996847939,
+        0.001043000000208849,
+        0.0010653999997884966,
+        0.00080089999937627,
+        0.0008121999999275431
       ],
-      "mean_seconds": 0.0014938400126993656,
-      "median_seconds": 0.0015297000063583255,
-      "min_seconds": 0.0010444000363349915,
+      "mean_seconds": 0.0010673599997971905,
+      "median_seconds": 0.001043000000208849,
+      "min_seconds": 0.00080089999937627,
       "result": [
         [
           734493.728099999
@@ -100,20 +133,20 @@
       "query_note": "保留 DECIMAL 精确折叠，仅作参考",
       "query_sql": "SELECT SUM(\"l_extendedprice\" * \"l_discount\") AS \"revenue\" FROM \"lineitem\" WHERE \"l_shipdate\" >= DATE('1994-01-01') AND \"l_shipdate\" < DATE '1995-01-01' AND \"l_discount\" BETWEEN 0.06 - 0.01 AND 0.06 + 0.01 AND \"l_quantity\" < 24",
       "rows_loaded": 60175,
-      "load_seconds": 0.190926400013268,
-      "settle_seconds": 5.0,
+      "load_seconds": 0.18743319999975938,
+      "settle_seconds": 2.0,
       "warmup": 1,
       "iterations": 5,
       "times_seconds": [
-        0.001374000043142587,
-        0.0009204000234603882,
-        0.0013321000151336193,
-        0.0013043999788351357,
-        0.0012734999763779342
+        0.0011634999991656514,
+        0.0006950999995751772,
+        0.0009276000000681961,
+        0.0008242000003519934,
+        0.0009325000000899308
       ],
-      "mean_seconds": 0.0012408800073899328,
-      "median_seconds": 0.0013043999788351357,
-      "min_seconds": 0.0009204000234603882,
+      "mean_seconds": 0.0009085799998501898,
+      "median_seconds": 0.0009276000000681961,
+      "min_seconds": 0.0006950999995751772,
       "result": [
         [
           1193053.2253
@@ -123,9 +156,9 @@
     }
   ],
   "environment": {
-    "python": "3.12.13 (main, Mar  3 2026, 15:01:35) [MSC v.1944 64 bit (AMD64)]",
-    "platform": "Windows-11-10.0.26100-SP0",
-    "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel"
+    "python": "3.13.14 (main, Jun 11 2026, 04:04:46) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cpu": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel"
   },
   "scope_note": "这是 BenchBox/TPC-H Q6 子集实验，不宣称完整 TPC-H QphH@Size 成绩；YourSQL 为行存 + 逐行 Python 求值，DuckDB 为列存向量化引擎，两者定位不同，仅作数量级参照。"
 }

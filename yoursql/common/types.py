@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Iterable, Iterator, Mapping
 
@@ -16,6 +17,7 @@ class DataType(str, Enum):
 
     INT = "INT"  # 整数
     FLOAT = "FLOAT"  # 浮点数
+    DECIMAL = "DECIMAL"  # 精确十进制定点数（不带精度的 NUMERIC/DECIMAL）
     BOOLEAN = "BOOLEAN"  # 布尔（列可含 NULL）
     VARCHAR = (
         "VARCHAR"  # UTF-8 变长字符串，长度上限见 DatabaseConfig.max_varchar_length
@@ -28,8 +30,11 @@ class DataType(str, Enum):
         normalized = name.strip().upper()
         aliases = {
             "INTEGER": cls.INT,
+            "BIGINT": cls.INT,
             "REAL": cls.FLOAT,
             "DOUBLE": cls.FLOAT,
+            "NUMERIC": cls.DECIMAL,
+            "NUMBER": cls.DECIMAL,
             "BOOL": cls.BOOLEAN,
             "TEXT": cls.VARCHAR,
             "STRING": cls.VARCHAR,
@@ -41,6 +46,12 @@ class DataType(str, Enum):
             return cls[normalized]
         except KeyError as exc:
             raise BinderError(f"不支持的数据类型 {name!r}") from exc
+
+    @property
+    def is_numeric(self) -> bool:
+        """是否属于可参与算术的数值类型（INT/FLOAT/DECIMAL）。"""
+
+        return self in {DataType.INT, DataType.FLOAT, DataType.DECIMAL}
 
 
 @dataclass(frozen=True, order=True)
@@ -90,7 +101,9 @@ class Value:
             return cls.null()
         if isinstance(value, bool):
             return cls(DataType.BOOLEAN, value)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, Decimal):
+            return cls(DataType.DECIMAL, value)
+        if isinstance(value, int):
             return cls(DataType.INT, value)
         if isinstance(value, float):
             return cls(DataType.FLOAT, value)
@@ -102,11 +115,21 @@ class Value:
             return Value(target, None)
         if self.data_type is target:
             return self
+        if target is DataType.DECIMAL:
+            return Value(target, to_decimal(self.value))
+        if target is DataType.FLOAT and self.data_type is DataType.DECIMAL:
+            return Value(target, float(self.value))
         if (
             target is DataType.INT
             and self.data_type is DataType.FLOAT
             and math.isfinite(float(self.value))
             and float(self.value).is_integer()
+        ):
+            return Value(target, int(self.value))
+        if (
+            target is DataType.INT
+            and self.data_type is DataType.DECIMAL
+            and self.value == self.value.to_integral_value()
         ):
             return Value(target, int(self.value))
         if target is DataType.FLOAT and self.data_type is DataType.INT:
@@ -131,6 +154,65 @@ class Value:
             return hash((self.data_type, self.value))
         except TypeError:
             return hash((self.data_type, repr(self.value)))
+
+
+def to_decimal(value: object) -> Decimal:
+    """把 SQL 值转成 Decimal。
+
+    WHY：浮点必须先经 ``repr`` 再进 Decimal。``Decimal(0.07)`` 会把二进制的
+    0.070000000000000006938893903907228377647697925567626953125 原样带入，
+    定点化的意义就没了。
+    """
+
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise BinderError("不能把 BOOLEAN 转换为 DECIMAL")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise BinderError(f"不能把 {value!r} 转换为 DECIMAL")
+        return Decimal(repr(value))
+    if isinstance(value, str):
+        try:
+            return Decimal(value.strip())
+        except InvalidOperation as exc:
+            raise BinderError(f"不能把 {value!r} 转换为 DECIMAL") from exc
+    raise BinderError(f"不能把 {type(value).__name__} 转换为 DECIMAL")
+
+
+def decimal_to_json(value: Decimal) -> float | str:
+    """把 Decimal 转成 JSON 可编码的数值。
+
+    HOW：能安全放进 IEEE-754 双精度的走 float（保持 JSON 数字类型，前端和
+    现有断言都不用改）；超出范围的退回字符串，避免 ``json.dumps`` 报
+    ``Infinity`` 或静默丢精度。
+    """
+
+    try:
+        as_float = float(value)
+    except (OverflowError, InvalidOperation):
+        return str(value)
+    if math.isfinite(as_float):
+        return as_float
+    return str(value)
+
+
+def json_safe(value: object) -> object:
+    """把任意结果值递归转成可以直接 ``json.dumps`` 的形式。
+
+    WHY：Decimal 不是 JSON 类型；执行结果的展示边界（CLI / HTTP / 工作台）
+    统一在这里落地，内部仍保持定点精度。
+    """
+
+    if isinstance(value, Decimal):
+        return decimal_to_json(value)
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    return value
 
 
 @dataclass(frozen=True)
@@ -248,7 +330,7 @@ class ExecutionResult:
         """将对象转换为可序列化的字典。"""
         return {
             "columns": list(self.columns),
-            "rows": [list(row) for row in self.rows],
+            "rows": [json_safe(list(row)) for row in self.rows],
             "affected_rows": self.affected_rows,
             "message": self.message,
             "plan": self.plan,
@@ -261,7 +343,12 @@ class ExecutionResult:
 
 
 def compare_values(left: SqlValue, right: SqlValue, operator: str) -> bool | None:
-    """执行 SQL 三值逻辑中的比较；NULL 比较结果为 UNKNOWN。"""
+    """执行 SQL 三值逻辑中的比较；NULL 比较结果为 UNKNOWN。
+
+    HOW：DECIMAL 与 FLOAT 不互相转换。定点列参与比较的字面量在词法阶段就是
+    Decimal，所以 DECIMAL 的等值/范围判断是精确的；而 FLOAT 列保留 IEEE-754
+    语义（``0.07`` 仍是 0.070000000000000007），与 SQLite/duckdb 对 REAL 的行为一致。
+    """
 
     if left is None or right is None:
         return None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 
 from yoursql.common.types import RowId
 
@@ -35,6 +36,10 @@ def _value_order(value: object) -> tuple[int, object]:
     if isinstance(value, float):
         if math.isnan(value):
             return (2, (1, 0.0))
+        return (2, (0, value))
+    if isinstance(value, Decimal):
+        # WHY：Decimal 必须与 INT/FLOAT 共用数值排序；按 repr 排序会把
+        # Decimal("1.50") 放在 Decimal("1.5") 后面，导致闭区间下界漏行。
         return (2, (0, value))
     if isinstance(value, str):
         return (3, value)

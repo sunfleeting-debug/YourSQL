@@ -1,4 +1,4 @@
-"""统计、代价估算、计划缓存和基础递归规则。"""
+"""统计、代价估算、计划缓存和具名重写规则。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import hashlib
 import operator as py_operator
 import re
 from collections.abc import Collection, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from threading import RLock
 
@@ -52,6 +53,78 @@ from yoursql.planner.physical import PlanNode, PhysicalPlanNode, as_physical
 _SMALL_TABLE_ROW_THRESHOLD = 128
 # WHY：索引命中大量记录时还要逐行回表；超过该比例时顺序扫描通常更稳定。
 _INDEX_SELECTIVITY_THRESHOLD = 0.20
+
+
+@dataclass(frozen=True)
+class RewriteRule:
+    """一条具名优化规则：可枚举、可单独关闭，命中情况会写进计划。
+
+    HOW：规则本体仍是 ``Optimizer`` 上的方法（它们要共享统计信息与索引元数据），
+    这里登记的是**规则清单**——名字、说明、执行阶段。这样做换来三件事：
+    1. "可优化（≥2 条规则）"有了可枚举的证据，不再是散落在代码里的隐式改写；
+    2. ``optimize()`` 能把"这条语句实际命中了哪些规则"记进计划，EXPLAIN 可解释；
+    3. 可以按名字关掉某条规则，现场演示"关掉它计划会变成什么样"。
+    """
+
+    name: str
+    summary: str
+    stage: str  # expression / predicate / access-path
+    togglable: bool = True
+
+
+# HOW：规则清单就是优化器的能力边界——按语句 → 谓词 → 访问路径的顺序执行。
+DEFAULT_RULES: tuple[RewriteRule, ...] = (
+    RewriteRule(
+        "constant_folding",
+        "编译期折叠常量表达式：1 + 2 → 3、'a' || 'b' → 'ab'、CAST 常量直接求值",
+        "expression",
+    ),
+    RewriteRule(
+        "boolean_simplification",
+        "布尔恒等式化简：x AND TRUE → x、x OR FALSE → x、NOT TRUE → FALSE",
+        "expression",
+    ),
+    RewriteRule(
+        "predicate_elimination",
+        "消除恒真/恒假过滤：Filter(TRUE) → 子节点，Filter(FALSE) → EmptyScan",
+        "predicate",
+    ),
+    RewriteRule(
+        "predicate_pushdown",
+        "单表谓词下推到扫描节点，跨表谓词保留在 JOIN 上方",
+        "predicate",
+    ),
+    RewriteRule(
+        "index_selection",
+        "按谓词列与索引元数据选择 IndexScan（覆盖索引走只读路径）",
+        "access-path",
+    ),
+)
+
+DEFAULT_RULE_NAMES: frozenset[str] = frozenset(rule.name for rule in DEFAULT_RULES)
+
+# HOW：用 ContextVar 而不是实例属性，既能被 @classmethod 的规则方法读到，
+# 又天然按调用栈隔离（多线程 / 嵌套 optimize 都不会互相污染）。
+_DISABLED_RULES: ContextVar[frozenset[str]] = ContextVar(
+    "yoursql_disabled_rules", default=frozenset()
+)
+_FIRED_RULES: ContextVar[set[str] | None] = ContextVar(
+    "yoursql_fired_rules", default=None
+)
+
+
+def _rule_enabled(name: str) -> bool:
+    """当前作用域内这条规则是否启用。"""
+
+    return name not in _DISABLED_RULES.get()
+
+
+def _fire(name: str) -> None:
+    """登记一条规则被命中；不在 ``optimize()`` 的追踪作用域内时为无操作。"""
+
+    fired = _FIRED_RULES.get()
+    if fired is not None:
+        fired.add(name)
 
 
 @dataclass
@@ -124,12 +197,48 @@ class Optimizer:
         cache: PlanCache | None = None,
         *,
         buffer_pool_pages: int = 64,
+        disabled_rules: Collection[str] = (),
     ) -> None:
         """初始化实例所需的状态和依赖。"""
         self.statistics = statistics or StatisticsStore()
         self.cache = cache or PlanCache()
         # HOW：随机回表成本取决于“表页数是否超出缓存”，真实池容量由 Database 注入。
         self.buffer_pool_pages = max(1, int(buffer_pool_pages))
+        unknown = set(disabled_rules) - DEFAULT_RULE_NAMES
+        if unknown:
+            raise ValueError(
+                "未知的优化规则 %s；可用规则：%s"
+                % (
+                    ", ".join(sorted(unknown)),
+                    ", ".join(sorted(DEFAULT_RULE_NAMES)),
+                )
+            )
+        self.disabled_rules: frozenset[str] = frozenset(disabled_rules)
+        # HOW：最近一次 optimize() 命中的规则，便于调用方（EXPLAIN / 测试）直接读取。
+        self.last_fired_rules: tuple[str, ...] = ()
+
+    @classmethod
+    def rule_catalogue(cls) -> tuple[RewriteRule, ...]:
+        """全部内置规则（含说明与执行阶段），用于文档、演示和校验。"""
+
+        return DEFAULT_RULES
+
+    @property
+    def enabled_rules(self) -> tuple[RewriteRule, ...]:
+        """当前实例实际启用的规则子集。"""
+
+        return tuple(
+            rule for rule in DEFAULT_RULES if rule.name not in self.disabled_rules
+        )
+
+    def explain_rules(self) -> str:
+        """把规则清单渲染成可读文本（现场讲解 / 文档直接引用）。"""
+
+        lines = [f"优化规则 {len(self.enabled_rules)}/{len(DEFAULT_RULES)} 条启用："]
+        for rule in DEFAULT_RULES:
+            state = "关闭" if rule.name in self.disabled_rules else "启用"
+            lines.append(f"  [{state}] {rule.name:<24}{rule.stage:<12}{rule.summary}")
+        return "\n".join(lines)
 
     def _random_row_cost(self, page_count: int) -> float:
         """随机回表单行成本：记录解码 + 未命中缓存部分的随机取页。"""
@@ -281,25 +390,48 @@ class Optimizer:
             if cached is not None:
                 if not isinstance(cached, PhysicalPlanNode):
                     raise TypeError("计划缓存包含非物理计划")
+                self.last_fired_rules = self._rules_of(cached)
                 return cached
         statement = plan.statement
-        rewritten_statement = (
-            self._rewrite_statement(statement) if statement is not None else None
-        )
-        base_plan = plan
-        if rewritten_statement is not None and rewritten_statement != statement:
-            # HOW：先用折叠后的 AST 重建计划，再做访问路径和谓词下推，确保
-            # 计划属性、实际执行语句和索引边界使用同一份表达式。
-            base_plan = plan_from_statement(rewritten_statement)
-        optimized = self._rewrite(base_plan, index_columns=index_columns or {})
-        if not isinstance(optimized, PlanNode):
-            raise TypeError("优化器未返回计划节点")
-        if rewritten_statement is not None:
-            optimized = replace(optimized, statement=rewritten_statement)
-        optimized = as_physical(optimized)
+        # HOW：把"本实例关掉了哪些规则"和"本次命中了哪些规则"放进 ContextVar，
+        # 让 @classmethod 的规则方法也能读到，同时按调用栈天然隔离。
+        disabled_token = _DISABLED_RULES.set(self.disabled_rules)
+        fired: set[str] = set()
+        fired_token = _FIRED_RULES.set(fired)
+        try:
+            rewritten_statement = (
+                self._rewrite_statement(statement) if statement is not None else None
+            )
+            base_plan = plan
+            if rewritten_statement is not None and rewritten_statement != statement:
+                # HOW：先用折叠后的 AST 重建计划，再做访问路径和谓词下推，确保
+                # 计划属性、实际执行语句和索引边界使用同一份表达式。
+                base_plan = plan_from_statement(rewritten_statement)
+            optimized = self._rewrite(base_plan, index_columns=index_columns or {})
+            if not isinstance(optimized, PlanNode):
+                raise TypeError("优化器未返回计划节点")
+            if rewritten_statement is not None:
+                optimized = replace(optimized, statement=rewritten_statement)
+            optimized = as_physical(optimized)
+        finally:
+            _FIRED_RULES.reset(fired_token)
+            _DISABLED_RULES.reset(disabled_token)
+        self.last_fired_rules = tuple(sorted(fired))
+        if fired:
+            # HOW：命中规则写进根节点属性，EXPLAIN 就能回答"这条语句被优化了什么"。
+            properties = dict(optimized.properties)
+            properties["rules"] = self.last_fired_rules
+            optimized = replace(optimized, properties=properties)
         if sql is not None:
             self.cache.put(sql, optimized)
         return optimized
+
+    @staticmethod
+    def _rules_of(plan: PlanNode) -> tuple[str, ...]:
+        value = plan.properties.get("rules")
+        if isinstance(value, (list, tuple)):
+            return tuple(str(item) for item in value)
+        return ()
 
     def _rewrite(
         self, plan: object, *, index_columns: Mapping[str, Collection[str]]
@@ -333,15 +465,25 @@ class Optimizer:
                     if child != plan.children[0]
                     else plan
                 )
-            if self._is_false_predicate(predicate):
+            if _rule_enabled("predicate_elimination") and self._is_false_predicate(
+                predicate
+            ):
+                _fire("predicate_elimination")
                 return PlanNode(
                     "EmptyScan",
                     {"reason": "过滤条件恒假", "predicate": predicate},
                     (),
                     plan.statement,
                 )
-            if self._is_true_predicate(predicate):
+            if _rule_enabled("predicate_elimination") and self._is_true_predicate(
+                predicate
+            ):
+                _fire("predicate_elimination")
                 return child
+            if not _rule_enabled("predicate_pushdown"):
+                properties = dict(plan.properties)
+                properties["predicate"] = predicate
+                return replace(plan, properties=properties, children=(child,))
             pushed, residual = self._push_predicates(
                 child, predicate, index_columns=index_columns
             )
@@ -371,6 +513,8 @@ class Optimizer:
         """为顺序扫描节点选择顺序或索引访问。"""
         if plan.kind != "SeqScan":
             return plan
+        if not _rule_enabled("index_selection"):
+            return plan
         table = plan.properties.get("table")
         if not isinstance(table, str):
             return plan
@@ -386,6 +530,7 @@ class Optimizer:
             return plan
         if self.choose_scan(table, has_usable_index=True) != "IndexScan":
             return plan
+        _fire("index_selection")
         properties = dict(plan.properties)
         properties["index_column"] = column.name
         return PlanNode("IndexScan", properties, plan.children, plan.statement)
@@ -506,17 +651,23 @@ class Optimizer:
         if isinstance(expression, UnaryOp):
             operand = cls._rewrite_expr(expression.operand)
             rewritten = cls._replace_node(expression, operand=operand)
+            if not _rule_enabled("constant_folding"):
+                return rewritten
             if not isinstance(operand, Literal):
                 return rewritten
             if expression.operator.upper() == "NOT":
                 value = None if operand.value is None else not bool(operand.value)
+                _fire("constant_folding")
                 return cls._literal(value, expression)
             if operand.value is None:
+                _fire("constant_folding")
                 return cls._literal(None, expression)
             try:
                 if expression.operator == "+":
+                    _fire("constant_folding")
                     return cls._literal(+operand.value, expression)
                 if expression.operator == "-":
+                    _fire("constant_folding")
                     return cls._literal(-operand.value, expression)
             except (TypeError, ValueError, OverflowError):
                 return rewritten
@@ -525,18 +676,28 @@ class Optimizer:
             left = cls._rewrite_expr(expression.left)
             right = cls._rewrite_expr(expression.right)
             operator = expression.operator.upper()
-            simplified = cls._simplify_boolean(operator, left, right, expression)
-            if simplified is not None:
-                return simplified
-            if isinstance(left, Literal) and isinstance(right, Literal):
+            if _rule_enabled("boolean_simplification"):
+                simplified = cls._simplify_boolean(operator, left, right, expression)
+                if simplified is not None:
+                    _fire("boolean_simplification")
+                    return simplified
+            if (
+                _rule_enabled("constant_folding")
+                and isinstance(left, Literal)
+                and isinstance(right, Literal)
+            ):
                 folded, value = cls._fold_binary(operator, left.value, right.value)
                 if folded:
+                    _fire("constant_folding")
                     return cls._literal(value, expression)
             return cls._replace_node(expression, left=left, right=right)
         if isinstance(expression, IsNull):
             child = cls._rewrite_expr(expression.expression)
             if isinstance(child, Literal):
+                if not _rule_enabled("constant_folding"):
+                    return cls._replace_node(expression, expression=child)
                 value = child.value is None
+                _fire("constant_folding")
                 return cls._literal(
                     not value if expression.negated else value, expression
                 )
@@ -545,6 +706,8 @@ class Optimizer:
             child = cls._rewrite_expr(expression.expression)
             values = tuple(cls._rewrite_expr(value) for value in expression.values)
             rewritten = cls._replace_node(expression, expression=child, values=values)
+            if not _rule_enabled("constant_folding"):
+                return rewritten
             if isinstance(child, Literal) and all(
                 isinstance(value, Literal) for value in values
             ):
@@ -558,6 +721,7 @@ class Optimizer:
                         result = None
                 if expression.negated and result is not None:
                     result = not result
+                _fire("constant_folding")
                 return cls._literal(result, expression)
             return rewritten
         if isinstance(expression, BetweenPredicate):
@@ -567,6 +731,8 @@ class Optimizer:
             rewritten = cls._replace_node(
                 expression, expression=child, lower=lower, upper=upper
             )
+            if not _rule_enabled("constant_folding"):
+                return rewritten
             if all(isinstance(value, Literal) for value in (child, lower, upper)):
                 result = cls._and_truth(
                     compare_values(child.value, lower.value, ">="),
@@ -574,6 +740,7 @@ class Optimizer:
                 )
                 if expression.negated and result is not None:
                     result = not result
+                _fire("constant_folding")
                 return cls._literal(result, expression)
             return rewritten
         if isinstance(expression, FunctionCall):
@@ -893,6 +1060,8 @@ class Optimizer:
         pushed, residual = self._push_into_subtree(
             child, atoms, index_columns=index_columns
         )
+        if residual != atoms or pushed != child:
+            _fire("predicate_pushdown")
         return pushed, self._combine_conjunction(residual)
 
     def _push_into_subtree(
@@ -968,4 +1137,11 @@ class Optimizer:
         return PlanNode("Filter", {"predicate": predicate}, (plan,), plan.statement)
 
 
-__all__ = ["CostEstimate", "Optimizer", "PlanCache", "StatisticsStore"]
+__all__ = [
+    "DEFAULT_RULES",
+    "CostEstimate",
+    "Optimizer",
+    "PlanCache",
+    "RewriteRule",
+    "StatisticsStore",
+]

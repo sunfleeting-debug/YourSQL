@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from yoursql.common.types import DataType
+from yoursql.common.types import DataType, json_safe
 
 
 def _as_dict(value: object) -> object:
-    """递归将对象转换为可序列化结构。"""
     if isinstance(value, Node):
         return value.to_dict()
     if isinstance(value, tuple):
@@ -16,7 +15,10 @@ def _as_dict(value: object) -> object:
         return [_as_dict(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _as_dict(item) for key, item in value.items()}
-    return value
+    if isinstance(value, DataType):
+        return value.value
+    # HOW：字面量里可能是 Decimal（词法阶段的定点数），AST/计划 JSON 必须能序列化。
+    return json_safe(value)
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,6 @@ class Node:
         return self
 
     def to_dict(self) -> dict[str, object]:
-        """将对象转换为可序列化的字典。"""
         result: dict[str, object] = {"node": type(self).__name__}
         for item in fields(self):
             result[item.name] = _as_dict(getattr(self, item.name))
@@ -85,7 +86,6 @@ class ColumnRef(Expr):
 
     @property
     def qualified_name(self) -> str:
-        """返回带限定名的对象名称。"""
         return f"{self.table}.{self.name}" if self.table else self.name
 
 
@@ -145,6 +145,35 @@ class BetweenPredicate(Expr):
     lower: Expr
     upper: Expr
     negated: bool = False
+
+
+@dataclass(frozen=True)
+class CaseExpression(Expr):
+    """CASE 表达式，同时覆盖 searched 与 simple 两种写法。
+
+    HOW：``branches`` 是 (WHEN 条件, THEN 结果) 的序列；``operand`` 不为空时
+    表示 simple CASE（``CASE x WHEN 1 THEN ...``），此时条件与 operand 做等值比较。
+    """
+
+    branches: tuple[tuple[Expr, Expr], ...] = ()
+    operand: Expr | None = None
+    otherwise: Expr | None = None
+
+
+@dataclass(frozen=True)
+class ExistsPredicate(Expr):
+    """EXISTS / NOT EXISTS 子查询谓词。"""
+
+    query: "Select"
+    negated: bool = False
+
+
+@dataclass(frozen=True)
+class CastExpression(Expr):
+    """CAST(expr AS type) 与 ``expr::type`` 两种写法的统一节点。"""
+
+    expression: Expr
+    data_type: DataType
 
 
 @dataclass(frozen=True)
@@ -231,12 +260,19 @@ class SelectItem(Node):
 
 @dataclass(frozen=True)
 class TableRef(Node):
+    """FROM/JOIN 的一个数据源：具名表、视图，或派生表（``query`` 不为空）。"""
+
     name: str
     alias: str | None = None
+    # HOW：派生表（FROM (SELECT ...) AS d）复用同一节点：name 为空串，query 承载子查询。
+    query: "Select | None" = None
+
+    @property
+    def is_derived(self) -> bool:
+        return self.query is not None
 
     @property
     def effective_name(self) -> str:
-        """返回对象实际使用的名称。"""
         return self.alias or self.name
 
 
@@ -271,7 +307,6 @@ class Select(Statement):
 
     @property
     def from_source(self) -> TableRef | None:
-        """从源对象提取对应的关系信息。"""
         return self.from_table
 
 
@@ -322,11 +357,39 @@ class ShowGrants(Statement):
     target_name: str | None = None
 
 
+@dataclass(frozen=True)
+class BeginTransaction(Statement):
+    """开启显式事务；``isolation`` 为空时使用会话默认隔离级别。"""
+
+    isolation: str | None = None
+
+
+@dataclass(frozen=True)
+class Commit(Statement):
+    """提交当前事务。"""
+
+
+@dataclass(frozen=True)
+class Rollback(Statement):
+    """回滚当前事务。"""
+
+
+@dataclass(frozen=True)
+class SetTransaction(Statement):
+    """设置本会话后续事务的默认隔离级别。"""
+
+    isolation: str
+
+
 __all__ = [
     "BetweenPredicate",
+    "BeginTransaction",
     "BinaryOp",
+    "CaseExpression",
+    "CastExpression",
     "ColumnDefinition",
     "ColumnRef",
+    "Commit",
     "CreateRole",
     "CreateIndex",
     "CreateTable",
@@ -336,6 +399,7 @@ __all__ = [
     "DropIndex",
     "DropTable",
     "DropView",
+    "ExistsPredicate",
     "Explain",
     "Expr",
     "FunctionCall",
@@ -349,8 +413,10 @@ __all__ = [
     "OrderItem",
     "Parameter",
     "Revoke",
+    "Rollback",
     "Select",
     "SelectItem",
+    "SetTransaction",
     "Show",
     "ShowGrants",
     "Star",

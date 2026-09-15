@@ -7,9 +7,10 @@ SQL 执行结果和 HTTP JSON 都是动态数据，但它们并不等于任意 P
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TypeAlias
 
-SqlValue: TypeAlias = str | int | float | bool | None
+SqlValue: TypeAlias = str | int | float | Decimal | bool | None
 JsonPrimitive: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]

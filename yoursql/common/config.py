@@ -139,7 +139,7 @@ def _env_payload_codec(name: str = "YOURSQL_PAYLOAD_CODEC") -> PayloadCodecName:
 
 @dataclass(frozen=True)
 class DatabaseConfig:
-    """控制页大小、缓存和字符串长度限制。"""
+    """控制页大小、缓存、字符串长度限制，以及事务/并发/WAL 策略。"""
 
     page_size: int = 4096
     buffer_pool_size: int = 64
@@ -147,6 +147,14 @@ class DatabaseConfig:
     protect_page_types: bool = False
     max_varchar_length: int = 1_000_000
     payload_codec: PayloadCodecName = "json"
+    # HOW：WAL 关闭后退化为“提交即整库刷盘”，崩溃恢复能力随之中止，仅用于对照演示。
+    wal_enabled: bool = True
+    # HOW：lock_mode 决定封锁粒度——table 为表级 S/X 锁，none 表示不做封锁控制。
+    lock_mode: str = "table"
+    # HOW：等待锁的最长秒数；超时抛出 ConcurrencyError，避免演示时无限挂起。
+    lock_timeout_seconds: float = 5.0
+    # HOW：默认隔离级别；serializable 走严格两阶段封锁，read_committed 在语句结束时释放读锁。
+    default_isolation: str = "serializable"
 
     @classmethod
     def from_environment(cls) -> "DatabaseConfig":
@@ -165,6 +173,14 @@ class DatabaseConfig:
                 "YOURSQL_MAX_VARCHAR_LENGTH", cls.max_varchar_length
             ),
             payload_codec=_env_payload_codec(),
+            wal_enabled=_env_bool("YOURSQL_WAL_ENABLED", cls.wal_enabled),
+            lock_mode=_env_text("YOURSQL_LOCK_MODE", cls.lock_mode),
+            lock_timeout_seconds=_env_float(
+                "YOURSQL_LOCK_TIMEOUT_SECONDS", cls.lock_timeout_seconds
+            ),
+            default_isolation=_env_text(
+                "YOURSQL_DEFAULT_ISOLATION", cls.default_isolation
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -178,6 +194,13 @@ class DatabaseConfig:
         if self.max_varchar_length < 1:
             raise ValueError("max_varchar_length 必须为正数")
         object.__setattr__(self, "payload_codec", validate_payload_codec(self.payload_codec))
+        object.__setattr__(self, "payload_codec", validate_payload_codec(self.payload_codec))
+        if self.lock_mode.lower() not in {"table", "none"}:
+            raise ValueError("lock_mode 只能是 table 或 none")
+        if self.lock_timeout_seconds <= 0:
+            raise ValueError("lock_timeout_seconds 必须为正数")
+        if self.default_isolation.lower() not in {"serializable", "read_committed"}:
+            raise ValueError("default_isolation 只能是 serializable 或 read_committed")
 
 
 @dataclass(frozen=True)

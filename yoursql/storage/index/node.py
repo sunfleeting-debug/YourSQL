@@ -87,6 +87,24 @@ class _IndexNode:
 
     def validate(self) -> None:
         """校验索引页或索引节点的结构完整性。"""
+        self.validate_structure()
+        if self.leaf:
+            for left_key, right_key, left_row, right_row in zip(
+                self.keys, self.keys[1:], self.row_ids, self.row_ids[1:], strict=False
+            ):
+                if _compare_entries(left_key, left_row, right_key, right_row) > 0:
+                    raise StorageError(
+                        f"索引叶页 {self.page_id} 的条目未按 key/RowId 排序"
+                    )
+        elif any(
+            _compare_keys(left, right) > 0
+            for left, right in zip(self.keys, self.keys[1:], strict=False)
+        ):
+            raise StorageError(f"索引内部页 {self.page_id} 的分隔键未排序")
+
+    def validate_structure(self) -> None:
+        """执行读路径所需的 O(1) 结构校验，不检查条目排序。"""
+
         if self.leaf:
             if len(self.keys) != len(self.row_ids):
                 raise StorageError(f"索引叶页 {self.page_id} 的 key/RowId 数量不一致")
@@ -96,20 +114,9 @@ class _IndexNode:
                 )
             if self.children:
                 raise StorageError(f"索引叶页 {self.page_id} 不应包含子页")
-            for left_key, right_key, left_row, right_row in zip(
-                self.keys, self.keys[1:], self.row_ids, self.row_ids[1:], strict=False
-            ):
-                if _compare_entries(left_key, left_row, right_key, right_row) > 0:
-                    raise StorageError(
-                        f"索引叶页 {self.page_id} 的条目未按 key/RowId 排序"
-                    )
-        elif len(self.children) != len(self.keys) + 1:
+            return
+        if len(self.children) != len(self.keys) + 1:
             raise StorageError(f"索引内部页 {self.page_id} 的子页数量非法")
-        elif any(
-            _compare_keys(left, right) > 0
-            for left, right in zip(self.keys, self.keys[1:], strict=False)
-        ):
-            raise StorageError(f"索引内部页 {self.page_id} 的分隔键未排序")
 
     def payload(self, codec: PayloadCodec | str = "json") -> bytes:
         """返回索引条目的覆盖列载荷。"""
@@ -144,7 +151,11 @@ class _IndexNode:
 
     @classmethod
     def from_page(
-        cls, page: Page, preferred: PayloadCodec | str | None = None
+        cls,
+        page: Page,
+        preferred: PayloadCodec | str | None = None,
+        *,
+        verify: bool = False,
     ) -> "_IndexNode":
         """从数据库页恢复索引节点。"""
         if page.page_type is not PageType.INDEX:
@@ -195,7 +206,10 @@ class _IndexNode:
                 if not isinstance(raw_children, list):
                     raise ValueError("children 不是数组")
                 node.children = [int(item) for item in raw_children]
-            node.validate()
+            if verify:
+                node.validate()
+            else:
+                node.validate_structure()
             return node
         except (
             UnicodeDecodeError,

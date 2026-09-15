@@ -2,9 +2,11 @@
 
 from yoursql.sql.ast import (
     BetweenPredicate,
+    BeginTransaction,
     BinaryOp,
     ColumnDefinition,
     ColumnRef,
+    Commit,
     CreateIndex,
     CreateRole,
     CreateTable,
@@ -27,8 +29,10 @@ from yoursql.sql.ast import (
     OrderItem,
     Parameter,
     Revoke,
+    Rollback,
     Select,
     SelectItem,
+    SetTransaction,
     Show,
     ShowGrants,
     Star,
@@ -40,17 +44,20 @@ from yoursql.sql.ast import (
 )
 from yoursql.sql.binder import Binder, BoundStatement, CatalogProtocol, TableProtocol
 from yoursql.sql.compiler import CompilationResult, Compiler, compile_sql
+from yoursql.sql.diagnostics import Diagnostic, ParseOutcome
 from yoursql.sql.lexer import KEYWORDS, Lexer, Token, TokenKind, TokenType, lex, tokenize
-from yoursql.sql.parser import Parser, parse_one, parse_script
+from yoursql.sql.parser import Parser, parse_one, parse_recovering, parse_script
 
 __all__ = [
     "BetweenPredicate",
+    "BeginTransaction",
     "BinaryOp",
     "Binder",
     "BoundStatement",
     "CatalogProtocol",
     "ColumnDefinition",
     "ColumnRef",
+    "Commit",
     "TableProtocol",
     "CompilationResult",
     "Compiler",
@@ -60,6 +67,7 @@ __all__ = [
     "CreateUser",
     "CreateView",
     "Delete",
+    "Diagnostic",
     "DropIndex",
     "DropTable",
     "DropView",
@@ -78,9 +86,12 @@ __all__ = [
     "Parser",
     "OrderItem",
     "Parameter",
+    "ParseOutcome",
     "Revoke",
+    "Rollback",
     "Select",
     "SelectItem",
+    "SetTransaction",
     "Show",
     "ShowGrants",
     "Star",
@@ -95,6 +106,7 @@ __all__ = [
     "compile_sql",
     "lex",
     "parse_one",
+    "parse_recovering",
     "parse_script",
     "tokenize",
 ]

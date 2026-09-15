@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import struct
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from yoursql.common.contracts import JsonValue
@@ -39,6 +40,8 @@ class JsonPayloadCodec(PayloadCodec):
 
     name: PayloadCodecName = "json"
 
+    _DECIMAL_KEY = "__yoursql_decimal__"
+
     def encode(self, value: object) -> bytes:
         """编码紧凑 UTF-8 JSON。"""
 
@@ -51,6 +54,7 @@ class JsonPayloadCodec(PayloadCodec):
                 separators=(",", ":"),
                 sort_keys=True,
                 allow_nan=False,
+                default=self._default,
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise PayloadCodecError("值无法编码为 JSON payload") from exc
@@ -61,9 +65,31 @@ class JsonPayloadCodec(PayloadCodec):
         import json
 
         try:
-            return json.loads(payload.decode("utf-8"))
+            return json.loads(payload.decode("utf-8"), object_hook=self._object_hook)
         except (UnicodeDecodeError, TypeError, ValueError) as exc:
             raise PayloadCodecError("JSON payload 损坏") from exc
+
+    @classmethod
+    def _default(cls, value: object) -> object:
+        """把内部定点数编码成带标签的 JSON 对象，避免落盘时折成 float。"""
+
+        if isinstance(value, Decimal):
+            return {cls._DECIMAL_KEY: str(value)}
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    @classmethod
+    def _object_hook(cls, value: dict[str, object]) -> object:
+        """还原 JSON payload 中的定点数标签。"""
+
+        if len(value) != 1 or cls._DECIMAL_KEY not in value:
+            return value
+        raw = value[cls._DECIMAL_KEY]
+        if not isinstance(raw, str):
+            raise PayloadCodecError("Decimal payload 标签值不是字符串")
+        try:
+            return Decimal(raw)
+        except InvalidOperation as exc:
+            raise PayloadCodecError("Decimal payload 标签值无效") from exc
 
 
 class _Writer:
@@ -114,7 +140,7 @@ class _Reader:
 
 
 class ManualPayloadCodec(PayloadCodec):
-    """手写 TLV：0 NULL、1/2 布尔、3 整数、4 浮点、5 字符串、6 数组、7 对象。"""
+    """手写 TLV；标签 8 专门保存 Decimal 的十进制定点文本。"""
 
     name: PayloadCodecName = "manual"
     max_depth = 64
@@ -148,6 +174,11 @@ class ManualPayloadCodec(PayloadCodec):
         elif isinstance(value, int):
             writer.data.append(3)
             writer.varuint(value * 2 if value >= 0 else -value * 2 - 1)
+        elif isinstance(value, Decimal):
+            writer.data.append(8)
+            encoded = str(value).encode("ascii")
+            writer.u32(len(encoded))
+            writer.data.extend(encoded)
         elif isinstance(value, float):
             if not math.isfinite(value):
                 raise PayloadCodecError("manual payload 不支持非有限浮点数")
@@ -203,6 +234,11 @@ class ManualPayloadCodec(PayloadCodec):
                 return reader.take(reader.u32()).decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise PayloadCodecError("manual payload 字符串不是 UTF-8") from exc
+        if tag == 8:
+            try:
+                return Decimal(reader.take(reader.u32()).decode("ascii"))
+            except (UnicodeDecodeError, InvalidOperation) as exc:
+                raise PayloadCodecError("manual payload Decimal 无效") from exc
         if tag == 6:
             count = reader.u32()
             if count > self.max_items:

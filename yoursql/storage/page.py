@@ -23,8 +23,10 @@ class PageType(str, Enum):
 
 PAGE_MAGIC = b"MDBP"
 PAGE_VERSION = 2
-PAGE_HEADER = struct.Struct("<4sIBBQI I4s")
-# 4 magic + 4 version + 1 type + 1 reserved + 8 page id + 4 payload length + 4 crc + 4 对齐保留
+# HOW：末尾 4 字节原本是对齐填充（旧文件恒为 0），现复用为页 LSN（日志序号），
+# 因此结构体尺寸与磁盘布局均未变化，旧数据库文件可以直接打开。
+PAGE_HEADER = struct.Struct("<4sIBBQIII")
+# 4 magic + 4 version + 1 type + 1 reserved + 8 page id + 4 payload length + 4 crc + 4 lsn
 HEADER_SIZE = PAGE_HEADER.size
 
 # HEAP 页在外层 Page Header 之后使用独立的双向槽式布局。槽目录从
@@ -217,13 +219,19 @@ def decode_free_page_next(payload: bytes) -> int | None:
 
 @dataclass
 class Page:
-    """带 CRC 校验的固定大小页。"""
+    """带 CRC 校验的固定大小页。
+
+    ``lsn`` 是该页最后一次被日志记录覆盖的日志序号（Log Sequence Number）。
+    未参与任何事务的页保持 0；写入路径上它用于实现"日志先于数据页落盘"的
+    预写日志规则。
+    """
 
     HEADER_SIZE: ClassVar[int] = HEADER_SIZE
     page_id: int
     page_size: int = 4096
     page_type: PageType = PageType.FREE
     payload: bytes = b""
+    lsn: int = 0
 
     def __post_init__(self) -> None:
         """完成数据类初始化后的派生状态设置。"""
@@ -238,6 +246,9 @@ class Page:
             self.payload = bytes(self.payload)
         if len(self.payload) > self.page_size - HEADER_SIZE:
             raise StorageError(f"页 {self.page_id} 负载超过页容量")
+        self.lsn = int(self.lsn)
+        if not 0 <= self.lsn <= 0xFFFFFFFF:
+            raise StorageError("页 LSN 超出 4 字节范围")
 
     @property
     def free_space(self) -> int:
@@ -255,7 +266,7 @@ class Page:
             self.page_id,
             len(self.payload),
             checksum,
-            b"\x00" * 4,
+            self.lsn,
         )
         return (
             header
@@ -280,7 +291,7 @@ class Page:
             page_id,
             payload_length,
             checksum,
-            _alignment_reserved,
+            lsn,
         ) = PAGE_HEADER.unpack(raw[:HEADER_SIZE])
         if magic != PAGE_MAGIC:
             raise StorageError(f"页 {page_id} 魔数错误")
@@ -292,7 +303,7 @@ class Page:
         payload = raw[HEADER_SIZE:end]
         if zlib.crc32(payload) & 0xFFFFFFFF != checksum:
             raise StorageError(f"页 {page_id} CRC 校验失败")
-        return cls(page_id, page_size, _page_type_from_code(type_code), payload)
+        return cls(page_id, page_size, _page_type_from_code(type_code), payload, lsn)
 
     @classmethod
     def empty(
@@ -404,7 +415,9 @@ class SlottedPage:
                 bytes(page.payload[record_offset : record_offset + record_length])
             )
             entries.append(SlotEntry(record_offset, record_length, False))
-        for left, right in zip(sorted(ranges), sorted(ranges)[1:]):
+        # HOW：排序结果复用一次；早先写成 `sorted(ranges)` 调两遍，全表扫描时每页白排一遍。
+        ordered_ranges = sorted(ranges)
+        for left, right in zip(ordered_ranges, ordered_ranges[1:]):
             if left[1] > right[0]:
                 raise StorageError(f"HEAP 页 {page.page_id} 记录范围重叠")
         return cls(
@@ -863,3 +876,12 @@ class SlottedPage:
             for index, value in enumerate(self.slots)
             if value is not None
         )
+
+    def live_count(self) -> int:
+        """统计活槽个数，不切出记录内容。
+
+        HOW：只依赖已解析的槽目录项，不触碰记录区，因此调用方无需为每一行付出
+        JSON 解码成本。供 ``COUNT(*)`` 这类只关心行数的扫描使用。
+        """
+
+        return sum(1 for value in self.slots if value is not None)

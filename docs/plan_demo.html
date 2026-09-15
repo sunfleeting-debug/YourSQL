@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="LR6vSNIrifCiakUruOl4F3">
+<head data-page-node-id="vJX6Dv0vhoSs7LtIGYSSIS">
+<meta charset="utf-8" data-page-node-id="xNeTqvquwK0wBHnxxf3s8a">
+<title>YourSQL 查询计划可视化</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #f6f7f9; color: #1f2328; }
+  header { padding: 16px 24px; background: #fff; border-bottom: 1px solid #e3e6ea; }
+  h1 { margin: 0 0 6px; font-size: 18px; }
+  .sql { font-family: Consolas, "Courier New", monospace; font-size: 13px; color: #0b5cad;
+          white-space: pre-wrap; word-break: break-all; }
+  .rules { margin-top: 8px; font-size: 13px; color: #57606a; }
+  main { display: flex; gap: 16px; padding: 16px 24px; align-items: flex-start;
+          flex-wrap: wrap; }
+  .panel { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px;
+            padding: 16px; min-width: 320px; flex: 1 1 420px; }
+  .panel h2 { margin: 0 0 10px; font-size: 14px; color: #57606a; font-weight: 600; }
+  pre { margin: 0; font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
+         line-height: 1.6; white-space: pre; overflow: auto; color: #1f2328; }
+</style>
+</head>
+<body data-page-node-id="qJYADeWzMY7M6GFBvuuYYx">
+<header data-page-node-id="gjDCj6jHY8YY3p3i1pUxYO">
+  <h1 data-page-node-id="RrOkiPWQlcRwPQH5lsaAWi">YourSQL 优化后查询计划</h1>
+  <div class="sql" data-page-node-id="T1ra9Qz5WrD4oWCkFobw5A">SELECT e.id, d.name FROM employees AS e JOIN departments AS d ON e.department_id = d.id WHERE e.active = TRUE AND d.id = 1 ORDER BY e.id;</div>
+  <div class="rules" data-page-node-id="EERDRHQ4sANU4j6BcjTuED">本次命中规则：index_selection、predicate_pushdown</div>
+</header>
+<main data-page-node-id="hKXTIakEGr9YJ0cP3AwuWz">
+  <section class="panel" data-page-node-id="EhBu2fITeda2GW6s8qDmBx">
+    <h2 data-page-node-id="HvIajrEsoGJMwUgZhaKe2o">计划图（Mermaid）</h2>
+    <div id="graph" data-page-node-id="LecsBRoCZtc2nFSehf60rg">渲染中…</div>
+  </section>
+  <section class="panel" data-page-node-id="9jCRAVrNMN1NZcAPtv2BAF">
+    <h2 data-page-node-id="E1khovXHj6z1utJTkaDJJ8">文本 EXPLAIN</h2>
+    <pre data-page-node-id="Wm8rRHUWAs4v3EwOYFMFdn">Sort [order_by=[{'node': 'OrderItem', 'expression': {'node': 'ColumnRef', 'name': 'id', 'table': 'e'}, 'descending': False, 'nulls_first': None}], rules=['index_selection', 'predicate_pushdown']]
+  Project [items=[{'node': 'SelectItem', 'expression': {'node': 'ColumnRef', 'name': 'id', 'table': 'e'}, 'alias': None}, {'node': 'SelectItem', 'expression': {'node': 'ColumnRef', 'name': 'name', 'table': 'd'}, 'alias': None}], distinct=False]
+    Join [join_type='INNER', on={'node': 'BinaryOp', 'left': {'node': 'ColumnRef', 'name': 'department_id', 'table': 'e'}, 'operator': '=', 'right': {'node': 'ColumnRef', 'name': 'id', 'table': 'd'}}]
+      Filter [predicate={'node': 'BinaryOp', 'left': {'node': 'ColumnRef', 'name': 'active', 'table': 'e'}, 'operator': '=', 'right': {'node': 'Literal', 'value': True}}, pushed=True]
+        SeqScan [table='employees', alias='e', pushed_predicate={'node': 'BinaryOp', 'left': {'node': 'ColumnRef', 'name': 'active', 'table': 'e'}, 'operator': '=', 'right': {'node': 'Literal', 'value': True}}]
+      Filter [predicate={'node': 'BinaryOp', 'left': {'node': 'ColumnRef', 'name': 'id', 'table': 'd'}, 'operator': '=', 'right': {'node': 'Literal', 'value': 1}}, pushed=True]
+        IndexScan [table='departments', alias='d', pushed_predicate={'node': 'BinaryOp', 'left': {'node': 'ColumnRef', 'name': 'id', 'table': 'd'}, 'operator': '=', 'right': {'node': 'Literal', 'value': 1}}, index_column='id']</pre>
+  </section>
+  <section class="panel" data-page-node-id="qBT2hHtqPo13Jbfn4BtZ2w">
+    <h2 data-page-node-id="msw9Fv2TN14IFdCcVPeyFi">Mermaid 源码</h2>
+    <pre data-page-node-id="Xq1G0Y0iLCURNFoMsmJ05O">flowchart TD
+    n0["Sort&lt;br/&gt;order_by=e.id&lt;br/&gt;rules=index_selection, predicate_pushdown"]
+    n1["Project&lt;br/&gt;items=e.id, d.name&lt;br/&gt;distinct=FALSE"]
+    n2["Join&lt;br/&gt;join_type=INNER&lt;br/&gt;on=e.department_id = d.id"]
+    n3["Filter&lt;br/&gt;predicate=e.active = TRUE&lt;br/&gt;pushed=TRUE"]
+    n4["SeqScan&lt;br/&gt;table=employees&lt;br/&gt;alias=e&lt;br/&gt;pushed_predicate=e.active = TRUE"]
+    n5["Filter&lt;br/&gt;predicate=d.id = 1&lt;br/&gt;pushed=TRUE"]
+    n6["IndexScan&lt;br/&gt;table=departments&lt;br/&gt;alias=d&lt;br/&gt;pushed_predicate=d.id = 1&lt;br/&gt;index_column=id"]
+    n0 --&gt; n1
+    n1 --&gt; n2
+    n2 --&gt; n3
+    n2 --&gt; n5
+    n3 --&gt; n4
+    n5 --&gt; n6</pre>
+  </section>
+</main>
+<script type="text/plain" id="mermaid-src">flowchart TD
+    n0["Sort<br/>order_by=e.id<br/>rules=index_selection, predicate_pushdown"]
+    n1["Project<br/>items=e.id, d.name<br/>distinct=FALSE"]
+    n2["Join<br/>join_type=INNER<br/>on=e.department_id = d.id"]
+    n3["Filter<br/>predicate=e.active = TRUE<br/>pushed=TRUE"]
+    n4["SeqScan<br/>table=employees<br/>alias=e<br/>pushed_predicate=e.active = TRUE"]
+    n5["Filter<br/>predicate=d.id = 1<br/>pushed=TRUE"]
+    n6["IndexScan<br/>table=departments<br/>alias=d<br/>pushed_predicate=d.id = 1<br/>index_column=id"]
+    n0 --> n1
+    n1 --> n2
+    n2 --> n3
+    n2 --> n5
+    n3 --> n4
+    n5 --> n6</script>
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "loose" });
+  const source = document.getElementById("mermaid-src").textContent.trim();
+  mermaid.render("planGraph", source)
+    .then(({ svg }) => { document.getElementById("graph").innerHTML = svg; })
+    .catch((error) => {
+      document.getElementById("graph").textContent = "Mermaid 渲染失败：" + error;
+    });
+</script>
+</body>
+</html>

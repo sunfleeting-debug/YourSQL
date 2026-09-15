@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from yoursql.sql.ast import (
+    BeginTransaction,
+    Commit,
     CreateIndex,
     CreateRole,
     CreateTable,
@@ -18,10 +20,13 @@ from yoursql.sql.ast import (
     Grant,
     Insert,
     Revoke,
+    Rollback,
     Select,
+    SetTransaction,
     Show,
     ShowGrants,
     Statement,
+    TableRef,
     Update,
 )
 from yoursql.planner.physical import PlanNode
@@ -35,6 +40,28 @@ class LogicalPlanNode(PlanNode):
 LogicalPlan = LogicalPlanNode
 
 
+def _source_node(reference: TableRef) -> LogicalPlanNode:
+    """构造一个 FROM 来源的扫描节点。
+
+    HOW：派生表/CTE 用独立的 ``DerivedScan`` 而不是 ``SeqScan``——执行层的
+    ``_scan_plans`` 只把 SeqScan/IndexScan 当作堆表扫描，用错 kind 会让派生表
+    混进按表名匹配的计划列表里。
+    """
+
+    if reference.is_derived:
+        return LogicalPlanNode(
+            "DerivedScan",
+            {
+                "table": reference.effective_name,
+                "alias": reference.alias,
+                "query": reference.query,
+            },
+        )
+    return LogicalPlanNode(
+        "SeqScan", {"table": reference.name, "alias": reference.alias}
+    )
+
+
 def _select_plan(statement: Select) -> LogicalPlanNode:
     """按 SQL 子句顺序组装逻辑计划，不在此处选择具体访问路径。"""
 
@@ -43,14 +70,9 @@ def _select_plan(statement: Select) -> LogicalPlanNode:
     if statement.from_table is None:
         root = LogicalPlanNode("Values", {"rows": 1})
     else:
-        root = LogicalPlanNode(
-            "SeqScan",
-            {"table": statement.from_table.name, "alias": statement.from_table.alias},
-        )
+        root = _source_node(statement.from_table)
         for join in statement.joins:
-            right = LogicalPlanNode(
-                "SeqScan", {"table": join.table.name, "alias": join.table.alias}
-            )
+            right = _source_node(join.table)
             root = LogicalPlanNode(
                 "Join", {"join_type": join.join_type, "on": join.on}, (root, right)
             )
@@ -157,6 +179,19 @@ def plan_from_statement(statement: Statement) -> LogicalPlanNode:
         root = LogicalPlanNode(
             "ShowGrants",
             {"target_kind": statement.target_kind, "target": statement.target_name},
+        )
+    elif isinstance(statement, BeginTransaction):
+        root = LogicalPlanNode(
+            "BeginTransaction",
+            {"isolation": statement.isolation or "session default"},
+        )
+    elif isinstance(statement, Commit):
+        root = LogicalPlanNode("Commit", {})
+    elif isinstance(statement, Rollback):
+        root = LogicalPlanNode("Rollback", {})
+    elif isinstance(statement, SetTransaction):
+        root = LogicalPlanNode(
+            "SetTransaction", {"isolation": statement.isolation}
         )
     elif isinstance(statement, Explain):
         root = LogicalPlanNode(

@@ -7,8 +7,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import Callable, Mapping
 from typing import Iterator
-from typing import Mapping
 
 from yoursql.common.codec import PayloadCodec, PayloadCodecName, decode_payload
 from yoursql.common.codec import payload_codec as get_payload_codec
@@ -127,6 +127,9 @@ class DiskManager:
         self._legacy_free_pages: set[int] = set()
         self._next_page_id = 1
         self._named_pages: dict[str, int] = {}
+        # HOW：页分配既会改 superblock 又绕过缓冲池，事务无法通过缓存观测到它；
+        # 这里留一个回调，让运行时把"本事务新分配的页号"记下来，回滚时精确回收。
+        self.allocate_hook: Callable[[int], None] | None = None
         if exists:
             self._load_superblock()
         else:
@@ -357,6 +360,8 @@ class DiskManager:
             # WHY：先写出实际页，再发布分配元数据，避免 superblock 先指向尚未物化的页；
             # 两次写入尚非原子操作，崩溃恢复机制列入 TODO。
             self._write_superblock()
+            if self.allocate_hook is not None:
+                self.allocate_hook(page_id)
             return page
 
     def free(self, page_id: int) -> None:

@@ -1,0 +1,149 @@
+{
+  "mode": "exec",
+  "queries": [
+    {
+      "query": "Q1",
+      "status": "OK",
+      "rows": 4,
+      "first_seconds": 1.2302347000004374,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q2",
+      "status": "TIMEOUT",
+      "detail": "超过 45s"
+    },
+    {
+      "query": "Q3",
+      "status": "OK",
+      "rows": 10,
+      "first_seconds": 1.012541300000521,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q4",
+      "status": "TIMEOUT",
+      "detail": "超过 45s"
+    },
+    {
+      "query": "Q5",
+      "status": "OK",
+      "rows": 5,
+      "first_seconds": 0.6961222999998427,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q6",
+      "status": "OK",
+      "rows": 1,
+      "first_seconds": 0.3637222999986989,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q7",
+      "status": "OK",
+      "rows": 4,
+      "first_seconds": 0.8643747999994957,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q8",
+      "status": "OK",
+      "rows": 2,
+      "first_seconds": 0.6878867999985232,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q9",
+      "status": "OK",
+      "rows": 173,
+      "first_seconds": 1.006254899999476,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q10",
+      "status": "OK",
+      "rows": 20,
+      "first_seconds": 0.42670579999867186,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q11",
+      "status": "OK",
+      "rows": 1,
+      "first_seconds": 0.11779889999888837,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q12",
+      "status": "OK",
+      "rows": 2,
+      "first_seconds": 0.44584779999968305,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q13",
+      "status": "OK",
+      "rows": 33,
+      "first_seconds": 0.2163512000006449,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q14",
+      "status": "OK",
+      "rows": 1,
+      "first_seconds": 0.30830580000110785,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q15",
+      "status": "TIMEOUT",
+      "detail": "超过 45s"
+    },
+    {
+      "query": "Q16",
+      "status": "OK",
+      "rows": 296,
+      "first_seconds": 0.058124600000155624,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q17",
+      "status": "OK",
+      "rows": 1,
+      "first_seconds": 0.36877710000044317,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q18",
+      "status": "OK",
+      "rows": 2,
+      "first_seconds": 1.6383691999999428,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q19",
+      "status": "OK",
+      "rows": 1,
+      "first_seconds": 1.2583223999990878,
+      "operator": "SeqScan"
+    },
+    {
+      "query": "Q20",
+      "status": "TIMEOUT",
+      "detail": "超过 45s"
+    },
+    {
+      "query": "Q21",
+      "status": "TIMEOUT",
+      "detail": "超过 45s"
+    },
+    {
+      "query": "Q22",
+      "status": "TIMEOUT",
+      "detail": "超过 45s"
+    }
+  ],
+  "ok": 16,
+  "total": 22
+}

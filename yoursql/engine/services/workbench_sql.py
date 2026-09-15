@@ -174,7 +174,9 @@ def _keyword_suggestion(
     expected_words = {
         item.upper() for item in expected.replace("'", "").split("/") if item.isalpha()
     }
-    keywords = set(KEYWORDS)
+    # HOW：保留词法表声明顺序，编辑距离相同时让上下文更常见的 SQL 词优先；
+    # 例如 ``wher`` 同时接近 WHEN/WHERE，但在 FROM 后应稳定提示 WHERE。
+    keywords = tuple(KEYWORDS)
     candidates: list[tuple[int, int, str, int, int, str]] = []
     for index, token in enumerate(tokens):
         if token.kind is not TokenKind.IDENTIFIER:

@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Iterable, TypeVar
+from dataclasses import fields, is_dataclass, replace
+from typing import Callable, Iterable, TypeVar
 
 from yoursql.common.errors import BinderError, ParserError
 from yoursql.common.types import DataType
+from yoursql.sql.diagnostics import Diagnostic, ParseOutcome
 from yoursql.sql.ast import (
     BetweenPredicate,
+    BeginTransaction,
     BinaryOp,
+    CaseExpression,
+    CastExpression,
     ColumnDefinition,
     ColumnRef,
+    Commit,
     CreateRole,
     CreateIndex,
     CreateTable,
@@ -21,6 +26,7 @@ from yoursql.sql.ast import (
     DropIndex,
     DropTable,
     DropView,
+    ExistsPredicate,
     Explain,
     Expr,
     FunctionCall,
@@ -34,8 +40,10 @@ from yoursql.sql.ast import (
     OrderItem,
     Parameter,
     Revoke,
+    Rollback,
     Select,
     SelectItem,
+    SetTransaction,
     Show,
     ShowGrants,
     Star,
@@ -51,11 +59,18 @@ from yoursql.sql.lexer import Lexer, Token, TokenKind
 NodeType = TypeVar("NodeType", bound=Node)
 
 
+class _AbandonStatement(Exception):
+    """内部信号：当前语句的错误已经记录过，直接丢弃它、不要再补一条诊断。
+
+    WHY：投影项被逐个恢复跳过后会留下"空投影"的中间结果，它不合法、不能放给下游；
+    但此前的错误已经报过，再报一条"SELECT 至少需要一个投影项"只是把真错误淹掉。
+    """
+
+
 class Parser:
     """将 Token 流转换为 AST，并在错误中保留出错位置。"""
 
     def __init__(self, source_or_tokens: str | Iterable[Token]) -> None:
-        """初始化实例所需的状态和依赖。"""
         self.tokens = (
             Lexer(source_or_tokens).tokenize()
             if isinstance(source_or_tokens, str)
@@ -72,16 +87,17 @@ class Parser:
             )
         self.position = 0
         self._in_insert_values = False
+        # HOW：非 None 时进入"恢复模式"——语法错误记进诊断列表并继续解析，
+        # 而不是抛给调用方。默认 None 保持"首错即抛"的既有契约。
+        self._diagnostics: list[Diagnostic] | None = None
 
     def parse_one(self) -> Statement:
-        """解析一条 SQL 语句并返回 AST。"""
         statement = self._statement()
         self._match(TokenKind.SEMICOLON)
         self._expect(TokenKind.EOF, "语句结束")
         return statement
 
     def parse_script(self) -> list[Statement]:
-        """解析 SQL 脚本并返回语句列表。"""
         statements: list[Statement] = []
         while not self._at(TokenKind.EOF):
             statements.append(self._statement())
@@ -92,8 +108,145 @@ class Parser:
                 self._error("多语句脚本中的语句必须以分号分隔", "';'")
         return statements
 
+    def parse_recovering(self) -> ParseOutcome:
+        """恐慌模式解析脚本：能解析的语句照常产出，错误逐条收集不中断。
+
+        HOW：语句级恢复——某条语句解析失败就跳到下一个同步点（分号或下一条语句的
+        起始关键字），然后继续解析后面的语句；同时缺失分号也作为一条诊断记下来。
+        WHY：脚本里 N 处笔误应当一次报全（配合 ``Lexer.tokenize_recovering`` 的
+        词法错误收集），否则用户只能改一处跑一次。
+        """
+
+        diagnostics: list[Diagnostic] = []
+        self._diagnostics = diagnostics
+        statements: list[Statement] = []
+        try:
+            while not self._at(TokenKind.EOF):
+                if self._match(TokenKind.SEMICOLON):
+                    while self._at(TokenKind.SEMICOLON):
+                        self._advance()
+                    continue
+                parsed, recovered = self._attempt(self._statement)
+                if parsed is None:
+                    if not recovered:
+                        # HOW：_attempt 只在恢复模式下吞错，这里不该出现"没有诊断"的情况。
+                        break
+                    # WHY：这条语句已经在恢复模式下失败，当前位置就是出错点，
+                    # 再补一条"缺分号"只是恢复动作的副产物，会把真错误淹掉。
+                    self._synchronize()
+                    continue
+                statements.append(parsed)
+                if self._match(TokenKind.SEMICOLON):
+                    while self._at(TokenKind.SEMICOLON):
+                        self._advance()
+                    continue
+                if not self._at(TokenKind.EOF):
+                    token = self._current()
+                    diagnostics.append(
+                        Diagnostic(
+                            stage="parser",
+                            code="PARSER_ERROR",
+                            message="多语句脚本中的语句必须以分号分隔",
+                            line=token.line,
+                            column=token.column,
+                            expected="';'",
+                        )
+                    )
+                    self._synchronize()
+        finally:
+            self._diagnostics = None
+        return ParseOutcome(tuple(statements), tuple(diagnostics))
+
+    # HOW：语句级同步点——遇到分号（消费掉）或下一条语句的起始关键字就停下。
+    _STATEMENT_STARTERS = frozenset(
+        {
+            TokenKind.CREATE,
+            TokenKind.DROP,
+            TokenKind.INSERT,
+            TokenKind.SELECT,
+            TokenKind.WITH,
+            TokenKind.UPDATE,
+            TokenKind.DELETE,
+            TokenKind.EXPLAIN,
+            TokenKind.SHOW,
+            TokenKind.GRANT,
+            TokenKind.REVOKE,
+            TokenKind.DESC,
+            TokenKind.DESCRIBE,
+            TokenKind.BEGIN,
+            TokenKind.START,
+            TokenKind.COMMIT,
+            TokenKind.ROLLBACK,
+            TokenKind.SET,
+        }
+    )
+
+    def _synchronize(self) -> None:
+        """跳到下一个可安全重开的语句边界，保证恢复过程一定前进。"""
+
+        while not self._at(TokenKind.EOF):
+            if self._at(TokenKind.SEMICOLON):
+                self._advance()
+                return
+            if self._current().kind in self._STATEMENT_STARTERS:
+                return
+            self._advance()
+
+    # HOW：子句级同步点——跳过坏掉的片段但**不消费**这些关键字，
+    # 让调用方后续的 ``_match(FROM/WHERE/...)`` 仍然能正常接上。
+    _CLAUSE_BOUNDARIES = frozenset(
+        {
+            TokenKind.FROM,
+            TokenKind.WHERE,
+            TokenKind.GROUP,
+            TokenKind.HAVING,
+            TokenKind.ORDER,
+            TokenKind.LIMIT,
+            TokenKind.OFFSET,
+            TokenKind.UNION,
+            TokenKind.RPAREN,
+            TokenKind.SEMICOLON,
+            TokenKind.EOF,
+        }
+    )
+
+    def _synchronize_clause(self) -> None:
+        """列表项级别的恢复：跳到下一个逗号或子句边界（都不消费）。"""
+
+        while not self._at(TokenKind.EOF):
+            if self._current().kind in self._CLAUSE_BOUNDARIES:
+                return
+            if self._at(TokenKind.COMMA):
+                return
+            self._advance()
+
+    def _attempt(
+        self, action: Callable[[], NodeType]
+    ) -> tuple[NodeType | None, bool]:
+        """执行一段解析；恢复模式下把语法错误记成诊断并返回 ``(None, True)``。
+
+        非恢复模式（``_diagnostics is None``）下错误照旧上抛，行为与改造前一致。
+        """
+
+        try:
+            return action(), False
+        except _AbandonStatement:
+            # HOW：错误已经记录在案，这里只丢弃这条语句。
+            return None, True
+        except (ParserError, BinderError) as error:
+            if self._diagnostics is None:
+                raise
+            self._diagnostics.append(Diagnostic.from_error("parser", error))
+            return None, True
+
+    def _record(self, error: ParserError) -> None:
+        """记下一条已被捕获的语法错误（恢复模式）；非恢复模式直接抛出。"""
+
+        if self._diagnostics is None:
+            raise error
+        self._diagnostics.append(Diagnostic.from_error("parser", error))
+
     def _statement(self) -> Statement:
-        """解析当前 Token 并分派到对应的语句解析函数。"""
         kind = self._current().kind
         if kind is TokenKind.CREATE:
             return self._create()
@@ -105,7 +258,7 @@ class Parser:
             return self._drop()
         if kind is TokenKind.INSERT:
             return self._insert()
-        if kind is TokenKind.SELECT:
+        if kind is TokenKind.SELECT or kind is TokenKind.WITH:
             return self._select()
         if kind is TokenKind.UPDATE:
             return self._update()
@@ -116,14 +269,68 @@ class Parser:
             return self._located(Explain(self._statement()), token)
         if kind is TokenKind.SHOW:
             return self._show()
+        if kind in {TokenKind.BEGIN, TokenKind.START}:
+            return self._begin()
+        if kind is TokenKind.COMMIT:
+            token = self._advance()
+            self._match(TokenKind.WORK)
+            return self._located(Commit(), token)
+        if kind is TokenKind.ROLLBACK:
+            token = self._advance()
+            self._match(TokenKind.WORK)
+            return self._located(Rollback(), token)
+        if kind is TokenKind.SET:
+            return self._set_transaction()
         if kind in {TokenKind.DESC, TokenKind.DESCRIBE}:
             self._advance()
             name, token = self._name_with_token("表名")
             return self._located(Show("COLUMNS", name), token)
-        self._error("不支持的语句起始符号", "CREATE/INSERT/SELECT/UPDATE/DELETE")
+        self._error(
+            "不支持的语句起始符号",
+            "CREATE/INSERT/SELECT/UPDATE/DELETE/BEGIN/COMMIT/ROLLBACK",
+        )
+
+    def _begin(self) -> Statement:
+        """解析 BEGIN [WORK|TRANSACTION] [ISOLATION LEVEL <级别>] 与 START TRANSACTION。"""
+
+        token = self._advance()
+        if token.kind is TokenKind.START:
+            self._expect(TokenKind.TRANSACTION, "START TRANSACTION")
+        elif not self._match(TokenKind.TRANSACTION):
+            # 兼容 BEGIN / BEGIN WORK / BEGIN TRANSACTION 三种写法。
+            self._match(TokenKind.WORK)
+        isolation = self._isolation_clause()
+        return self._located(BeginTransaction(isolation), token)
+
+    def _set_transaction(self) -> Statement:
+        """解析 SET TRANSACTION ISOLATION LEVEL <级别>。"""
+
+        token = self._expect(TokenKind.SET, "SET")
+        self._expect(TokenKind.TRANSACTION, "SET TRANSACTION")
+        isolation = self._isolation_clause()
+        if isolation is None:
+            self._error("SET TRANSACTION 需要 ISOLATION LEVEL 子句", "ISOLATION LEVEL")
+        return self._located(SetTransaction(isolation), token)
+
+    def _isolation_clause(self) -> str | None:
+        """解析可选的 ISOLATION LEVEL 子句；目前支持 SERIALIZABLE 与 READ COMMITTED。"""
+
+        if not self._match(TokenKind.ISOLATION):
+            return None
+        self._expect(TokenKind.LEVEL, "ISOLATION LEVEL")
+        if self._match(TokenKind.SERIALIZABLE):
+            return "serializable"
+        if self._match(TokenKind.READ):
+            if self._match(TokenKind.COMMITTED):
+                return "read_committed"
+            self._error(
+                "目前只支持 READ COMMITTED 隔离级别",
+                "COMMITTED",
+            )
+        self._error("隔离级别无效", "SERIALIZABLE/READ COMMITTED")
+        return None
 
     def _show(self) -> Statement:
-        """解析 SHOW 或 DESCRIBE 语句。"""
         show_token = self._expect(TokenKind.SHOW, "SHOW")
         if self._match(TokenKind.GRANTS):
             if self._match(TokenKind.FOR):
@@ -162,13 +369,11 @@ class Parser:
         )
 
     def _show_object_name(self, context: str) -> tuple[str, Token]:
-        """解析 SHOW/DESCRIBE 命令中的对象名称。"""
         if not (self._match(TokenKind.FROM) or self._match(TokenKind.IN)):
             self._error(f"{context} 后需要 FROM 或 IN", "FROM/IN")
         return self._name_with_token("表名")
 
     def _create(self) -> Statement:
-        """解析 CREATE 语句并分派到对象类型。"""
         self._expect(TokenKind.CREATE, "CREATE")
         if self._match(TokenKind.ROLE):
             name, token = self._name_with_token("角色名")
@@ -201,7 +406,6 @@ class Parser:
         )
 
     def _create_user(self) -> CreateUser:
-        """解析 CREATE USER 语句。"""
         name, name_token = self._name_with_token("用户名")
         self._expect(TokenKind.IDENTIFIED, "IDENTIFIED")
         self._expect(TokenKind.BY, "BY")
@@ -220,7 +424,6 @@ class Parser:
         )
 
     def _grant(self) -> Grant:
-        """解析 GRANT 语句。"""
         token = self._expect(TokenKind.GRANT, "GRANT")
         privileges = self._privilege_list()
         object_name = self._privilege_object()
@@ -235,7 +438,6 @@ class Parser:
         return statement
 
     def _revoke(self) -> Revoke:
-        """解析 REVOKE 语句。"""
         token = self._expect(TokenKind.REVOKE, "REVOKE")
         privileges = self._privilege_list()
         object_name = self._privilege_object()
@@ -250,14 +452,12 @@ class Parser:
         return statement
 
     def _privilege_list(self) -> tuple[str, ...]:
-        """解析逗号分隔的权限列表。"""
         privileges = [self._privilege()]
         while self._match(TokenKind.COMMA):
             privileges.append(self._privilege())
         return tuple(privileges)
 
     def _privilege(self) -> str:
-        """解析单个权限名称或 ALL 权限。"""
         token = self._current()
         if token.kind is TokenKind.STAR:
             self._advance()
@@ -282,7 +482,6 @@ class Parser:
         self._error("GRANT/REVOKE 后需要权限名", "SELECT/INSERT/UPDATE/DELETE/ALL")
 
     def _privilege_object(self) -> str | None:
-        """解析 GRANT/REVOKE 作用的对象名称。"""
         self._expect(TokenKind.ON, "ON")
         if self._match(TokenKind.STAR):
             return None
@@ -290,12 +489,10 @@ class Parser:
         return self._name("表名")
 
     def _principal(self) -> tuple[str, str]:
-        """解析授权目标的用户或角色。"""
         target_kind, target_name, _token = self._principal_with_token()
         return target_kind, target_name
 
     def _principal_with_token(self) -> tuple[str, str, Token]:
-        """解析授权目标并保留其起始 Token。"""
         if self._match(TokenKind.USER):
             name, token = self._name_with_token("用户名")
             return "USER", name, token
@@ -306,7 +503,6 @@ class Parser:
         return "USER", name, token
 
     def _create_table(self) -> CreateTable:
-        """解析或创建表定义。"""
         if_not_exists = self._if_not_exists()
         name, name_token = self._name_with_token("表名")
         self._expect(TokenKind.LPAREN, "'('")
@@ -360,30 +556,8 @@ class Parser:
         return statement
 
     def _column_definition(self) -> ColumnDefinition:
-        """解析表定义中的列和列约束。"""
         name, name_token = self._name_with_token("列名")
-        type_token = self._current()
-        if type_token.kind not in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
-            self._error("列定义需要类型", "INT/VARCHAR/FLOAT/BOOLEAN")
-        self._advance()
-        try:
-            data_type = DataType.parse(
-                type_token.literal
-                if type_token.kind is TokenKind.QUOTED_IDENTIFIER
-                else type_token.lexeme
-            )
-        except BinderError as exc:
-            raise BinderError(
-                exc.message,
-                line=type_token.line,
-                column=type_token.column,
-                **exc.details,
-            ) from exc
-        if self._match(TokenKind.LPAREN):
-            if not self._at(TokenKind.INTEGER):
-                self._error("类型长度需要整数", "INTEGER")
-            self._advance()
-            self._expect(TokenKind.RPAREN, "')'")
+        data_type = self._data_type()
         nullable = True
         primary_key = False
         unique = False
@@ -406,8 +580,40 @@ class Parser:
             name_token,
         )
 
+    def _data_type(self) -> DataType:
+        """解析列/CAST 的类型名以及可选的 ``(长度[, 标度])``。"""
+
+        type_token = self._current()
+        if type_token.kind not in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
+            self._error("需要类型名", "INT/VARCHAR/FLOAT/DECIMAL/BOOLEAN")
+        self._advance()
+        try:
+            data_type = DataType.parse(
+                type_token.literal
+                if type_token.kind is TokenKind.QUOTED_IDENTIFIER
+                else type_token.lexeme
+            )
+        except BinderError as exc:
+            raise BinderError(
+                exc.message,
+                line=type_token.line,
+                column=type_token.column,
+                **exc.details,
+            ) from exc
+        if self._match(TokenKind.LPAREN):
+            # HOW：VARCHAR(n) 只有一个长度参数，DECIMAL(p,s)/NUMERIC(p,s) 有两个；
+            # 本引擎不强制精度与标度（DECIMAL 走任意精度十进制定点），这里只做语法消费。
+            if not self._at(TokenKind.INTEGER):
+                self._error("类型长度需要整数", "INTEGER")
+            self._advance()
+            if self._match(TokenKind.COMMA):
+                if not self._at(TokenKind.INTEGER):
+                    self._error("类型标度需要整数", "INTEGER")
+                self._advance()
+            self._expect(TokenKind.RPAREN, "')'")
+        return data_type
+
     def _create_index(self, unique: bool) -> CreateIndex:
-        """解析或创建索引定义。"""
         if_not_exists = self._if_not_exists()
         name, name_token = self._name_with_token("索引名")
         self._expect(TokenKind.ON, "ON")
@@ -442,7 +648,6 @@ class Parser:
         return statement
 
     def _drop(self) -> Statement:
-        """解析 DROP 语句并分派到对象类型。"""
         self._expect(TokenKind.DROP, "DROP")
         if self._match(TokenKind.TABLE):
             if_exists = self._if_exists()
@@ -459,7 +664,6 @@ class Parser:
         self._error("DROP 后需要 TABLE、VIEW 或 INDEX", "TABLE/VIEW/INDEX")
 
     def _insert(self) -> Insert:
-        """执行插入操作并维护关联状态。"""
         self._expect(TokenKind.INSERT, "INSERT")
         self._match(TokenKind.INTO)
         table, table_token = self._name_with_token("表名")
@@ -503,20 +707,98 @@ class Parser:
         return statement
 
     def _select(self) -> Select:
-        """解析 SELECT 语句及 UNION 组合。"""
+        ctes = self._with_clause() if self._at(TokenKind.WITH) else ()
         first = self._select_core()
         if self._match(TokenKind.UNION):
             union_all = self._match(TokenKind.ALL)
             self._expect(TokenKind.SELECT, "SELECT")
-            return replace(
+            statement = replace(
                 first,
                 union=self._select_core(already_consumed_select=True),
                 union_all=union_all,
             )
-        return first
+        else:
+            statement = first
+        return self._inline_ctes(statement, ctes) if ctes else statement
+
+    def _with_clause(self) -> tuple[tuple[str, Select], ...]:
+        """解析 ``WITH name [(cols)] AS (SELECT ...) [, ...]``。
+
+        HOW：CTE 在本引擎里按「内联为派生表」实现——不需要额外的临时表生命周期，
+        也不需要执行器认识新的作用域概念，语义与标准一致（CTE 名遮蔽同名真实表）。
+        """
+
+        self._expect(TokenKind.WITH, "WITH")
+        ctes: list[tuple[str, Select]] = []
+        # HOW：按出现顺序逐步扩大可见范围，后面的 CTE 可以引用前面的 CTE。
+        scope: dict[str, Select] = {}
+        while True:
+            name, _token = self._name_with_token("CTE 名称")
+            columns = self._name_list() if self._at(TokenKind.LPAREN) else []
+            self._expect(TokenKind.AS, "AS")
+            self._expect(TokenKind.LPAREN, "'('")
+            query = self._select()
+            self._expect(TokenKind.RPAREN, "')'")
+            query = self._inline_named_ctes(query, scope)
+            if columns:
+                query = self._narrow_projection(query, columns, name)
+            scope[name.lower()] = query
+            ctes.append((name, query))
+            if not self._match(TokenKind.COMMA):
+                break
+        return tuple(ctes)
+
+    def _inline_named_ctes(
+        self, statement: Select, scope: dict[str, Select]
+    ) -> Select:
+        """把引用已声明 CTE 的 TableRef 换成派生表。"""
+
+        if not scope:
+            return statement
+        return _rewrite_cte_references(statement, scope)
+
+    def _inline_ctes(
+        self, statement: Select, ctes: tuple[tuple[str, Select], ...]
+    ) -> Select:
+        return self._inline_named_ctes(statement, {name.lower(): query for name, query in ctes})
+
+    def _narrow_projection(
+        self, query: Select, columns: list[str], cte_name: str
+    ) -> Select:
+        """实现 ``WITH t(a, b) AS (...)`` 的列重命名。"""
+
+        if len(columns) != len(query.items):
+            location = query.source_location or (1, 1)
+            raise ParserError(
+                f"CTE {cte_name!r} 声明了 {len(columns)} 个列名，但查询返回 {len(query.items)} 列",
+                line=location[0],
+                column=location[1],
+                expected=f"{len(query.items)} 个列名",
+                found=", ".join(columns) or "无列名",
+            )
+        items = tuple(
+            replace(item, alias=name) for item, name in zip(query.items, columns, strict=True)
+        )
+        return replace(query, items=items)
+
+    def _select_item(self) -> SelectItem:
+        """解析一个投影项：``表达式 [AS 别名]``。"""
+
+        expression = self._expression()
+        alias: str | None = None
+        if self._match(TokenKind.AS):
+            alias = self._name("别名")
+        elif self._current().kind in {
+            TokenKind.IDENTIFIER,
+            TokenKind.QUOTED_IDENTIFIER,
+        }:
+            alias = self._name("别名")
+        item = SelectItem(expression, alias)
+        if expression.source_location is not None:
+            item.with_source_location(*expression.source_location)
+        return item
 
     def _select_core(self, *, already_consumed_select: bool = False) -> Select:
-        """解析一条 SELECT 核心查询。"""
         select_token = (
             self.tokens[self.position - 1]
             if already_consumed_select
@@ -527,21 +809,22 @@ class Parser:
         distinct = self._match(TokenKind.DISTINCT)
         items: list[SelectItem] = []
         while True:
-            expression = self._expression()
-            alias: str | None = None
-            if self._match(TokenKind.AS):
-                alias = self._name("别名")
-            elif self._current().kind in {
-                TokenKind.IDENTIFIER,
-                TokenKind.QUOTED_IDENTIFIER,
-            }:
-                alias = self._name("别名")
-            item = SelectItem(expression, alias)
-            if expression.source_location is not None:
-                item.with_source_location(*expression.source_location)
-            items.append(item)
+            # HOW：逐个投影项恢复——某一项写错时跳过它，其余项照常解析，
+            # 从而在同一条 SELECT 里报出多处错误（仅恢复模式生效）。
+            item, failed = self._attempt(self._select_item)
+            if item is not None:
+                items.append(item)
+            elif not failed:
+                break
+            else:
+                self._synchronize_clause()
             if not self._match(TokenKind.COMMA):
                 break
+        if not items:
+            # WHY：投影项全部被恢复跳过时不能产出"空投影"的 AST——它不合法，
+            # 放出去会让下游 binder 拿到结构不完整的语句。这里只丢弃这条语句，
+            # 真正的错误在投影项那一层已经报过，不再重复。
+            raise _AbandonStatement
         from_table: TableRef | None = None
         joins: list[JoinClause] = []
         if self._match(TokenKind.FROM):
@@ -606,7 +889,6 @@ class Parser:
         )
 
     def _join_type(self) -> str | None:
-        """解析 JOIN 的连接类型。"""
         if self._match(TokenKind.JOIN):
             return "INNER"
         for kind, name in (
@@ -622,7 +904,8 @@ class Parser:
         return None
 
     def _table_ref(self) -> TableRef:
-        """解析 FROM 或 JOIN 中的表引用和别名。"""
+        if self._at(TokenKind.LPAREN):
+            return self._derived_table_ref()
         name_token = self._current()
         name = self._name("表名")
         alias = None
@@ -635,8 +918,25 @@ class Parser:
             alias = self._name("表别名")
         return self._located(TableRef(name, alias), name_token)
 
+    def _derived_table_ref(self) -> TableRef:
+        """解析 ``(SELECT ...) [AS] alias`` 形式的派生表。"""
+
+        token = self._expect(TokenKind.LPAREN, "'('")
+        query = self._select()
+        self._expect(TokenKind.RPAREN, "')'")
+        alias: str | None = None
+        if self._match(TokenKind.AS):
+            alias = self._name("派生表别名")
+        elif self._current().kind in {
+            TokenKind.IDENTIFIER,
+            TokenKind.QUOTED_IDENTIFIER,
+        }:
+            alias = self._name("派生表别名")
+        if alias is None:
+            self._error("派生表必须带别名", "AS 别名")
+        return self._located(TableRef("", alias, query), token)
+
     def _update(self) -> Update:
-        """执行更新操作并维护关联状态。"""
         self._expect(TokenKind.UPDATE, "UPDATE")
         table, table_token = self._name_with_token("表名")
         self._expect(TokenKind.SET, "SET")
@@ -661,7 +961,6 @@ class Parser:
         return statement
 
     def _delete(self) -> Delete:
-        """执行删除操作并维护关联状态。"""
         self._expect(TokenKind.DELETE, "DELETE")
         self._expect(TokenKind.FROM, "FROM")
         table, table_token = self._name_with_token("表名")
@@ -673,11 +972,9 @@ class Parser:
         return statement
 
     def _expression(self) -> Expr:
-        """解析完整表达式。"""
         return self._or()
 
     def _or(self) -> Expr:
-        """按 OR 优先级解析表达式。"""
         expression = self._and()
         while self._at(TokenKind.OR):
             operator = self._advance()
@@ -687,7 +984,6 @@ class Parser:
         return expression
 
     def _and(self) -> Expr:
-        """按 AND 优先级解析表达式。"""
         expression = self._not()
         while self._at(TokenKind.AND):
             operator = self._advance()
@@ -697,7 +993,6 @@ class Parser:
         return expression
 
     def _not(self) -> Expr:
-        """解析 NOT 一元表达式。"""
         if self._match(TokenKind.NOT):
             return self._located(
                 UnaryOp("NOT", self._not()), self.tokens[self.position - 1]
@@ -705,7 +1000,6 @@ class Parser:
         return self._comparison()
 
     def _comparison(self) -> Expr:
-        """解析比较、IS、LIKE、IN 和 BETWEEN 表达式。"""
         expression = self._additive()
         if self._at(TokenKind.IS):
             operator = self._advance()
@@ -767,7 +1061,6 @@ class Parser:
         return expression
 
     def _additive(self) -> Expr:
-        """解析加减运算表达式。"""
         expression = self._multiplicative()
         while self._current().kind in {
             TokenKind.PLUS,
@@ -782,7 +1075,6 @@ class Parser:
         return expression
 
     def _multiplicative(self) -> Expr:
-        """解析乘除和取模表达式。"""
         expression = self._unary()
         while self._current().kind in {
             TokenKind.STAR,
@@ -797,7 +1089,6 @@ class Parser:
         return expression
 
     def _unary(self) -> Expr:
-        """解析一元正负号和按位取反表达式。"""
         if self._at(TokenKind.PLUS):
             operator = self._advance()
             return self._located(UnaryOp("+", self._unary()), operator)
@@ -807,7 +1098,6 @@ class Parser:
         return self._primary()
 
     def _primary(self) -> Expr:
-        """解析字面量、列引用、函数调用和括号表达式。"""
         token = self._current()
         if (
             token.kind is TokenKind.INTEGER
@@ -824,6 +1114,12 @@ class Parser:
         if token.kind is TokenKind.STAR:
             self._advance()
             return self._located(Star(), token)
+        if token.kind is TokenKind.CASE:
+            return self._case_expression()
+        if token.kind is TokenKind.CAST:
+            return self._cast_expression()
+        if token.kind is TokenKind.EXISTS:
+            return self._exists_predicate()
         if token.kind is TokenKind.QUOTED_IDENTIFIER and self._in_insert_values:
             self._error(
                 f"INSERT ... VALUES 中的 {token.lexeme} 是标识符；字符串请使用单引号，例如 'test'",
@@ -853,13 +1149,52 @@ class Parser:
                 return self._located(ColumnRef(column, name), column_token)
             return self._located(ColumnRef(name), token)
         if self._match(TokenKind.LPAREN):
+            if self._at(TokenKind.SELECT) or self._at(TokenKind.WITH):
+                # HOW：标量子查询与外层表达式共用括号语法，靠紧随其后的 SELECT/WITH 区分。
+                subquery_token = self._current()
+                query = self._select()
+                self._expect(TokenKind.RPAREN, "')'")
+                return self._located(Subquery(query), subquery_token)
             expression = self._expression()
             self._expect(TokenKind.RPAREN, "')'")
             return expression
         self._error("需要表达式", "标识符/字面量/'('")
 
+    def _case_expression(self) -> Expr:
+        """解析 searched（``CASE WHEN cond THEN r``）与 simple（``CASE x WHEN v THEN r``）两种 CASE。"""
+
+        token = self._expect(TokenKind.CASE, "CASE")
+        operand = None if self._at(TokenKind.WHEN) else self._expression()
+        branches: list[tuple[Expr, Expr]] = []
+        while self._match(TokenKind.WHEN):
+            condition = self._expression()
+            self._expect(TokenKind.THEN, "THEN")
+            branches.append((condition, self._expression()))
+        if not branches:
+            self._error("CASE 至少需要一个 WHEN 分支", "WHEN")
+        otherwise = self._expression() if self._match(TokenKind.ELSE) else None
+        self._expect(TokenKind.END, "END")
+        return self._located(
+            CaseExpression(tuple(branches), operand, otherwise), token
+        )
+
+    def _cast_expression(self) -> Expr:
+        token = self._expect(TokenKind.CAST, "CAST")
+        self._expect(TokenKind.LPAREN, "'('")
+        expression = self._expression()
+        self._expect(TokenKind.AS, "AS")
+        data_type = self._data_type()
+        self._expect(TokenKind.RPAREN, "')'")
+        return self._located(CastExpression(expression, data_type), token)
+
+    def _exists_predicate(self) -> Expr:
+        token = self._expect(TokenKind.EXISTS, "EXISTS")
+        self._expect(TokenKind.LPAREN, "'('")
+        query = self._select()
+        self._expect(TokenKind.RPAREN, "')'")
+        return self._located(ExistsPredicate(query), token)
+
     def _expression_list(self, *, allow_empty: bool = False) -> list[Expr]:
-        """解析逗号分隔的表达式列表。"""
         values: list[Expr] = []
         if allow_empty and self._at(TokenKind.RPAREN):
             return values
@@ -869,11 +1204,9 @@ class Parser:
                 return values
 
     def _name_list(self) -> list[str]:
-        """解析逗号分隔的名称列表。"""
         return [name for name, _token in self._name_list_with_tokens()]
 
     def _name_list_with_tokens(self) -> list[tuple[str, Token]]:
-        """解析名称列表并保留每个名称的 Token。"""
         self._expect(TokenKind.LPAREN, "'('")
         names: list[tuple[str, Token]] = []
         while True:
@@ -884,7 +1217,6 @@ class Parser:
         return names
 
     def _integer_literal(self, context: str) -> int:
-        """读取并校验整数文字。"""
         token = self._current()
         if token.kind is not TokenKind.INTEGER or int(token.literal) < 0:
             self._error(f"{context} 需要非负整数", "INTEGER")
@@ -892,7 +1224,6 @@ class Parser:
         return int(token.literal)
 
     def _if_not_exists(self) -> bool:
-        """解析可选的 IF NOT EXISTS 子句。"""
         if self._match(TokenKind.IF):
             self._expect(TokenKind.NOT, "NOT")
             self._expect(TokenKind.EXISTS, "EXISTS")
@@ -900,18 +1231,15 @@ class Parser:
         return False
 
     def _if_exists(self) -> bool:
-        """解析可选的 IF EXISTS 子句。"""
         if self._match(TokenKind.IF):
             self._expect(TokenKind.EXISTS, "EXISTS")
             return True
         return False
 
     def _name(self, context: str) -> str:
-        """读取并校验一个 SQL 名称。"""
         return self._name_with_token(context)[0]
 
     def _name_with_token(self, context: str) -> tuple[str, Token]:
-        """读取名称并返回其起始 Token。"""
         token = self._current()
         if token.kind not in {TokenKind.IDENTIFIER, TokenKind.QUOTED_IDENTIFIER}:
             self._error(f"{context}不合法", "IDENTIFIER")
@@ -931,39 +1259,32 @@ class Parser:
         return updated
 
     def _current(self) -> Token:
-        """返回当前 Token。"""
         return self.tokens[min(self.position, len(self.tokens) - 1)]
 
     def _peek(self, offset: int) -> Token:
-        """查看当前位置的输入项而不推进位置。"""
         return self.tokens[min(self.position + offset, len(self.tokens) - 1)]
 
     def _at(self, kind: TokenKind) -> bool:
-        """判断当前位置是否属于指定词种。"""
         return self._current().kind is kind
 
     def _advance(self) -> Token:
-        """消费当前输入项并返回它，同时推进当前位置。"""
         token = self._current()
         if not self._at(TokenKind.EOF):
             self.position += 1
         return token
 
     def _match(self, kind: TokenKind) -> bool:
-        """尝试匹配指定词种，成功时前进一个 Token。"""
         if self._at(kind):
             self._advance()
             return True
         return False
 
     def _expect(self, kind: TokenKind, expected: str) -> Token:
-        """要求当前 Token 匹配指定词种，否则抛出语法错误。"""
         if not self._at(kind):
             self._error("语法错误", expected)
         return self._advance()
 
     def _error(self, message: str, expected: str) -> None:
-        """构造带源码位置和建议信息的语法错误。"""
         token = self._current()
         raise ParserError(
             message,
@@ -982,13 +1303,75 @@ class Parser:
 
 
 def parse_one(source: str) -> Statement:
-    """解析一条 SQL 语句并返回 AST。"""
     return Parser(source).parse_one()
 
 
 def parse_script(source: str) -> list[Statement]:
-    """解析 SQL 脚本并返回语句列表。"""
     return Parser(source).parse_script()
+
+
+def parse_recovering(source: str) -> ParseOutcome:
+    """恢复式解析：词法与语法错误一次报全，能解析的语句照常返回。
+
+    HOW：先用 ``Lexer.tokenize_recovering`` 收齐词法错误（非法字符不中断扫描），
+    再做语句级恐慌恢复；两阶段诊断合并成一份，按位置排序后返回。
+    """
+
+    tokens, lexer_diagnostics = Lexer(source).tokenize_recovering()
+    outcome = Parser(tokens).parse_recovering()
+    merged = [*lexer_diagnostics, *outcome.diagnostics]
+    merged.sort(key=lambda item: item.location or (10**9, 10**9))
+    return ParseOutcome(outcome.statements, tuple(merged))
+
+
+def _rewrite_cte_references(node: Node, scope: dict[str, "Select"]) -> Node:
+    """把引用 CTE 名称的 TableRef 就地换成派生表。
+
+    HOW：按 dataclass 字段泛化遍历，只对 TableRef/Subquery/ExistsPredicate 做特判，
+    新增的表达式节点类型天然被覆盖，不需要同步维护这里。
+    WHY：``dataclasses.replace`` 不会带走节点上的位置元数据，替换后必须显式搬一次，
+    否则 CTE 查询里的错误会丢掉行列号。
+    """
+
+    if isinstance(node, TableRef):
+        if node.query is not None:
+            return node
+        cte = scope.get(node.name.lower())
+        if cte is None:
+            return node
+        derived = TableRef("", node.alias or node.name, cte)
+        derived.copy_source_metadata_from(node)
+        return derived
+    if isinstance(node, (Subquery, ExistsPredicate)):
+        inner = _rewrite_cte_references(node.query, scope)
+        if inner is node.query:
+            return node
+        updated = replace(node, query=inner)
+        updated.copy_source_metadata_from(node)
+        return updated
+    if not is_dataclass(node):
+        return node
+    updates: dict[str, object] = {}
+    for item in fields(node):
+        value = getattr(node, item.name)
+        if isinstance(value, Node):
+            rewritten = _rewrite_cte_references(value, scope)
+            if rewritten is not value:
+                updates[item.name] = rewritten
+        elif isinstance(value, tuple) and any(
+            isinstance(entry, Node) for entry in value
+        ):
+            entries = [
+                _rewrite_cte_references(entry, scope) if isinstance(entry, Node) else entry
+                for entry in value
+            ]
+            if any(new is not old for new, old in zip(entries, value, strict=True)):
+                updates[item.name] = tuple(entries)
+    if not updates:
+        return node
+    updated = replace(node, **updates)
+    updated.copy_source_metadata_from(node)
+    return updated
 
 
 __all__ = ["Parser", "parse_one", "parse_script"]

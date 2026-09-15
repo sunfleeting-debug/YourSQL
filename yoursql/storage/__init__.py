@@ -1,4 +1,4 @@
-"""固定页文件、缓存、槽式记录和索引。"""
+"""固定页文件、缓存、槽式记录、预写日志和索引。"""
 
 from yoursql.storage.buffer import (
     BufferFrameSnapshot,
@@ -35,6 +35,8 @@ from yoursql.storage.page import (
     decode_free_page_next,
     encode_free_page_payload,
 )
+from yoursql.storage.recovery import RecoveryReport, recover
+from yoursql.storage.wal import WalRecord, WriteAheadLog, wal_path_for
 
 __all__ = [
     "BPlusTree",
@@ -55,6 +57,9 @@ __all__ = [
     "IndexPageInfo",
     "IndexPayloadEntry",
     "IndexSnapshotEntry",
+    "RecoveryReport",
+    "WalRecord",
+    "WriteAheadLog",
     "index_page_info",
     "Page",
     "PageType",
@@ -70,4 +75,6 @@ __all__ = [
     "SlottedPageBinaryLayout",
     "SlottedPageLayoutInfo",
     "TableHeap",
+    "recover",
+    "wal_path_for",
 ]

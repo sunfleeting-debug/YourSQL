@@ -18,11 +18,14 @@ from yoursql.common.errors import (
     AuthorizationError,
     BinderError,
     CatalogError,
+    ConcurrencyError,
     ExecutionError,
     LexerError,
     YourSQLError,
     ParserError,
+    RecoveryError,
     StorageError,
+    TransactionError,
 )
 from yoursql.common.types import (
     Column,
@@ -35,7 +38,10 @@ from yoursql.common.types import (
     TableStats,
     Value,
     compare_values,
+    decimal_to_json,
+    json_safe,
     sql_truth,
+    to_decimal,
 )
 
 __all__ = [
@@ -43,6 +49,7 @@ __all__ = [
     "BinderError",
     "CatalogError",
     "Column",
+    "ConcurrencyError",
     "DataType",
     "DatabaseConfig",
     "MANUAL_CONTENT_TYPE",
@@ -62,6 +69,7 @@ __all__ = [
     "PayloadCodec",
     "PayloadCodecError",
     "PayloadCodecName",
+    "RecoveryError",
     "RowId",
     "Schema",
     "SqlRow",
@@ -69,12 +77,16 @@ __all__ = [
     "StorageError",
     "TableId",
     "TableStats",
+    "TransactionError",
     "Value",
     "compare_values",
     "configure_logging",
     "decode_payload",
+    "decimal_to_json",
+    "json_safe",
     "load_dotenv",
     "payload_codec",
     "sql_truth",
     "validate_payload_codec",
+    "to_decimal",
 ]

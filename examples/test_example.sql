@@ -42,3 +42,17 @@ ORDER BY e.id;
 
 -- 不相关 IN 子查询：只执行一次并复用结果（相关子查询仍逐行执行）。
 SELECT id FROM employees WHERE department_id IN (SELECT id FROM departments) ORDER BY id;
+
+-- ── 事务：显式事务的提交与回滚 ────────────────────────────────────────────────
+-- 用独立表，避免影响上面 employees / departments 的行数断言。
+CREATE TABLE IF NOT EXISTS txn_demo (id INT PRIMARY KEY, note VARCHAR(20));
+
+BEGIN;                          -- BEGIN / BEGIN WORK / BEGIN TRANSACTION 等价
+INSERT INTO txn_demo VALUES (1, 'rolled-back');
+ROLLBACK;                       -- 上面这一行必须消失
+
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+INSERT INTO txn_demo VALUES (2, 'committed');
+COMMIT;
+
+SELECT id, note FROM txn_demo ORDER BY id;   -- 只应看到 (2, 'committed')
