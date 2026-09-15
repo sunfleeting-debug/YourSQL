@@ -79,7 +79,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | `logical.py` | 由绑定 AST 构造逻辑计划（`plan_from_statement`） |
-| `optimizer.py` | 核心优化器（1118 行）：`StatisticsStore` 统计、`PlanCache` 计划缓存、代价值对象，以及**具名规则框架**（`RewriteRule` / `DEFAULT_RULES` 五条规则、`disabled_rules` 开关、命中规则写入 `plan.properties["rules"]`） |
+| `optimizer.py` | 核心优化器（约 1270 行）：`StatisticsStore` 统计、`PlanCache` 计划缓存、代价值对象，以及**具名规则框架**（`RewriteRule` / `DEFAULT_RULES` **七条**规则、`disabled_rules` 开关、命中规则写入 `plan.properties["rules"]`）；含 `join_reordering`（`_reorder_joins`）与 `limit_pushdown`（`top_n` 标注） |
 | `cost.py` | 代价模型公共值对象与校准常数（`CostEstimate`） |
 | `physical.py` | 物理计划节点 `PlanNode`/`PhysicalPlanNode`、可解释序列化与 `as_physical`，以及图形化输出 `label_lines()` / `to_mermaid()` / `to_dot()` |
 | `__init__.py` | 计划层导出 |

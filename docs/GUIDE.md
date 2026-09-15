@@ -33,7 +33,7 @@ SQL 文本 → Token 流 → AST → 绑定 → 逻辑计划 → 优化改写 �
 | 1 | 装环境 + 构建前端 | `cd web && npm install && npm run build && cd ..` |
 | 2 | 起工作台看界面 | `python -m yoursql.web --database data/showcase_v2.db` |
 | 3 | 看链路每一段长什么样 | 见下方第 2 节脚本 |
-| 4 | 跑全量测试建立信心 | `python -m pytest -q`（201 passed / 47s） |
+| 4 | 跑全量测试建立信心 | `python -m pytest -q`（277 passed / 约 70s） |
 | 5 | 读 `docs/ARCHITECTURE.md` | 78 行，是全项目最浓缩的设计说明 |
 
 工作台里最值得点的三个地方（验收演示用）：
@@ -138,15 +138,17 @@ Project → Filter → SeqScan
 
 ### 3.2 计划与优化 `yoursql/planner/`（5 文件）
 
-**优化规则共 5 类**（满足计划书"≥2 条规则"）：
+**优化规则共 7 条**（即 `DEFAULT_RULES`，满足计划书"≥2 条规则"；可用 `--rules` 枚举、`--disable-rule` 单独关闭）：
 
-| 规则 | 实现位置 |
+| 规则（`DEFAULT_RULES` 名称） | 实现位置 |
 | --- | --- |
-| 常量折叠 | `_fold_node` / `constant_value` / `_fold_binary` |
-| 布尔化简（三值逻辑） | `_simplify_boolean` / `_and_truth` |
-| 谓词下推 | `_push_predicates` / `_push_into_subtree` / `_can_push_to` |
-| 访问路径选择（SeqScan vs IndexScan） | `_choose_scan` / `should_use_index` |
-| 覆盖索引 IndexOnlyScan | `should_use_index_only` |
+| `constant_folding` 常量折叠 | `constant_value` / `_fold_binary` / `_rewrite_expr` |
+| `boolean_simplification` 布尔化简（三值逻辑） | `_simplify_boolean` / `_and_truth` |
+| `predicate_elimination` 恒真/恒假过滤消除 | `_rewrite_plan_node`（谓词阶段） |
+| `predicate_pushdown` 谓词下推 | `_push_predicates` / `_push_into_subtree` / `_can_push_to` |
+| `index_selection` 访问路径选择 + 覆盖索引 | `_choose_scan` / `should_use_index` / `should_use_index_only` |
+| `join_reordering` 等值键贪心重排连接顺序 | `_reorder_joins` / `_equi_join_pair` |
+| `limit_pushdown` 限行下推 / `top_n` 标注 | `_rewrite_plan_node`（基数阶段）；运行时由 `_sort_projected` 消费 `top_n` |
 
 **两个必须记住的阈值常量**（`optimizer.py` L51-54）：
 

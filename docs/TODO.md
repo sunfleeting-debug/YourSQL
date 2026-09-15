@@ -63,8 +63,12 @@
 ## 查询优化
 
 - [x] SeqScan/IndexScan 选择、基础 Join/扫描计划、统计信息、代价模型和规范化 SQL 计划缓存；优化计划已接入 Database SELECT 扫描路径。
-- [x] 具名重写规则框架（`RewriteRule` + `DEFAULT_RULES`）：`constant_folding` / `boolean_simplification` / `predicate_elimination` / `predicate_pushdown` / `index_selection` 五条规则可枚举、可单独关闭（`Optimizer(disabled_rules=...)`、`Database(disabled_rules=...)`、CLI `--disable-rule`），命中情况逐条写进 `plan.properties["rules"]`；CLI `--rules` 打印规则清单，EXPLAIN 因此能回答“这条语句被优化了什么”。规则开关放在 `ContextVar` 上，既能被 `@classmethod` 的规则方法读到，也天然按调用栈隔离（多线程 / 嵌套调用不会互相污染）。`tests/test_optimizer_rules.py` 10 条。
+- [x] 具名重写规则框架（`RewriteRule` + `DEFAULT_RULES`）：`constant_folding` / `boolean_simplification` / `predicate_elimination` / `predicate_pushdown` / `index_selection` / **`join_reordering`** / **`limit_pushdown`** 共 **7 条**规则可枚举、可单独关闭（`Optimizer(disabled_rules=...)`、`Database(disabled_rules=...)`、CLI `--disable-rule`），命中情况逐条写进 `plan.properties["rules"]`；CLI `--rules` 打印规则清单，EXPLAIN 因此能回答“这条语句被优化了什么”。规则开关放在 `ContextVar` 上，既能被 `@classmethod` 的规则方法读到，也天然按调用栈隔离（多线程 / 嵌套调用不会互相污染）。`tests/test_optimizer_rules.py` 13 条。
 - [x] 计划可视化后端通道：`PlanNode.label_lines()` / `to_mermaid()` / `to_dot()`，CLI `--plan {text,mermaid,dot,json}` 做到“只编译不出图也能看图”；`scripts/plan_visualize.py` 可导出含 Mermaid 图的自包含 HTML（示例产物 `docs/plan_demo.html`）。Web 工作台原有的 AST/Plan 画板保持不变。`tests/test_plan_visualization.py` 9 条。
+- [x] 执行层三项性能改造（证据见 `docs/OPTIMIZATION_BACKLOG.md` 第 7 节）：
+  - **连接策略三候选同层比较**：`hash / index_nested_loop / nested_loop` 按同一套代价模型取最小，结束“只要哈希装得下就永远选哈希”的闸门顺序，小表驱动大表时索引连接在默认预算下即可自然命中；哈希预算溢出退化为嵌套循环时写入 `stats["join_degrade"]` 给出可读原因。
+  - **`limit_pushdown` 的运行时落地**：`ORDER BY` + 较小 `LIMIT` 时 Sort 上标注 `top_n`，运行时有界堆只保留前 k 行（lineitem 60,175 行实测 627.6 ms → 475.0 ms、峰值内存 55.5 MB → 1.16 MB，结果逐值一致）。`tests/test_streaming_and_batch_load.py`。
+  - **分组聚合改流式累加器**：`dict[组键] → {count,sum,min,max}` 边扫边累积，内存由 O(行数) 降到 O(组数)（单组 SUM 峰值 35.5 MB → 1.15 MB），`COUNT(DISTINCT)` 用去重集合单独兜住。`tests/test_aggregation_streaming.py` 15 条固定 NULL / 空输入 / DISTINCT / 聚合出现在 HAVING 与 ORDER BY 的语义。
 
 ## 测试与性能
 
@@ -128,7 +132,7 @@
 | 14 | 错误处理 | 已有 | Lexical / Syntax / Semantic / Execution / Storage 五类，统一 `at line <行>, column <列>` |
 | 15 | EXPLAIN 与查询计划可视化 | 已有 + 上轮补齐 | 文本树 `PlanNode.explain()` 与 `to_dict()` JSON 已有；上轮补后端 Mermaid / DOT / HTML 通道（见"查询优化"节） |
 | 16 | 错误恢复 | **已补齐** | `parse_recovering` / `ParseOutcome` / `Database.check_script` / CLI `--check`；`tests/test_error_recovery.py` |
-| 17 | 算法规则框架 | **已补齐** | `RewriteRule` + `DEFAULT_RULES`（5 条具名规则）+ `plan.properties["rules"]` + CLI `--rules` / `--disable-rule`；`tests/test_optimizer_rules.py` |
+| 17 | 算法规则框架 | **已补齐** | `RewriteRule` + `DEFAULT_RULES`（**7 条**具名规则，含 `join_reordering` / `limit_pushdown`）+ `plan.properties["rules"]` + CLI `--rules` / `--disable-rule`；`tests/test_optimizer_rules.py` |
 | 18 | 事务 | **本轮补齐** | BEGIN/COMMIT/ROLLBACK、页级前像回滚（含索引页与目录页）、失败事务状态、DDL 事务；`tests/test_transactions.py` 16 条 |
 | 19 | 并发 | **本轮补齐** | 表级 S/X 锁 + 严格两阶段封锁 + 锁升级 + 等待图死锁检测 + 锁超时 + 两种隔离级别；`tests/test_concurrency.py` 10 条 |
 | 20 | WAL / 崩溃恢复 | **本轮补齐** | `<db>.wal` 日志文件、页头 LSN、写前日志规则、undo-only 恢复、checkpoint 截断；`tests/test_wal.py` 14 条 |
@@ -136,14 +140,21 @@
 验收现场可以直接跑这几条命令取证：
 
 ```
-python -m pytest -q                                  # 251 passed
-python -m yoursql.cli --rules                        # 规则清单（5/5 启用）
+python -m pytest -q                                  # 277 passed
+python -m yoursql.cli --rules                        # 规则清单（7/7 启用）
 python -m yoursql.cli --sql "SELECT 1; SELCT 2; SELECT @ FROM t;" --check
 # <db> 换成任意已有库；接上 --disable-rule 即可现场对比同一语句的计划差异
 python -m yoursql.cli --database <db> --sql "SELECT ... " --plan mermaid
 python -m yoursql.cli --database <db> --sql "SELECT ... " --plan dot --disable-rule index_selection
 python -m scripts.plan_visualize --database <db> --sql "SELECT ... " \
     --format html --out docs/plan_demo.html
+
+# 查询优化三项改造的对照取证
+python -m pytest tests/test_optimizer_rules.py tests/test_join_strategies.py \
+    tests/test_streaming_and_batch_load.py tests/test_aggregation_streaming.py -q
+# 同一语句开关 limit_pushdown，比较 plan 上的 top_n 与运行结果
+python -m yoursql.cli --database <db> --plan json \
+    --sql "SELECT l_orderkey FROM lineitem ORDER BY l_extendedprice LIMIT 10;"
 
 # 事务 / 并发 / WAL：全链路取证
 python -m pytest tests/test_transactions.py tests/test_concurrency.py tests/test_wal.py -q
@@ -177,6 +188,13 @@ python -m yoursql.cli --database tmp/txn.db --isolation read_committed --sql "BE
   - 顺带修 `SlottedPage._from_binary` 每页把 `sorted(ranges)` 算两遍（宽表全表扫描每页白排一次），以及 `TableHeap.scan` 每行重复构造 `PageId`。
   - 测量口径：`benchmarks/bench_scan_paths.py`，每个用例独立进程 × 重复取最小值。同进程连测会被堆状态与 GC 干扰（同一配置实测能差 30%，Q6 曾因此被误判成"变慢 30%"），该脚本强制隔离。
   - 回归：`tests/test_scan_fast_path.py` 10 条（结果一致、删除后按活槽计数、带 WHERE/交叉连接/分组/HAVING/空表、存储层 `count()` 与 `scan()` 同口径）；另外与原始 `.tbl` 行数（8 张表全对）和同数据 SQLite 库（16 条 lineitem 聚合语句逐值）对拍一致；全量 `pytest` **251 条通过**。
+
+- [x] 查询优化三项改造（证据与口径见 `docs/OPTIMIZATION_BACKLOG.md` 第 7 节）：
+  - **`join_reordering` 规则（计划层）**：对全 INNER/CROSS 的等值连接按 `TableStats.row_count` 贪心重排——先取行数最小的表，再逐张接入"与已连接集合有等值键"的表，避免首层退化成笛卡尔积。实测同一个三表连接 6 种 `FROM` 写法：改前 **2/6 顺序 >60 s 超时**，改后 **6/6 全部 1.18–1.65 s**，结果指纹完全一致。表名/别名与统计键的映射是坑：别名的 `row_count` 会查成 0，必须用真实表名取统计，任一表不在统计里就整体跳过重排。另一个坑是 `EXPLAIN` 包裹：`Explain` 是独立语句类型，规则若只认顶层 `Select`，`EXPLAIN SELECT ...` 会跳过重排、与实际执行不一致（现由 `_reorder_joins_in_statement` 穿透）。
+  - **`limit_pushdown` 规则 + 运行时 top-N**：`ORDER BY` + 较小 `LIMIT` 时给 Sort 标 `top_n`，运行时有界堆只留前 k 行（`_compile_order_keys` 把排序键编译一次后复用）。lineitem 60,175 行实测 **627.6 ms → 475.0 ms（1.32×）、峰值内存 55.5 MB → 1.16 MB（48×）**，7 组组合用例（`NULLS FIRST/LAST`、多键、`DESC`、`OFFSET`）与全量排序逐值一致；关掉该规则 `top_n` 即消失。
+  - **分组聚合改流式累加器（执行层）**：`dict[组键] → {count,sum,min,max}` 边扫边累积，内存 **O(行数) → O(组数)**（单组 `SUM` 峰值 35.5 MB → 1.15 MB，三组 `GROUP BY` 27.8 MB → 1.24 MB）；聚合采集改走 `_walk_expressions`，HAVING / ORDER BY 里不在投影的聚合也能查回预计算值；`COUNT(DISTINCT)` 用去重集合单独兜住。`tests/test_aggregation_streaming.py` 15 条固定 NULL / 空输入 / DISTINCT / 位置语义。
+  - **连接策略三候选同层比较**：`hash / index_nested_loop / nested_loop` 用同一套代价模型取最小，修正"只要哈希装得下就永远选哈希"的闸门顺序。左 2 行 × 右 20,000 行且右表有索引时，**默认预算下即可选中 `IndexNestedLoop`**（此前要 monkeypatch 把预算压到 46,400 B）；哈希预算溢出退化为嵌套循环时写入 `stats["join_degrade"]`，不再静默降级。
+  - 全量 `pytest` **277 条通过**（新增/更新：`test_aggregation_streaming.py` 15、`test_optimizer_rules.py` 13、`test_join_strategies.py` 18、`test_streaming_and_batch_load.py` 5）。
 
 ### 待办（已用实测数据重写过方向）
 
