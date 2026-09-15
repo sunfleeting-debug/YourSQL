@@ -203,3 +203,185 @@ def test_uncorrelated_not_in_subquery_keeps_null_semantics(tmp_path: Path) -> No
         assert db.execute("SELECT id FROM fact WHERE id IN (SELECT id FROM allow);").rows == [(2,)]
         # 1 与 NULL 比较得到 NULL（非 TRUE），所以 NOT IN 不返回任何行
         assert db.execute("SELECT id FROM fact WHERE id NOT IN (SELECT id FROM allow);").rows == []
+
+
+def _scan_tables(plan: object) -> list[str]:
+    """按连接层级列出扫描的表（等价于执行层的 FROM 顺序）。"""
+
+    def walk(node: object) -> list[str]:
+        children = getattr(node, "children", ())
+        if getattr(node, "kind", "") in {"SeqScan", "IndexScan"}:
+            return [str(getattr(node, "properties", {}).get("table"))]
+        found: list[str] = []
+        for child in children:
+            found.extend(walk(child))
+        return found
+
+    return walk(plan)
+
+
+# --- 连接策略闸门：三种策略同层比较 ---
+
+
+def test_join_strategy_compares_three_candidates_at_same_level(tmp_path: Path) -> None:
+    """三种策略必须同层取最小代价。
+
+    WHY：旧写法 ``if hash_fits and hash_cost <= nested_cost: return "hash"`` 里
+    ``hash`` 对任意行数都小于 ``nested``，于是只要右表装得进内存就永远返回哈希，
+    索引连接实际不可达（启用门槛被抬到内存预算边界）。这里用三个方向固定住闸门。
+    决策函数只依赖代价常数与 ``index_metadata is not None``，因此哨兵对象即可代表
+    "右表连接列上有可用索引"。
+    """
+
+    with Database(tmp_path / "join-gate.db") as db:
+        indexed = object()
+        # 2 行驱动 20,000 行：索引 2.8 ms < 哈希 4.4 ms → 索引连接
+        assert db._choose_join_strategy(
+            [("d", "id", "dim_id")], 20_000, 2, indexed
+        )[0] == "index"
+        # 60,175 行驱动 1,500 行：索引 84 s 远贵于哈希 3.3 ms → 哈希
+        assert db._choose_join_strategy(
+            [("l", "l_orderkey", "o_orderkey")], 1_500, 60_175, indexed
+        )[0] == "hash"
+        # 右表无可用索引时仍是哈希，而不是白降到嵌套循环
+        assert db._choose_join_strategy(
+            [("a", "x", "y")], 1_000, 10, None
+        )[0] == "hash"
+        # 没有等值键 → 只能嵌套循环
+        assert db._choose_join_strategy([], 1_000, 10, None)[0] == "nested_loop"
+
+
+def test_index_join_is_chosen_for_small_left_with_indexed_right(tmp_path: Path) -> None:
+    """小表驱动 + 右表有索引时，默认预算下就应走索引连接（而不是只在压小预算时）。"""
+
+    with Database(tmp_path / "join-index-default.db") as db:
+        db.execute("CREATE TABLE dim(id INT, name VARCHAR);")
+        db.insert_rows("dim", [(1, "one"), (2, "two")])
+        db.execute("CREATE TABLE fact(id INT, dim_id INT);")
+        db.insert_rows("fact", [(index, index % 2 + 1) for index in range(20000)])
+        db.execute("CREATE INDEX idx_fact_dim ON fact (dim_id);")
+
+        sql = "SELECT d.name, f.id FROM dim AS d JOIN fact AS f ON f.dim_id = d.id;"
+        result = db.execute(sql)
+        assert result.stats["joins"] == ["IndexNestedLoop"], result.stats
+        assert sorted(result.rows) == sorted(
+            ("one" if index % 2 == 0 else "two", index) for index in range(20000)
+        )
+
+
+def test_join_degrade_note_explains_hash_budget_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """哈希建侧超内存预算且无索引时，stats 必须写明降级原因，而不是静静跑下去。"""
+
+    with Database(tmp_path / "join-degrade.db") as db:
+        db.execute("CREATE TABLE a(id INT);")
+        db.insert_rows("a", [(index,) for index in range(20)])
+        db.execute("CREATE TABLE b(id INT, a_id INT);")
+        db.insert_rows("b", [(index, index % 20) for index in range(50)])
+
+        monkeypatch.setattr("yoursql.execution.query._JOIN_HASH_MEMORY_BUDGET", 464)
+        result = db.execute("SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id;")
+        assert result.stats["joins"] == ["NestedLoop"], result.stats
+        notes = result.stats.get("join_degrade")
+        assert notes and "内存预算" in notes[0], result.stats
+        assert len(result.rows) == 50
+
+
+# --- join_reordering：等值键贪心重排 ---
+
+
+def _seed_chain(db: Database) -> None:
+    db.execute("CREATE TABLE t1(a INT, name VARCHAR);")
+    db.insert_rows("t1", [(1, "x"), (2, "y")])
+    db.execute("CREATE TABLE t2(a INT, b INT);")
+    db.insert_rows("t2", [(1, 10), (2, 20), (3, 30)])
+    db.execute("CREATE TABLE t3(b INT, tag VARCHAR);")
+    db.insert_rows("t3", [(10, "p"), (20, "q"), (99, "z")])
+
+
+# 书写顺序故意把"彼此没有等值键"的 t3 与 t1 放到第一层 → 首层会退化成笛卡尔积。
+BAD_ORDER_SQL = "SELECT name, tag FROM t3, t1, t2 WHERE t1.a = t2.a AND t2.b = t3.b;"
+
+
+def test_join_reordering_avoids_first_level_cartesian_product(tmp_path: Path) -> None:
+    path = tmp_path / "join-reorder.db"
+    with Database(path) as db:
+        _seed_chain(db)
+        result = db.execute(BAD_ORDER_SQL)
+        assert sorted(result.rows) == [("x", "p"), ("y", "q")]
+
+        plan = db.compile(BAD_ORDER_SQL).optimized_plan
+        assert plan is not None
+        assert "join_reordering" in plan.properties["rules"]
+        # 重排后首层是 t1 ⋈ t2（有等值键），t3 放到最后一层
+        assert _scan_tables(plan) == ["t1", "t2", "t3"]
+
+    # 关掉规则后退回原书写顺序，结果必须完全一致
+    with Database(path, disabled_rules=("join_reordering",)) as plain:
+        assert sorted(plain.execute(BAD_ORDER_SQL).rows) == [("x", "p"), ("y", "q")]
+        off = plain.compile(BAD_ORDER_SQL).optimized_plan
+        assert off is not None
+        assert "join_reordering" not in off.properties.get("rules", ())
+        assert _scan_tables(off) == ["t3", "t1", "t2"]
+
+
+def test_join_reordering_normalizes_written_order(tmp_path: Path) -> None:
+    """同一个查询的不同书写顺序应收敛到同一个执行顺序。"""
+
+    with Database(tmp_path / "join-reorder-orders.db") as db:
+        _seed_chain(db)
+        orders = {
+            tuple(_scan_tables(db.compile(sql).optimized_plan))
+            for sql in (
+                BAD_ORDER_SQL,
+                "SELECT name, tag FROM t2, t3, t1 WHERE t1.a = t2.a AND t2.b = t3.b;",
+                "SELECT name, tag FROM t1, t3, t2 WHERE t2.a = t1.a AND t2.b = t3.b;",
+            )
+        }
+        assert orders == {("t1", "t2", "t3")}, orders
+
+
+def test_join_reordering_skips_outer_joins(tmp_path: Path) -> None:
+    """外连接顺序敏感：重排规则必须原样保留书写顺序。"""
+
+    with Database(tmp_path / "join-reorder-outer.db") as db:
+        db.execute("CREATE TABLE big_t(id INT, label VARCHAR);")
+        db.insert_rows("big_t", [(index, f"b{index}") for index in range(50)])
+        db.execute("CREATE TABLE small_t(id INT, big_id INT);")
+        db.insert_rows("small_t", [(index, index % 50) for index in range(5)])
+
+        sql = "SELECT b.id, s.id FROM big_t AS b LEFT JOIN small_t AS s ON s.big_id = b.id;"
+        plan = db.compile(sql).optimized_plan
+        assert plan is not None
+        # small_t 更小，若被重排就会换边——顺序保持不变即证明规则没有动外连接
+        assert "join_reordering" not in plan.properties.get("rules", ())
+        assert _scan_tables(plan) == ["big_t", "small_t"]
+        assert len(db.execute(sql).rows) == 50
+
+
+def test_explain_shows_the_same_join_order_as_execution(tmp_path: Path) -> None:
+    """``EXPLAIN SELECT ...`` 里的连接顺序必须与真实执行所用的顺序一致。
+
+    WHY：重排改的是 AST（在重建计划之前），而 ``EXPLAIN`` 是独立语句类型，内层 SELECT
+    在 ``Explain.statement`` 里。只认顶层 ``Select`` 就会让整条 ``EXPLAIN`` 跳过重排——
+    于是 EXPLAIN 显示 ``FROM`` 的书写顺序、实际执行却按重排后的顺序跑：计划在撒谎，
+    现场也没有可用来演示规则生效的输出。``EXPLAIN`` 的输出取的是内层计划
+    （``commands.py`` 里的 ``plan.children[0]``），所以这里直接断言那一层。
+    """
+
+    path = tmp_path / "join-reorder-explain.db"
+    with Database(path) as db:
+        _seed_chain(db)
+        explain_root = db.compile(f"EXPLAIN {BAD_ORDER_SQL}").optimized_plan
+        assert explain_root is not None
+        assert explain_root.kind == "Explain"
+        # EXPLAIN 展示的那一层就是执行层真正用的顺序（与不带 EXPLAIN 的编译结果一致）
+        assert _scan_tables(explain_root.children[0]) == ["t1", "t2", "t3"]
+        assert _scan_tables(db.compile(BAD_ORDER_SQL).optimized_plan) == ["t1", "t2", "t3"]
+
+    # 关掉规则后，EXPLAIN 同样要如实反映"没有重排"
+    with Database(path, disabled_rules=("join_reordering",)) as plain:
+        off = plain.compile(f"EXPLAIN {BAD_ORDER_SQL}").optimized_plan
+        assert off is not None
+        assert _scan_tables(off.children[0]) == ["t3", "t1", "t2"]
