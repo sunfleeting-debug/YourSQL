@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from yoursql.common import RowId, StorageError
+from yoursql.common import StorageError
+from yoursql.common.codec import JsonPayloadCodec
 from yoursql.storage import BufferPool, DiskManager, Page, PageType, SlottedPage, TableHeap
 from yoursql.storage.page import decode_free_page_next
 
@@ -70,6 +71,84 @@ def test_linked_free_list_persists_without_superblock_growth(tmp_path: Path) -> 
         assert metadata.free_list_head == page_ids[-1]
         reused = disk.allocate(PageType.HEAP, b"reused")
         assert reused.page_id == page_ids[-1]
+
+
+def test_superblock_write_is_batched_until_sync(tmp_path: Path) -> None:
+    path = tmp_path / "batched-superblock.db"
+    with DiskManager(path) as disk:
+        before = disk.io_stats().page_writes
+        for _ in range(20):
+            disk.allocate(PageType.CATALOG, b"payload")
+        after_pages = disk.io_stats().page_writes
+        # 每个数据页仍立即写出，但 superblock 只在同步边界写一次。
+        assert after_pages - before == 20
+
+        disk.sync()
+        after_sync = disk.io_stats().page_writes
+        assert after_sync - before == 21
+        disk.sync()
+        assert disk.io_stats().page_writes == after_sync
+
+    with DiskManager(path) as disk:
+        assert disk.page_count == 21
+
+
+def test_named_page_directory_grows_without_superblock_growth(tmp_path: Path) -> None:
+    path = tmp_path / "named-page-directory.db"
+    with DiskManager(path, page_size=512) as disk:
+        page = disk.allocate(PageType.CATALOG, b"payload")
+        for index in range(100):
+            disk.register_named_page(f"named_page_{index:03d}", page.page_id)
+        with pytest.raises(StorageError, match="命名页名称过长"):
+            disk.register_named_page("x" * 1000, page.page_id)
+        disk.sync()
+        superblock_payload = disk.read(0).payload
+        assert b"named_page_000" not in superblock_payload
+        assert disk.named_page("named_page_099") == 1
+
+    with DiskManager(path, page_size=512) as disk:
+        assert disk.page_count > 2
+        assert disk.named_page("named_page_000") == 1
+        assert disk.named_page("named_page_099") == 1
+        disk.free(1)
+        disk.sync()
+
+    with DiskManager(path, page_size=512) as disk:
+        assert disk.named_page("named_page_000") is None
+        assert disk.named_page("named_page_099") is None
+
+
+def test_v2_named_pages_migrate_to_fixed_superblock_and_directory(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "named-page-migration.db"
+    with DiskManager(path, page_size=512) as disk:
+        page = disk.allocate(PageType.CATALOG, b"payload")
+        disk.sync()
+        legacy_payload = JsonPayloadCodec().encode(
+            {
+                "magic": "YOURSQLMS",
+                "version": 2,
+                "page_size": 512,
+                "next_page_id": disk.page_count,
+                "free_list_head": None,
+                "free_page_count": 0,
+                "named_pages": {"catalog": page.page_id, "legacy": page.page_id},
+                "payload_codec": "json",
+            }
+        )
+        disk.write(Page(0, 512, PageType.SUPERBLOCK, legacy_payload))
+        disk.sync()
+
+    with DiskManager(path, page_size=512) as disk:
+        assert disk.named_page("catalog") == 1
+        assert disk.named_page("legacy") == 1
+        disk.sync()
+
+    with DiskManager(path, page_size=512) as disk:
+        payload = disk.read(0).payload
+        assert b'"named_pages"' not in payload
+        assert disk.named_page("legacy") == 1
 
 
 def test_buffer_snapshot_exposes_eviction_order_for_lru_and_fifo(tmp_path: Path) -> None:
@@ -262,7 +341,7 @@ def test_table_heap_reuses_slots_and_persists(tmp_path: Path) -> None:
         buffer = BufferPool(disk, capacity=2)
         heap = TableHeap(buffer)
         first = heap.insert((1, "Alice"))
-        second = heap.insert((2, "Bob"))
+        heap.insert((2, "Bob"))
         assert [row for _rid, row in heap.scan()] == [(1, "Alice"), (2, "Bob")]
         assert heap.delete(first)
         assert heap.read(first) is None

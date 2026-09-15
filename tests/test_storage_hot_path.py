@@ -15,10 +15,12 @@ from decimal import Decimal
 
 import pytest
 
+from yoursql.common.codec import JsonPayloadCodec
 from yoursql.common.errors import StorageError
 from yoursql.common.types import PageId, RowId
-from yoursql.storage import Page, PageType, codec
+from yoursql.storage import Page, PageType, TableHeap, codec
 from yoursql.storage.index import INDEX_MAGIC, _IndexNode
+from yoursql.storage.index.inspection import index_page_info
 
 
 def test_codec_round_trip_is_lossless_for_typed_values() -> None:
@@ -33,6 +35,19 @@ def test_codec_round_trip_is_lossless_for_typed_values() -> None:
 def test_codec_decodes_plain_rows_without_decimal_marker() -> None:
     assert codec.loads(b'[1,"a",2.5,null,true]') == [1, "a", 2.5, None, True]
     assert codec.load_strings('[1,"a"]') == [1, "a"]
+
+
+def test_codec_reads_legacy_decimal_marker() -> None:
+    assert codec.loads(b'[{"__yoursql_decimal__":"0.07"}]') == [Decimal("0.07")]
+
+
+def test_common_json_codec_reads_both_decimal_markers() -> None:
+    payload_codec = JsonPayloadCodec()
+    assert payload_codec.decode(b'[{"$decimal":"0.07"}]') == [Decimal("0.07")]
+    assert payload_codec.decode(b'[{"__yoursql_decimal__":"0.08"}]') == [
+        Decimal("0.08")
+    ]
+    assert TableHeap._decode(b'[{"$decimal":"0.09"}]') == (Decimal("0.09"),)
 
 
 def test_codec_rejects_corrupt_and_trailing_payloads() -> None:
@@ -82,6 +97,9 @@ def test_index_node_full_verification_is_opt_in() -> None:
 
     with pytest.raises(StorageError):
         _IndexNode.from_page(_index_page(payload), verify=True)
+
+    with pytest.raises(StorageError):
+        index_page_info(_index_page(payload))
 
     with pytest.raises(StorageError):
         node.validate()

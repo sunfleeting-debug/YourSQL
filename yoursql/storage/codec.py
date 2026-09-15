@@ -18,6 +18,8 @@ from yoursql.common.errors import StorageError
 # HOW：键名带前缀，避免与用户可见的字符串内容混淆（行的元素都是标量，
 # 不会出现 dict，因此这个标记在行/键的取值位置上不会有歧义）。
 DECIMAL_MARKER = "$decimal"
+LEGACY_DECIMAL_MARKERS = frozenset({"__yoursql_decimal__"})
+_DECIMAL_MARKERS = frozenset({DECIMAL_MARKER, *LEGACY_DECIMAL_MARKERS})
 
 
 def _default(value: object) -> object:
@@ -47,8 +49,9 @@ def _decimal_hook(mapping: dict) -> object:
     """
 
     if len(mapping) == 1:
-        text = mapping.get(DECIMAL_MARKER)
-        if text is not None:
+        marker = next((key for key in _DECIMAL_MARKERS if key in mapping), None)
+        if marker is not None:
+            text = mapping[marker]
             try:
                 return Decimal(text)
             except (InvalidOperation, TypeError, ValueError) as exc:
@@ -64,7 +67,11 @@ _DECIMAL_DECODER = json.JSONDecoder(object_hook=_decimal_hook)
 
 
 def _decode_text(text: str) -> object:
-    decoder = _DECIMAL_DECODER if DECIMAL_MARKER in text else _PLAIN_DECODER
+    decoder = (
+        _DECIMAL_DECODER
+        if any(marker in text for marker in _DECIMAL_MARKERS)
+        else _PLAIN_DECODER
+    )
     try:
         value, end = decoder.raw_decode(text)
     except ValueError as exc:

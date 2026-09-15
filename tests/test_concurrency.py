@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from yoursql.common import ConcurrencyError, DatabaseConfig
+from yoursql.engine.concurrency.transaction import TransactionManager, TransactionState
 from yoursql.engine.runtime.database import Database
 
 TIMEOUT = 20.0
@@ -42,6 +43,28 @@ def _wait_until(predicate, deadline: float = TIMEOUT) -> bool:
             return True
         time.sleep(0.01)
     return predicate()
+
+
+def test_transaction_manager_allocates_ids_atomically() -> None:
+    manager = TransactionManager()
+    ready = threading.Barrier(8)
+    transactions = []
+
+    def begin() -> None:
+        ready.wait(TIMEOUT)
+        transactions.append(manager.begin())
+
+    threads = [_run(begin) for _ in range(8)]
+    for thread in threads:
+        thread.join(TIMEOUT)
+        assert not thread.is_alive()
+
+    ids = [transaction.txn_id for transaction in transactions]
+    assert sorted(ids) == list(range(1, 9))
+    assert manager.active_count == 8
+    for transaction in transactions:
+        manager.finish(transaction, TransactionState.COMMITTED)
+    assert manager.active_count == 0
 
 
 def test_exclusive_lock_serializes_two_writers(tmp_path: Path) -> None:

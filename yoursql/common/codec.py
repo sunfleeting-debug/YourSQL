@@ -40,7 +40,8 @@ class JsonPayloadCodec(PayloadCodec):
 
     name: PayloadCodecName = "json"
 
-    _DECIMAL_KEY = "__yoursql_decimal__"
+    _DECIMAL_KEY = "$decimal"
+    _LEGACY_DECIMAL_KEYS = frozenset({"__yoursql_decimal__"})
 
     def encode(self, value: object) -> bytes:
         """编码紧凑 UTF-8 JSON。"""
@@ -81,9 +82,19 @@ class JsonPayloadCodec(PayloadCodec):
     def _object_hook(cls, value: dict[str, object]) -> object:
         """还原 JSON payload 中的定点数标签。"""
 
-        if len(value) != 1 or cls._DECIMAL_KEY not in value:
+        if len(value) != 1:
             return value
-        raw = value[cls._DECIMAL_KEY]
+        marker = next(
+            (
+                key
+                for key in (cls._DECIMAL_KEY, *cls._LEGACY_DECIMAL_KEYS)
+                if key in value
+            ),
+            None,
+        )
+        if marker is None:
+            return value
+        raw = value[marker]
         if not isinstance(raw, str):
             raise PayloadCodecError("Decimal payload 标签值不是字符串")
         try:

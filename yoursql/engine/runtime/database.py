@@ -31,11 +31,7 @@ from yoursql.sql.ast import (
     BeginTransaction,
     Commit,
     CreateIndex,
-    CreateTable,
-    CreateView,
     DropIndex,
-    DropTable,
-    DropView,
     Explain,
     Rollback,
     Select,
@@ -682,19 +678,6 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             self.lock_manager.acquire(txn.txn_id, name, LockMode.SHARED)
             txn.read_resources.add(name.lower())
 
-    def _statement_touches_catalog(self, statement: Statement) -> bool:
-        return isinstance(
-            statement,
-            (
-                CreateTable,
-                CreateView,
-                DropTable,
-                DropView,
-                CreateIndex,
-                DropIndex,
-            ),
-        )
-
     # ----- 对外 SQL 管线与批量写入入口 -----
     #用户输入SQL，生成计划并执行
     def execute(self, sql: str) -> ExecutionResult:
@@ -1005,7 +988,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
         implicit = explicit is None
         txn = explicit or self.begin_transaction(
-            snapshot_catalog=self._statement_touches_catalog(statement),
+            # WHY：DML 也会修改目录中的 row_count、页链和索引元数据；自动提交失败时
+            # 必须与页前像一起恢复，否则优化器会看到比实际数据更大的统计信息。
+            snapshot_catalog=True,
             implicit=True,
         )
         try:

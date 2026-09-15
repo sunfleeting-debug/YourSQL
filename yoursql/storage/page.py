@@ -19,6 +19,7 @@ class PageType(str, Enum):
     CATALOG = "catalog"  # 目录链：表/视图/索引/权限元数据的 JSON
     HEAP = "heap"  # 表数据：`MSP2` 双向槽式记录页
     INDEX = "index"  # B+Tree 节点：叶子 key/RowId、内部分隔键与叶子链
+    DIRECTORY = "directory"  # 内部命名页目录；追加在枚举末尾以保持旧页类型编码
 
 
 PAGE_MAGIC = b"MDBP"

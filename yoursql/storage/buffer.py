@@ -18,7 +18,7 @@ from yoursql.storage.wal import WriteAheadLog
 
 _REPLACEMENT_POLICIES = frozenset({"lru", "fifo", "2q"})
 _PROTECTED_PAGE_TYPES = frozenset(
-    {PageType.SUPERBLOCK, PageType.CATALOG, PageType.INDEX}
+    {PageType.SUPERBLOCK, PageType.CATALOG, PageType.DIRECTORY, PageType.INDEX}
 )
 
 

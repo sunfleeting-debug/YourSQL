@@ -16,7 +16,7 @@ def index_page_info(
 ) -> IndexPageInfo:
     """【前端特供】返回有界的索引页结构，避免整页重复展开到 HTTP 响应。"""
 
-    node = _IndexNode.from_page(page, codec)
+    node = _IndexNode.from_page(page, codec, verify=True)
     safe_offset = max(0, int(offset))
     safe_limit = max(1, int(limit))
     common = {

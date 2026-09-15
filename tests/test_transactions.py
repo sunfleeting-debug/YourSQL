@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from yoursql.common import DatabaseConfig, TransactionError
+from yoursql.common import DatabaseConfig, ExecutionError, TransactionError
 from yoursql.engine.runtime.database import Database
 
 
@@ -42,6 +42,22 @@ def test_begin_rollback_discards_insert(tmp_path: Path) -> None:
         assert _rows(db, "SELECT COUNT(*) FROM t") == [(1,)]
     with _make_db(path) as db:
         assert _rows(db, "SELECT id FROM t ORDER BY id") == [(1,)]
+
+
+def test_failed_autocommit_insert_restores_catalog_row_count(tmp_path: Path) -> None:
+    """自动提交的部分失败 DML 不得把目录统计留在半条语句的状态。"""
+
+    path = tmp_path / "rollback_catalog_stats.db"
+    with _make_db(path) as db:
+        db.execute("CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(20))")
+        db.execute("INSERT INTO t VALUES (1, 'a')")
+        with pytest.raises(ExecutionError):
+            db.execute("INSERT INTO t VALUES (2, 'b'), (1, 'duplicate')")
+        assert _rows(db, "SELECT COUNT(*) FROM t") == [(1,)]
+        assert db.catalog.get_table("t").row_count == 1
+
+    with _make_db(path) as db:
+        assert db.catalog.get_table("t").row_count == 1
 
 
 def test_rollback_restores_updated_and_deleted_rows(tmp_path: Path) -> None:

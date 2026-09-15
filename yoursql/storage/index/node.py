@@ -12,6 +12,7 @@ from yoursql.storage.index.codec import INDEX_MAGIC, INDEX_VERSION
 from yoursql.storage.index.ordering import Key, _compare_entries, _compare_keys
 from yoursql.storage.index.types import IndexPayloadEntry
 from yoursql.storage.page import Page, PageType
+import yoursql.storage.codec as storage_codec
 
 
 @dataclass
@@ -144,7 +145,11 @@ class _IndexNode:
             codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
         )
         try:
-            encoded = selected.encode(value)
+            encoded = (
+                storage_codec.dumps(value)
+                if selected.name == "json"
+                else selected.encode(value)
+            )
         except (PayloadCodecError, TypeError, ValueError) as exc:
             raise StorageError(f"索引页 {self.page_id} 含无法序列化的键值") from exc
         return INDEX_MAGIC + encoded
@@ -165,7 +170,20 @@ class _IndexNode:
         if not page.payload.startswith(INDEX_MAGIC):
             raise StorageError(f"索引页 {page.page_id} 的格式版本不受支持")
         try:
-            raw, _codec = decode_payload(page.payload[len(INDEX_MAGIC) :], preferred)
+            encoded = page.payload[len(INDEX_MAGIC) :]
+            if preferred is None:
+                raw, _codec = decode_payload(encoded, preferred)
+            else:
+                selected = (
+                    preferred
+                    if isinstance(preferred, PayloadCodec)
+                    else get_payload_codec(preferred)
+                )
+                raw = (
+                    storage_codec.loads(encoded)
+                    if selected.name == "json"
+                    else selected.decode(encoded)
+                )
             if not isinstance(raw, dict) or int(raw.get("version", 0)) != INDEX_VERSION:
                 raise ValueError("版本不匹配")
             kind = str(raw.get("kind"))

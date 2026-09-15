@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,12 @@ from threading import RLock
 from typing import Callable, Mapping
 from typing import Iterator
 
-from yoursql.common.codec import PayloadCodec, PayloadCodecName, decode_payload
+from yoursql.common.codec import (
+    PayloadCodec,
+    PayloadCodecError,
+    PayloadCodecName,
+    decode_payload,
+)
 from yoursql.common.codec import payload_codec as get_payload_codec
 from yoursql.common.errors import StorageError
 from yoursql.common.trace import current_trace
@@ -20,6 +26,9 @@ from yoursql.storage.page import (
     decode_free_page_next,
     encode_free_page_payload,
 )
+
+_DIRECTORY_MAGIC = b"MDIR1"
+_DIRECTORY_HEADER = struct.Struct("<5sQ")
 
 
 @dataclass(frozen=True)
@@ -99,7 +108,7 @@ class DiskIOStats:
 class DiskManager:
     """以固定页大小读写一个数据库文件。"""
 
-    FORMAT_VERSION = 2
+    FORMAT_VERSION = 3
 
     def __init__(
         self,
@@ -126,7 +135,15 @@ class DiskManager:
         # 再转换为链式布局，避免仅打开旧库就改写文件。
         self._legacy_free_pages: set[int] = set()
         self._next_page_id = 1
+        self._catalog_page_id: int | None = None
+        self._directory_root_page: int | None = None
+        self._directory_page_ids: list[int] = []
+        self._pending_directory_reclaim: list[int] = []
         self._named_pages: dict[str, int] = {}
+        self._directory_dirty = False
+        # HOW：页分配/释放只在内存中更新链表，事务或关闭时一次性刷写 superblock，
+        # 避免每个页都反复改写第 0 页并放大损坏窗口。
+        self._superblock_dirty = False
         # HOW：页分配既会改 superblock 又绕过缓冲池，事务无法通过缓存观测到它；
         # 这里留一个回调，让运行时把"本事务新分配的页号"记下来，回滚时精确回收。
         self.allocate_hook: Callable[[int], None] | None = None
@@ -150,12 +167,15 @@ class DiskManager:
     def metadata(self) -> DiskMetadata:
         """【前端特供】返回当前数据库文件布局的只读摘要。"""
         with self._lock:
+            named_pages = dict(self._named_pages)
+            if self._catalog_page_id is not None:
+                named_pages["catalog"] = self._catalog_page_id
             return DiskMetadata(
                 page_size=self.page_size,
                 page_count=self.page_count,
                 next_page_id=self._next_page_id,
                 free_pages=tuple(sorted(self._free_pages)),
-                named_pages=dict(self._named_pages),
+                named_pages=named_pages,
                 free_list_head=self._free_list_head,
                 free_page_count=len(self._free_pages),
                 free_list_format=(
@@ -195,15 +215,23 @@ class DiskManager:
             raise StorageError(
                 f"页大小不匹配，文件为 {stored_size}，配置为 {self.page_size}"
             )
+        physical_size = self.path.stat().st_size
+        if physical_size % self.page_size:
+            raise StorageError("数据库文件大小不是完整页的整数倍")
+        physical_page_count = physical_size // self.page_size
+        if physical_page_count < 1:
+            raise StorageError("数据库文件缺少 superblock")
         stored_codec = data.get("payload_codec", self.payload_codec.name)
         if stored_codec != self.payload_codec.name:
             raise StorageError("superblock payload 编码字段与实际编码不一致")
-        self._next_page_id = max(1, int(data.get("next_page_id", 1)))
+        # WHY：崩溃可能发生在新页写出、superblock 尚未同步之后；把物理文件边界
+        # 纳入逻辑页数，才能让 WAL 恢复阶段释放这类孤儿页，而不是把页号判成越界。
+        self._next_page_id = max(
+            1, int(data.get("next_page_id", 1)), physical_page_count
+        )
         if "free_list_head" in data:
             raw_head = data.get("free_list_head")
-            self._free_list_head = (
-                None if raw_head in {None, 0} else int(raw_head)
-            )
+            self._free_list_head = None if raw_head in {None, 0} else int(raw_head)
             declared_count = int(data.get("free_page_count", 0))
             if declared_count < 0:
                 raise StorageError("superblock 空闲页数量不能为负数")
@@ -213,15 +241,40 @@ class DiskManager:
             if not isinstance(raw_free_pages, list):
                 raise StorageError("superblock free_pages 不是数组")
             self._free_pages = {int(value) for value in raw_free_pages}
-            if any(page_id <= 0 or page_id >= self._next_page_id for page_id in self._free_pages):
+            if any(
+                page_id <= 0 or page_id >= self._next_page_id
+                for page_id in self._free_pages
+            ):
                 raise StorageError("superblock free_pages 包含越界页号")
             self._legacy_free_pages = set(self._free_pages)
-        raw_named = data.get("named_pages", {})
-        self._named_pages = (
-            {str(key): int(value) for key, value in raw_named.items()}
-            if isinstance(raw_named, Mapping)
-            else {}
-        )
+        stored_version = int(data.get("version", 0))
+        if "catalog_page_id" in data:
+            self._catalog_page_id = self._optional_metadata_page_id(
+                data.get("catalog_page_id")
+            )
+            self._directory_root_page = self._optional_metadata_page_id(
+                data.get("directory_root_page")
+            )
+            self._load_directory()
+            self._superblock_dirty = False
+        else:
+            # HOW：v2 仍把命名页表放在 superblock；打开旧库时拆出 catalog 固定根，
+            # 其它条目留在内存，首次同步时迁移到可扩展的目录页链。
+            raw_named = data.get("named_pages", {})
+            legacy_named = (
+                {str(key).strip().lower(): int(value) for key, value in raw_named.items()}
+                if isinstance(raw_named, Mapping)
+                else {}
+            )
+            self._catalog_page_id = self._optional_metadata_page_id(
+                legacy_named.pop("catalog", None)
+            )
+            self._named_pages = legacy_named
+            self._directory_root_page = None
+            self._directory_page_ids = []
+            self._directory_dirty = bool(self._named_pages)
+            # 即使没有其它命名页，也要在下一次同步时移除旧版 map，完成格式升级。
+            self._superblock_dirty = stored_version < self.FORMAT_VERSION
 
     def _superblock_payload(self) -> bytes:
         """构造可持久化的 superblock 载荷。"""
@@ -232,7 +285,8 @@ class DiskManager:
             "next_page_id": self._next_page_id,
             "free_list_head": self._free_list_head,
             "free_page_count": len(self._free_pages),
-            "named_pages": self._named_pages,
+            "catalog_page_id": self._catalog_page_id,
+            "directory_root_page": self._directory_root_page,
             "payload_codec": self.payload_codec.name,
         }
         if self._legacy_free_pages:
@@ -241,7 +295,127 @@ class DiskManager:
             data.pop("free_list_head")
             data.pop("free_page_count")
             data["free_pages"] = sorted(self._legacy_free_pages)
-        return self.payload_codec.encode(data)
+        try:
+            payload = self.payload_codec.encode(data)
+        except (PayloadCodecError, TypeError, ValueError) as exc:
+            raise StorageError("superblock payload 无法编码") from exc
+        max_payload = self.page_size - Page.HEADER_SIZE
+        if len(payload) > max_payload:
+            raise StorageError(
+                f"superblock 元数据过大：{len(payload)} > {max_payload} 字节"
+            )
+        return payload
+
+    def _optional_metadata_page_id(self, value: object) -> int | None:
+        """校验 superblock 或目录中的可选页指针。"""
+
+        if value is None or value == 0:
+            return None
+        try:
+            page_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise StorageError("元数据页号不是整数") from exc
+        if page_id <= 0 or page_id >= self._next_page_id:
+            raise StorageError(f"元数据页号 {page_id} 越界")
+        return page_id
+
+    def _directory_chunks(self, entries: Mapping[str, int]) -> list[bytes]:
+        """把命名页目录拆成不会超过单页容量的 JSON 分片。"""
+
+        capacity = self.page_size - Page.HEADER_SIZE
+        if capacity <= _DIRECTORY_HEADER.size:
+            raise StorageError("页大小不足以容纳命名页目录")
+        if not entries:
+            return []
+        chunks: list[bytes] = []
+        current: dict[str, int] = {}
+        for name, page_id in sorted(entries.items()):
+            candidate = dict(current)
+            candidate[name] = int(page_id)
+            try:
+                encoded = self.payload_codec.encode(candidate)
+            except (PayloadCodecError, TypeError, ValueError) as exc:
+                raise StorageError("命名页目录无法编码") from exc
+            if len(encoded) + _DIRECTORY_HEADER.size > capacity:
+                if not current:
+                    raise StorageError(f"命名页名称过长，无法写入目录：{name!r}")
+                chunks.append(self.payload_codec.encode(current))
+                current = {name: int(page_id)}
+                try:
+                    encoded = self.payload_codec.encode(current)
+                except (PayloadCodecError, TypeError, ValueError) as exc:
+                    raise StorageError("命名页目录无法编码") from exc
+                if len(encoded) + _DIRECTORY_HEADER.size > capacity:
+                    raise StorageError(f"命名页名称过长，无法写入目录：{name!r}")
+            else:
+                current = candidate
+        if current or not chunks:
+            try:
+                chunks.append(self.payload_codec.encode(current))
+            except (PayloadCodecError, TypeError, ValueError) as exc:
+                raise StorageError("命名页目录无法编码") from exc
+        return chunks
+
+    def _load_directory(self) -> None:
+        """读取 superblock 指向的可扩展命名页目录。"""
+
+        self._named_pages = {}
+        self._directory_page_ids = []
+        current = self._directory_root_page
+        visited: set[int] = set()
+        while current is not None:
+            if current in visited:
+                raise StorageError("命名页目录存在循环")
+            visited.add(current)
+            page = Page.from_bytes(self._read_raw(current), page_size=self.page_size)
+            if page.page_type is not PageType.DIRECTORY:
+                raise StorageError(f"命名页目录 {current} 类型错误")
+            if len(page.payload) < _DIRECTORY_HEADER.size:
+                raise StorageError("命名页目录页头不完整")
+            magic, raw_next = _DIRECTORY_HEADER.unpack(
+                page.payload[: _DIRECTORY_HEADER.size]
+            )
+            if magic != _DIRECTORY_MAGIC:
+                raise StorageError("命名页目录魔数错误")
+            try:
+                data, _codec = decode_payload(
+                    page.payload[_DIRECTORY_HEADER.size :], self.payload_codec
+                )
+            except (PayloadCodecError, TypeError, ValueError) as exc:
+                raise StorageError("命名页目录 payload 损坏") from exc
+            if not isinstance(data, Mapping):
+                raise StorageError("命名页目录 payload 不是对象")
+            for raw_name, raw_page_id in data.items():
+                name = str(raw_name).strip().lower()
+                if not name or name == "catalog" or name in self._named_pages:
+                    raise StorageError("命名页目录包含重复或保留名称")
+                page_id = self._optional_metadata_page_id(raw_page_id)
+                if page_id is None:
+                    raise StorageError("命名页目录包含空页号")
+                self._named_pages[name] = page_id
+            self._directory_page_ids.append(current)
+            current = self._optional_metadata_page_id(raw_next)
+
+    def _flush_directory(self) -> None:
+        """把命名页目录写入可扩展的目录页链。"""
+
+        chunks = self._directory_chunks(self._named_pages)
+        previous_page_ids = list(self._directory_page_ids)
+        # WHY：目录页采用 copy-on-write，superblock 切换根指针前不覆盖旧链，
+        # 避免目录页写到一半时崩溃而损坏仍被旧 superblock 引用的链。
+        page_ids: list[int] = []
+        while len(page_ids) < len(chunks):
+            page_ids.append(self.allocate(PageType.DIRECTORY).page_id)
+        for index, chunk in enumerate(chunks):
+            next_page_id = page_ids[index + 1] if index + 1 < len(page_ids) else 0
+            payload = _DIRECTORY_HEADER.pack(_DIRECTORY_MAGIC, next_page_id) + chunk
+            self._write_raw(
+                Page(page_ids[index], self.page_size, PageType.DIRECTORY, payload)
+            )
+        self._directory_page_ids = page_ids
+        self._directory_root_page = page_ids[0] if page_ids else None
+        self._pending_directory_reclaim.extend(previous_page_ids)
+        self._directory_dirty = False
 
     def _load_free_list(self, declared_count: int) -> None:
         """读取并校验链式 free-list。"""
@@ -260,7 +434,9 @@ class DiskManager:
             if page.page_type is not PageType.FREE:
                 raise StorageError(f"free-list 页 {current} 不是 FREE 页")
             if page.page_id != current:
-                raise StorageError(f"free-list 页头页号不匹配：文件偏移={current}，页头={page.page_id}")
+                raise StorageError(
+                    f"free-list 页头页号不匹配：文件偏移={current}，页头={page.page_id}"
+                )
             next_page_id = decode_free_page_next(page.payload)
             self._free_page_next[current] = next_page_id
             current = next_page_id
@@ -317,22 +493,42 @@ class DiskManager:
     def _write_superblock(self) -> None:
         """将当前 superblock 写回数据库文件。"""
         self._ensure_linked_free_list()
+        if self._directory_dirty:
+            self._flush_directory()
         self._write_raw(
             Page(0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload())
         )
+        self._superblock_dirty = False
 
     def register_named_page(self, name: str, page_id: int) -> None:
         """注册带名称的页并记录其页号。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(page_id)
-            self._named_pages[name.strip().lower()] = int(page_id)
-            self._write_superblock()
+            key = name.strip().lower()
+            if not key:
+                raise StorageError("命名页名称不能为空")
+            if key == "catalog":
+                self._catalog_page_id = int(page_id)
+            else:
+                previous = self._named_pages.get(key)
+                self._named_pages[key] = int(page_id)
+                try:
+                    self._directory_chunks(self._named_pages)
+                except StorageError:
+                    if previous is None:
+                        self._named_pages.pop(key, None)
+                    else:
+                        self._named_pages[key] = previous
+                    raise
+                self._directory_dirty = True
+            self._superblock_dirty = True
 
     def named_page(self, name: str) -> int | None:
         """按名称查找已注册的页。"""
         with self._lock:
-            return self._named_pages.get(name.strip().lower())
+            key = name.strip().lower()
+            return self._catalog_page_id if key == "catalog" else self._named_pages.get(key)
 
     def allocate(
         self, page_type: PageType = PageType.FREE, payload: bytes = b""
@@ -350,16 +546,30 @@ class DiskManager:
                 # WHY：next_page_id 单调推进，保证新页不会覆盖已有页；文件只扩展、不收缩。
                 page_id = self._next_page_id
             page = Page(page_id, self.page_size, page_type, payload)
-            if self._free_list_head is not None:
+            reused_free_page = self._free_list_head is not None
+            previous_head = self._free_list_head
+            previous_next = self._free_page_next.get(page_id)
+            if reused_free_page:
                 self._free_list_head = next_page_id
                 self._free_page_next.pop(page_id, None)
                 self._free_pages.remove(page_id)
             else:
                 self._next_page_id += 1
+            try:
+                self._superblock_payload()
+            except StorageError:
+                if reused_free_page:
+                    self._free_list_head = previous_head
+                    self._free_pages.add(page_id)
+                    if previous_next is not None:
+                        self._free_page_next[page_id] = previous_next
+                else:
+                    self._next_page_id -= 1
+                raise
             self._write_raw(page)
-            # WHY：先写出实际页，再发布分配元数据，避免 superblock 先指向尚未物化的页；
-            # 两次写入尚非原子操作，崩溃恢复机制列入 TODO。
-            self._write_superblock()
+            # WHY：先写出实际页，再在事务/关闭同步时发布元数据；崩溃时物理文件边界
+            # 仍会被下一次打开识别，WAL 可以回收未提交分配的孤儿页。
+            self._superblock_dirty = True
             if self.allocate_hook is not None:
                 self.allocate_hook(page_id)
             return page
@@ -371,6 +581,8 @@ class DiskManager:
             self._check_page_id(page_id)
             if page_id == 0:
                 raise StorageError("不能释放 superblock")
+            if page_id in self._directory_page_ids:
+                raise StorageError("不能直接释放命名页目录")
             self._ensure_linked_free_list()
             normalized = int(page_id)
             if normalized in self._free_pages:
@@ -388,11 +600,16 @@ class DiskManager:
             self._free_page_next[normalized] = self._free_list_head
             self._free_pages.add(normalized)
             self._free_list_head = normalized
-            for key, value in tuple(self._named_pages.items()):
-                if value == page_id:
-                    # WHY：释放页后清除命名指针，避免 named_pages 指向已回收页。
-                    del self._named_pages[key]
-            self._write_superblock()
+            if normalized == self._catalog_page_id:
+                self._catalog_page_id = None
+            if normalized in self._named_pages.values():
+                self._named_pages = {
+                    key: value
+                    for key, value in self._named_pages.items()
+                    if value != normalized
+                }
+                self._directory_dirty = True
+            self._superblock_dirty = True
 
     def free_many(self, page_ids: Iterable[int]) -> None:
         """批量释放页面，并只重写一次 free-list 元数据。"""
@@ -407,6 +624,8 @@ class DiskManager:
                 self._check_page_id(page_id)
                 if page_id == 0:
                     raise StorageError("不能释放 superblock")
+                if page_id in self._directory_page_ids:
+                    raise StorageError("不能直接释放命名页目录")
                 if page_id in self._free_pages:
                     raise StorageError(f"页 {page_id} 已经是 FREE 页")
 
@@ -424,10 +643,17 @@ class DiskManager:
                 self._free_pages.add(page_id)
                 next_page_id = page_id
             self._free_list_head = next_page_id
-            for key, value in tuple(self._named_pages.items()):
-                if value in normalized_ids:
-                    del self._named_pages[key]
-            self._write_superblock()
+            if self._catalog_page_id in normalized_ids:
+                self._catalog_page_id = None
+            retained = {
+                key: value
+                for key, value in self._named_pages.items()
+                if value not in normalized_ids
+            }
+            if len(retained) != len(self._named_pages):
+                self._named_pages = retained
+                self._directory_dirty = True
+            self._superblock_dirty = True
 
     def _check_page_id(self, page_id: int) -> None:
         """校验页号是否位于有效范围内。"""
@@ -439,6 +665,10 @@ class DiskManager:
         with self._lock:
             self._ensure_open()
             self._check_page_id(int(page_id))
+            if int(page_id) == 0:
+                return Page(
+                    0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload()
+                )
             return Page.from_bytes(
                 self._read_raw(int(page_id)), page_size=self.page_size
             )
@@ -490,8 +720,19 @@ class DiskManager:
             self._ensure_open()
             # WHY：write/flush 只把内容推进到文件或 OS 缓冲区，只有 flush + fsync 才完成
             # 当前持久化边界；调用频率由上层事务/语句边界统一控制以减少同步开销。
+            if self._superblock_dirty or self._directory_dirty:
+                self._write_superblock()
             self._file.flush()
             os.fsync(self._file.fileno())
+            if self._pending_directory_reclaim:
+                # WHY：新根已经完成一次 fsync 后，旧目录链才允许回收；若此处崩溃，
+                # 最坏只是遗留可重用的孤儿页，不会破坏新旧任一份有效目录。
+                reclaim = tuple(self._pending_directory_reclaim)
+                self._pending_directory_reclaim.clear()
+                self.free_many(reclaim)
+                self._write_superblock()
+                self._file.flush()
+                os.fsync(self._file.fileno())
 
     def close(self) -> None:
         """关闭资源并释放关联状态。"""

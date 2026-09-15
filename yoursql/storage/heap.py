@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-from yoursql.common.codec import PayloadCodec, PayloadCodecError, decode_payload
+from yoursql.common.codec import PayloadCodec, PayloadCodecError
 from yoursql.common.codec import payload_codec as get_payload_codec
 from yoursql.common.errors import StorageError
 from yoursql.common.types import PageId, RowId
 from yoursql.storage.buffer import BufferPool
+import yoursql.storage.codec as storage_codec
 from yoursql.storage.page import (
     Page,
     PageType,
@@ -51,11 +52,13 @@ class TableHeap:
 
     @staticmethod
     # HOW：字段元组交给当前数据库选择的 payload 编解码器，供槽式页保存。
-    def _encode(
-        row: tuple[object, ...], codec: PayloadCodec | str = "json"
-    ) -> bytes:
+    def _encode(row: tuple[object, ...], codec: PayloadCodec | str = "json") -> bytes:
         """将内部数据编码为存储字节串。"""
-        selected = codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
+        selected = (
+            codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec)
+        )
+        if selected.name == "json":
+            return storage_codec.dumps(list(row))
         return selected.encode(list(row))
 
     @staticmethod
@@ -64,7 +67,16 @@ class TableHeap:
     ) -> tuple[object, ...]:
         """将存储字节串解码为内部数据。"""
         try:
-            value, _selected = decode_payload(raw, codec)
+            selected = (
+                (codec if isinstance(codec, PayloadCodec) else get_payload_codec(codec))
+                if codec is not None
+                else None
+            )
+            value = (
+                storage_codec.loads(raw)
+                if selected is None or selected.name == "json"
+                else selected.decode(raw)
+            )
         except (PayloadCodecError, TypeError, ValueError) as exc:
             raise StorageError("记录 payload 损坏") from exc
         if not isinstance(value, list):

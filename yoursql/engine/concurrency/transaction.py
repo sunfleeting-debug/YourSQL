@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import RLock
 
 from yoursql.common.errors import TransactionError
 
@@ -128,10 +129,12 @@ class Transaction:
             "duration_seconds": round(time.monotonic() - self.started_at, 6),
         }
 
+
 class TransactionManager:
     """分配事务号并跟踪活跃事务。"""
 
     def __init__(self) -> None:
+        self._lock = RLock()
         self._next_id = 1
         self._active: dict[int, Transaction] = {}
         self._committed = 0
@@ -141,45 +144,53 @@ class TransactionManager:
         normalized = isolation.strip().lower()
         if normalized not in ISOLATION_LEVELS:
             raise TransactionError(f"不支持的隔离级别 {isolation!r}")
-        txn = Transaction(self._next_id, normalized)
-        self._next_id += 1
-        self._active[txn.txn_id] = txn
-        return txn
+        with self._lock:
+            txn = Transaction(self._next_id, normalized)
+            self._next_id += 1
+            self._active[txn.txn_id] = txn
+            return txn
 
     def register(self, txn: Transaction) -> Transaction:
         """恢复或测试场景下直接登记一个已构造的事务。"""
 
-        self._active[txn.txn_id] = txn
-        self._next_id = max(self._next_id, txn.txn_id + 1)
-        return txn
+        with self._lock:
+            self._active[txn.txn_id] = txn
+            self._next_id = max(self._next_id, txn.txn_id + 1)
+            return txn
 
     def finish(self, txn: Transaction, state: TransactionState) -> None:
-        self._active.pop(txn.txn_id, None)
-        if state is TransactionState.COMMITTED:
-            self._committed += 1
-        else:
-            self._aborted += 1
+        with self._lock:
+            self._active.pop(txn.txn_id, None)
+            if state is TransactionState.COMMITTED:
+                self._committed += 1
+            else:
+                self._aborted += 1
 
     def get(self, txn_id: int) -> Transaction | None:
-        return self._active.get(int(txn_id))
+        with self._lock:
+            return self._active.get(int(txn_id))
 
     @property
     def active_count(self) -> int:
-        return len(self._active)
+        with self._lock:
+            return len(self._active)
 
     def active_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(self._active))
+        with self._lock:
+            return tuple(sorted(self._active))
 
     def stats(self) -> dict[str, object]:
-        return {
-            "next_txn_id": self._next_id,
-            "active": sorted(self._active),
-            "committed": self._committed,
-            "aborted": self._aborted,
-        }
+        with self._lock:
+            return {
+                "next_txn_id": self._next_id,
+                "active": sorted(self._active),
+                "committed": self._committed,
+                "aborted": self._aborted,
+            }
 
     def reset_counters(self) -> None:
         """仅供崩溃恢复后重新计数使用，不改变活跃事务集合。"""
 
-        self._committed = 0
-        self._aborted = 0
+        with self._lock:
+            self._committed = 0
+            self._aborted = 0
