@@ -2405,12 +2405,36 @@ class QueryExecutionMixin:
             if not self.optimizer.should_use_index_only(relation.name, len(candidates)):
                 continue
             tree = self.index_manager.get(metadata.name)
-            low, high, include_low, include_high = bounds
-            # WHY：必须用“前缀位置范围”而不是全键范围。联合索引下 `(1,'paid')` 与上界 `(1,)`
-            # 做元组比较会被判为越界，导致等值查询返回空集（实测演示库 `customer_id = 1` 返回 0 行）。
-            entries = tree.range_scan_prefix_entries(
-                (), low, high, include_low=include_low, include_high=include_high
-            )
+            leading_constraint = constraints.get(metadata.columns[0].lower())
+            if leading_constraint is not None and leading_constraint.allowed is not None:
+                # WHY：IN 不能退化成 min..max 范围，否则稀疏点查会把中间所有索引叶页
+                # 都读进缓存（实验库 16 个点因此放大成 330 页），重复执行永远无法形成热队列。
+                values = sorted(
+                    {
+                        value
+                        for value in leading_constraint.allowed
+                        if value is not None
+                    },
+                    key=cmp_to_key(self._compare_index_values),
+                )
+                point_entries: list[tuple[object, RowId, list[object]]] = []
+                seen_row_ids: set[RowId] = set()
+                for value in values:
+                    for entry in tree.range_scan_prefix_entries(
+                        (), value, value, include_low=True, include_high=True
+                    ):
+                        if entry.row_id in seen_row_ids:
+                            continue
+                        seen_row_ids.add(entry.row_id)
+                        point_entries.append((entry.key, entry.row_id, entry.payload))
+                entries = tuple(point_entries)
+            else:
+                low, high, include_low, include_high = bounds
+                # WHY：必须用“前缀位置范围”而不是全键范围。联合索引下 `(1,'paid')` 与上界 `(1,)`
+                # 做元组比较会被判为越界，导致等值查询返回空集（实测演示库 `customer_id = 1` 返回 0 行）。
+                entries = tree.range_scan_prefix_entries(
+                    (), low, high, include_low=include_low, include_high=include_high
+                )
             key_positions = [
                 relation.schema.index(column) for column in metadata.columns
             ]

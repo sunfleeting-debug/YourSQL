@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from yoursql.common import CatalogError
+from yoursql.common import CatalogError, DatabaseConfig
 from yoursql.engine.runtime.database import Database
 
 
@@ -36,6 +36,33 @@ def test_covering_index_serves_query_without_heap_reads(tmp_path: Path) -> None:
         heap_query = database.execute("SELECT note FROM orders WHERE status = 'open';")
         assert heap_query.stats["operator"] != "IndexOnlyScan"
         assert len(heap_query.rows) == 80
+
+
+def test_covering_index_in_predicate_uses_point_probes(tmp_path: Path) -> None:
+    """稀疏 IN 点查不能退化为最小值到最大值的索引范围扫描。"""
+
+    path = tmp_path / "covering-in.db"
+    config = DatabaseConfig(page_size=1024, buffer_pool_size=8, replacement_policy="2q")
+    with Database(path, config=config) as database:
+        database.execute("CREATE TABLE items(id INT PRIMARY KEY, payload VARCHAR);")
+        database.insert_rows(
+            "items",
+            [(index, f"payload-{index}") for index in range(1, 1001)],
+        )
+        database.execute("CREATE INDEX idx_items_id ON items (id);")
+        database.buffer_pool.reset_runtime()
+
+        sql = "SELECT id FROM items WHERE id IN (1, 201, 401, 601, 801);"
+        first = database.execute(sql)
+        before_second = database.buffer_pool.stats()
+        second = database.execute(sql)
+        after_second = database.buffer_pool.stats()
+
+        assert first.stats["operator"] == "IndexOnlyScan"
+        assert second.rows == first.rows
+        assert first.stats["page_reads"] < 20
+        assert second.stats["cache_hits"] > 0
+        assert after_second.hot_hits > before_second.hot_hits
 
 
 def test_covering_index_stays_consistent_after_dml(tmp_path: Path) -> None:
