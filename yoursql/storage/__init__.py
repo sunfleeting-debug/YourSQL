@@ -1,4 +1,8 @@
-"""固定页文件、缓存、槽式记录、预写日志和索引。"""
+"""固定页文件、缓存、槽式记录、预写日志和索引。
+
+=== 兼容旧聚合导入接口 ===
+继续从 ``yoursql.storage`` 重导出历史公开对象；具体实现仍位于各自子模块。
+"""
 
 from yoursql.storage.buffer import (
     BufferFrameSnapshot,

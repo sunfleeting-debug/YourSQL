@@ -28,6 +28,7 @@ class HeapRecord:
     row: tuple[object, ...]
 
     def __iter__(self):
+        # === 兼容旧扫描结果的二元组解包 ===
         """兼容旧的 ``for row_id, row in heap.scan()`` 调用。"""
 
         yield self.row_id
@@ -46,6 +47,7 @@ class TableHeap:
 
     @property
     def page_size(self) -> int:
+        # === 兼容已有数据库文件的页大小 ===
         """页大小跟随磁盘格式（打开已有库时可能是 512B–128KB 中的任意 2 的幂）。"""
 
         return self.buffer_pool.disk.page_size

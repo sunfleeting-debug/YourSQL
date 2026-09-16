@@ -48,11 +48,14 @@ class DiskMetadata:
     free_list_format: str
 
     def __getitem__(self, key: str) -> object:
+        # === 兼容旧检查适配层的映射式读取 ===
+        # 新代码直接访问 dataclass 字段；保留下标形式，避免旧工作台接口立即失效。
         """兼容存储检查适配层的旧映射式读取。"""
 
         return self.to_dict()[key]
 
     def __iter__(self) -> Iterator[str]:
+        # === 兼容旧检查适配层的映射式遍历 ===
         """返回对象的迭代器。"""
         return iter(
             (
@@ -97,10 +100,12 @@ class DiskIOStats:
     bytes_written: int
 
     def __getitem__(self, key: str) -> int:
+        # === 兼容旧检查适配层的映射式读取 ===
         """按键或下标读取对象中的元素。"""
         return getattr(self, key)
 
     def __iter__(self) -> Iterator[str]:
+        # === 兼容旧检查适配层的映射式遍历 ===
         """返回对象的迭代器。"""
         return iter(("page_reads", "page_writes", "bytes_read", "bytes_written"))
 
@@ -125,6 +130,8 @@ def decode_directory_page_payload(
     if magic != _DIRECTORY_MAGIC:
         raise StorageError("命名页目录魔数错误")
     try:
+        # === 兼容旧目录 payload 编码 ===
+        # 目录页和 superblock 共用 payload 回退策略，读取旧编码后由当前 codec 继续管理。
         data, _codec = decode_payload(
             payload[_DIRECTORY_HEADER.size :], payload_codec
         )
@@ -173,6 +180,7 @@ class DiskManager:
         self._free_pages: set[int] = set()
         self._free_page_next: dict[int, int | None] = {}
         self._free_list_head: int | None = None
+        # === 兼容旧版 superblock 的 free_pages 数组 ===
         # HOW：旧版 superblock 仍可能携带 free_pages 数组；首次发生元数据写入时
         # 再转换为链式布局，避免仅打开旧库就改写文件。
         self._legacy_free_pages: set[int] = set()
@@ -241,6 +249,9 @@ class DiskManager:
         if page.page_type is not PageType.SUPERBLOCK:
             raise StorageError("第 0 页不是 superblock")
         try:
+            # === 兼容旧 payload 编码 ===
+            # 旧库可能使用另一种 PayloadCodec；decode_payload 会先尝试配置值，
+            # 失败后回退到另一种编码，并把实际成功的 codec 保留下来供后续读取。
             data, selected_codec = (
                 decode_payload(page.payload, self.payload_codec)
                 if page.payload
@@ -253,8 +264,13 @@ class DiskManager:
             raise StorageError("superblock payload 不是对象")
         if data.get("magic") != "YOURSQLMS":
             raise StorageError("数据库文件魔数错误")
+        # === 兼容旧 superblock 版本 ===
+        # 旧版本允许继续读取；只有比当前版本更新的文件才拒绝，具体旧字段由下面的
+        # free-list 和命名页兼容分支处理。
         if int(data.get("version", 0)) > self.FORMAT_VERSION:
             raise StorageError("数据库文件版本过高")
+        # === 兼容旧 superblock 缺少 page_size 字段 ===
+        # 旧格式缺字段时沿用打开参数，但已有字段仍必须和文件配置一致。
         stored_size = int(data.get("page_size", self.page_size))
         if stored_size != self.page_size:
             raise StorageError(
@@ -266,11 +282,15 @@ class DiskManager:
         physical_page_count = physical_size // self.page_size
         if physical_page_count < 1:
             raise StorageError("数据库文件缺少 superblock")
+        # === 兼容旧 superblock 缺少 payload_codec 字段 ===
+        # 旧格式没有记录编码名称，此时沿用实际解码成功的 codec；新格式则严格校验。
         stored_codec = data.get("payload_codec", self.payload_codec.name)
         if stored_codec != self.payload_codec.name:
             raise StorageError("superblock payload 编码字段与实际编码不一致")
         # WHY：崩溃可能发生在新页写出、superblock 尚未同步之后；把物理文件边界
         # 纳入逻辑页数，才能让 WAL 恢复阶段释放这类孤儿页，而不是把页号判成越界。
+        # === 兼容旧 superblock 缺少 next_page_id 字段 ===
+        # 缺失时从 1 起步；同时纳入物理文件页数，避免旧元数据落后于实际文件边界。
         self._next_page_id = max(
             1, int(data.get("next_page_id", 1)), physical_page_count
         )
@@ -282,6 +302,9 @@ class DiskManager:
                 raise StorageError("superblock 空闲页数量不能为负数")
             self._load_free_list(declared_count)
         else:
+            # === 兼容旧 superblock 的 free_pages 数组 ===
+            # 当前格式把 free-list 链接写入 FREE 页；旧格式只在 superblock 中保存数组，
+            # 先保留到内存，首次真正写元数据时再由 _ensure_linked_free_list 迁移。
             raw_free_pages = data.get("free_pages", [])
             if not isinstance(raw_free_pages, list):
                 raise StorageError("superblock free_pages 不是数组")
@@ -303,6 +326,9 @@ class DiskManager:
             self._load_directory()
             self._superblock_dirty = False
         else:
+            # === 兼容旧 superblock 内嵌的 named_pages ===
+            # 旧格式把 catalog 和其它命名页都放在第 0 页；当前格式把 catalog 保留为
+            # 固定指针，其它命名页迁移到可扩展的 DIRECTORY 页链。
             # HOW：v2 仍把命名页表放在 superblock；打开旧库时拆出 catalog 固定根，
             # 其它条目留在内存，首次同步时迁移到可扩展的目录页链。
             raw_named = data.get("named_pages", {})
@@ -318,6 +344,7 @@ class DiskManager:
             self._directory_root_page = None
             self._directory_page_ids = []
             self._directory_dirty = bool(self._named_pages)
+            # === 兼容旧版本的延迟迁移 ===
             # 即使没有其它命名页，也要在下一次同步时移除旧版 map，完成格式升级。
             self._superblock_dirty = stored_version < self.FORMAT_VERSION
 
@@ -335,6 +362,7 @@ class DiskManager:
             "payload_codec": self.payload_codec.name,
         }
         if self._legacy_free_pages:
+            # === 兼容旧 free_pages 格式的只读观察 ===
             # 只读 peek 需要准确反映尚未迁移的旧页；真正写回前会先完成迁移。
             data["version"] = 1
             data.pop("free_list_head")
@@ -423,6 +451,8 @@ class DiskManager:
             if magic != _DIRECTORY_MAGIC:
                 raise StorageError("命名页目录魔数错误")
             try:
+                # === 兼容旧目录 payload 编码 ===
+                # 目录页可能与打开参数使用不同编码，decode_payload 负责尝试兼容格式。
                 data, _codec = decode_payload(
                     page.payload[_DIRECTORY_HEADER.size :], self.payload_codec
                 )
@@ -497,6 +527,8 @@ class DiskManager:
 
         if not self._legacy_free_pages:
             return
+        # === 兼容旧 free_pages 数组到链式 free-list 的迁移 ===
+        # 迁移只在需要写元数据时触发，单纯打开或 peek 旧库不会产生写入。
         ordered = sorted(self._legacy_free_pages)
         for index, page_id in enumerate(ordered):
             next_page_id = ordered[index + 1] if index + 1 < len(ordered) else None
@@ -738,13 +770,21 @@ class DiskManager:
                 bytes_written=self._writes * self.page_size,
             )
 
+    def reset_io_stats(self) -> None:
+        """【前端特供】归零进程内页 I/O 计数，不改动数据库文件。"""
+
+        with self._lock:
+            self._reads = 0
+            self._writes = 0
+
     def peek(self, page_id: int) -> Page:
         """只读调试页，恢复文件游标且不改变正常读写计数。"""
         with self._lock:
             self._ensure_open()
             self._check_page_id(page_id)
             if page_id == 0:
-                # WHY：peek 不应改写磁盘；旧版数组会在这里原样展示，首次写入时才迁移。
+                # === 兼容旧 free_pages 格式的只读 peek ===
+                # peek 不应改写磁盘；旧版数组会在这里原样展示，首次写入时才迁移。
                 return Page(
                     0, self.page_size, PageType.SUPERBLOCK, self._superblock_payload()
                 )
@@ -798,4 +838,6 @@ class DiskManager:
 
 
 class SingleFileDatabase(DiskManager):
+    # === 兼容旧类名 ===
+    # 保留旧名称，不新增行为；新代码统一使用 DiskManager 表达职责。
     """更具描述性的兼容名称。"""

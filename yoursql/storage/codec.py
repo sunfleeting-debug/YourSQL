@@ -18,6 +18,8 @@ from yoursql.common.errors import StorageError
 # HOW：键名带前缀，避免与用户可见的字符串内容混淆（行的元素都是标量，
 # 不会出现 dict，因此这个标记在行/键的取值位置上不会有歧义）。
 DECIMAL_MARKER = "$decimal"
+# === 兼容旧 Decimal 标记 ===
+# 旧版把 Decimal 写成 ``__yoursql_decimal__``；读取时继续接受，写入统一使用新标记。
 LEGACY_DECIMAL_MARKERS = frozenset({"__yoursql_decimal__"})
 _DECIMAL_MARKERS = frozenset({DECIMAL_MARKER, *LEGACY_DECIMAL_MARKERS})
 

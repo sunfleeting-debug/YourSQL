@@ -19,11 +19,14 @@ class PageType(str, Enum):
     CATALOG = "catalog"  # 目录链：表/视图/索引/权限元数据的 JSON
     HEAP = "heap"  # 表数据：`MSP2` 双向槽式记录页
     INDEX = "index"  # B+Tree 节点：叶子 key/RowId、内部分隔键与叶子链
-    DIRECTORY = "directory"  # 内部命名页目录；追加在枚举末尾以保持旧页类型编码
+    # === 兼容旧页类型编码 ===
+    # DIRECTORY 只能追加到枚举末尾，不能插入已有成员中间，否则旧页的 type code 会改变。
+    DIRECTORY = "directory"  # 内部命名页目录
 
 
 PAGE_MAGIC = b"MDBP"
 PAGE_VERSION = 2
+# === 兼容旧页头布局 ===
 # HOW：末尾 4 字节原本是对齐填充（旧文件恒为 0），现复用为页 LSN（日志序号），
 # 因此结构体尺寸与磁盘布局均未变化，旧数据库文件可以直接打开。
 PAGE_HEADER = struct.Struct("<4sIBBQIII")
@@ -89,6 +92,7 @@ class SlotLocation:
     directory_length: int = SLOT_ENTRY_SIZE
 
     def __getitem__(self, key: str) -> int | bool | None:
+        # === 兼容旧检查接口的下标访问 ===
         """保留旧检查代码的下标访问，同时提供带名字段访问。"""
 
         return getattr(self, key)
@@ -114,6 +118,7 @@ class LiveSlot:
     raw: bytes
 
     def __iter__(self):
+        # === 兼容旧槽位二元组解包 ===
         """兼容旧的槽号/字节二元组解包。"""
 
         yield self.slot_id
@@ -157,10 +162,12 @@ class SlottedPageLayoutInfo:
     slots: tuple[SlotLocation, ...]
 
     def __getitem__(self, key: str) -> object:
+        # === 兼容旧工作台布局接口的映射式读取 ===
         """按字段名读取布局信息。"""
         return self.to_dict()[key]
 
     def get(self, key: str, default: object = None) -> object:
+        # === 兼容旧工作台布局接口的 get 访问 ===
         """按字段名读取布局信息，缺失时返回默认值。"""
         return self.to_dict().get(key, default)
 
@@ -208,6 +215,8 @@ def encode_free_page_payload(next_page_id: int | None) -> bytes:
 def decode_free_page_next(payload: bytes) -> int | None:
     """解析 FREE 页的后继页号；兼容旧版空 FREE 页。"""
 
+    # === 兼容旧版空 FREE 页 ===
+    # 旧版释放页没有 payload，按“链尾”解释；新版才要求固定的 MFR1 结构。
     if not payload:
         return None
     if len(payload) != FREE_PAGE_HEADER_SIZE:
@@ -632,7 +641,7 @@ class SlottedPage:
         directory_end: int,
         entries: list[SlotEntry],
     ) -> int | None:
-        """在空闲片段中为记录分配物理位置。"""
+        """返回可以分配的槽的offset"""
         if record_length <= 0 or record_length > 0xFFFF:
             raise StorageError("记录长度非法")
         for start, end in reversed(self._free_extents(entries, directory_end)):
