@@ -4,6 +4,7 @@ import pytest
 
 from yoursql.common import StorageError
 from yoursql.common.codec import JsonPayloadCodec
+import yoursql.storage.buffer as buffer_module
 from yoursql.storage import BufferPool, DiskManager, Page, PageType, SlottedPage, TableHeap
 from yoursql.storage.page import decode_free_page_next
 
@@ -235,6 +236,11 @@ def test_2q_promotes_reused_pages_and_resists_scan_pollution(tmp_path: Path) -> 
         assert buffer.snapshot()["frames"][0]["queue"] == "am"
         assert buffer.stats().promotions == 1
 
+        buffer.get_page(page_ids[0])
+        buffer.unpin(page_ids[0])
+        assert buffer.stats().cold_hits == 1
+        assert buffer.stats().hot_hits == 1
+
         for page_id in page_ids[1:]:
             buffer.get_page(page_id)
             buffer.unpin(page_id)
@@ -242,6 +248,37 @@ def test_2q_promotes_reused_pages_and_resists_scan_pollution(tmp_path: Path) -> 
         assert page_ids[0] in buffer
         assert page_ids[1] not in buffer
         assert buffer.events()[-1]["queue"] == "a1in"
+
+
+def test_2q_respects_configured_cold_queue_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "2q-quota.db"
+    monkeypatch.setattr(buffer_module, "TWO_Q_COLD_QUEUE_RATIO", 0.5)
+    with DiskManager(path) as disk:
+        pages = [disk.allocate(PageType.HEAP, str(index).encode()) for index in range(6)]
+        page_ids = [page.page_id for page in pages]
+        buffer = BufferPool(disk, capacity=4, replacement_policy="2q")
+
+        for page_id in page_ids[:2]:
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+        snapshot = buffer.snapshot()
+        assert sum(frame["queue"] == "a1in" for frame in snapshot["frames"]) == 2
+
+        for page_id in page_ids[:2]:
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+        for page_id in page_ids[2:]:
+            buffer.get_page(page_id)
+            buffer.unpin(page_id)
+
+        snapshot = buffer.snapshot()
+        cold_count = sum(frame["queue"] == "a1in" for frame in snapshot["frames"])
+        hot_count = sum(frame["queue"] == "am" for frame in snapshot["frames"])
+        assert cold_count <= 2
+        assert hot_count <= 2
+        assert snapshot["stats"]["size"] <= 4
 
 
 def test_page_type_protection_prefers_heap_victims(tmp_path: Path) -> None:
@@ -315,6 +352,16 @@ def test_page_type_protection_has_bounded_index_budget(tmp_path: Path) -> None:
         assert index_ids[2] in buffer
         assert index_ids[3] in buffer
         assert heap_ids[1] in buffer
+
+
+def test_page_type_protection_budget_is_configurable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "configurable-type-aware-buffer.db"
+    monkeypatch.setattr(buffer_module, "PROTECTED_PAGE_RATIO", 0.75)
+    with DiskManager(path) as disk:
+        buffer = BufferPool(disk, capacity=4, protect_page_types=True)
+        assert buffer.snapshot()["protected_page_limit"] == 3
 
 
 def test_buffer_policy_switch_to_2q_preserves_existing_frames(tmp_path: Path) -> None:

@@ -1,4 +1,12 @@
-"""支持 LRU/FIFO/2Q 的固定容量页缓存。"""
+"""支持 LRU/FIFO/2Q 的固定容量页缓存。
+
+页面按类型同时登记到普通队列和受保护队列；superblock、catalog、directory、index
+属于受保护页，其它页面属于普通页。只有开启 ``protect_page_types`` 时，淘汰才会
+优先从普通队列选择，并限制受保护页占用的缓存预算。使用 2Q 时，两类队列还会
+分别拆成冷队列和热队列。
+
+名称带 ``_locked`` 的内部辅助函数约定由已经持有 ``self._lock`` 的路径调用，主要
+负责维护或读取上述分类队列，避免在内部重复加锁。"""
 
 from __future__ import annotations
 
@@ -17,6 +25,10 @@ from yoursql.storage.wal import WriteAheadLog
 
 
 _REPLACEMENT_POLICIES = frozenset({"lru", "fifo", "2q"})
+# HOW：2Q 只把总容量作为硬上限，同时给冷队列保留固定比例，避免热队列长期挤占冷队列。
+TWO_Q_COLD_QUEUE_RATIO: float = 0.25
+# HOW：实验默认只为 INDEX/CATALOG 等保护页预留一半缓存，便于四策略都产生可见差异。
+PROTECTED_PAGE_RATIO: float = 0.5
 _PROTECTED_PAGE_TYPES = frozenset(
     {PageType.SUPERBLOCK, PageType.CATALOG, PageType.DIRECTORY, PageType.INDEX}
 )
@@ -46,13 +58,17 @@ class BufferPoolStats:
     promotions: int = 0
     writebacks: int = 0
     type_protection_skips: int = 0
+    cold_hits: int = 0
+    hot_hits: int = 0
 
     def __getitem__(self, key: str) -> int | float:
+        # === 兼容旧调试接口的映射式读取 ===
         """兼容旧的调试调用方；新代码优先使用属性。"""
 
         return getattr(self, key)
 
     def __iter__(self) -> Iterator[str]:
+        # === 兼容旧调试接口的映射式遍历 ===
         """返回对象的迭代器。"""
         return iter(
             (
@@ -65,6 +81,8 @@ class BufferPoolStats:
                 "promotions",
                 "writebacks",
                 "type_protection_skips",
+                "cold_hits",
+                "hot_hits",
             )
         )
 
@@ -80,6 +98,8 @@ class BufferPoolStats:
             "promotions": self.promotions,
             "writebacks": self.writebacks,
             "type_protection_skips": self.type_protection_skips,
+            "cold_hits": self.cold_hits,
+            "hot_hits": self.hot_hits,
         }
 
 
@@ -126,6 +146,7 @@ class BufferPoolSnapshot:
     revision: int
 
     def __getitem__(self, key: str) -> object:
+        # === 兼容 HTTP 适配层旧的映射式读取 ===
         """兼容 HTTP 适配层迁移期间的映射式读取。"""
 
         return self.to_dict()[key]
@@ -155,6 +176,7 @@ class ChangeSet:
     truncated: bool
 
     def __getitem__(self, key: str) -> object:
+        # === 兼容旧变更游标适配层的映射式读取 ===
         """按键或下标读取对象中的元素。"""
         return self.to_dict()[key]
 
@@ -170,7 +192,7 @@ class ChangeSet:
 class BufferPool:
     """缓存磁盘页并记录命中、缺页和淘汰统计。
 
-    ``2q`` 是一个专注于教学演示的两队列策略：首次访问进入冷队列，
+    ``2q`` 是一个专注于教学演示的两队列策略：首次访问进入有配额的冷队列，
     第二次访问晋升热队列。它能避免一次性顺序扫描污染热点页。
 
     接入日志后额外承担两条职责：
@@ -225,6 +247,8 @@ class BufferPool:
         self._promotions = 0
         self._writebacks = 0
         self._type_protection_skips = 0
+        self._cold_hits = 0
+        self._hot_hits = 0
         self._revision = 0
         self._change_log: deque[tuple[int, int]] = deque(maxlen=4096)
         self._event_log: deque[dict[str, object]] = deque(maxlen=4096)
@@ -239,7 +263,33 @@ class BufferPool:
         """返回受保护页预算，避免 INDEX 页无限挤占普通页。"""
 
         target_capacity = self.capacity if capacity is None else capacity
-        return min(target_capacity, max(1, target_capacity // 2))
+        ratio = PROTECTED_PAGE_RATIO
+        if (
+            isinstance(ratio, bool)
+            or not isinstance(ratio, (int, float))
+            or not 0 < ratio <= 1
+        ):
+            raise ValueError("PROTECTED_PAGE_RATIO 必须位于 (0, 1] 区间")
+        return min(target_capacity, max(1, int(target_capacity * ratio)))
+
+    def _two_q_cold_limit(self) -> int:
+        """返回当前容量下 2Q 冷队列的页数上限。"""
+
+        ratio = TWO_Q_COLD_QUEUE_RATIO
+        if (
+            isinstance(ratio, bool)
+            or not isinstance(ratio, (int, float))
+            or not 0 < ratio <= 1
+        ):
+            raise ValueError("TWO_Q_COLD_QUEUE_RATIO 必须位于 (0, 1] 区间")
+        if self.capacity == 1:
+            return 1
+        return min(self.capacity - 1, max(1, int(self.capacity * ratio)))
+
+    def _two_q_hot_limit(self) -> int:
+        """返回当前容量下 2Q 热队列的页数上限。"""
+
+        return self.capacity - self._two_q_cold_limit()
 
     def stats(self) -> BufferPoolStats:
         """返回对象的统计信息。"""
@@ -254,6 +304,8 @@ class BufferPool:
             promotions=self._promotions,
             writebacks=self._writebacks,
             type_protection_skips=self._type_protection_skips,
+            cold_hits=self._cold_hits,
+            hot_hits=self._hot_hits,
         )
 
     statistics = stats
@@ -310,6 +362,8 @@ class BufferPool:
             self._promotions = 0
             self._writebacks = 0
             self._type_protection_skips = 0
+            self._cold_hits = 0
+            self._hot_hits = 0
             self._event_log.clear()
 
     def _reset_policy_queues_locked(self, policy: str) -> None:
@@ -432,6 +486,21 @@ class BufferPool:
         if self.replacement_policy != "2q":
             return
         if frame.queue == "a1in":
+            # HOW：晋升不能突破热队列配额；淘汰时排除当前页，避免把正在晋升的页淘汰。
+            if self._two_q_hot_limit() <= 0:
+                return
+            if len(self._hot_queue) >= self._two_q_hot_limit():
+                try:
+                    self._evict_one(
+                        reason="2q-promotion",
+                        preferred_queue="hot",
+                        strict_queue=True,
+                        exclude_page_id=page_id,
+                    )
+                except StorageError:
+                    # HOW：热队列全是 pin 页时保留当前页在冷队列，等待后续访问再晋升。
+                    return
+            # 冷队列是 FIFO，命中后晋升到热队列。
             self._cold_queue.pop(page_id, None)
             self._remove_type_queue_locked(page_id, frame)
             self._hot_queue[page_id] = None
@@ -439,6 +508,7 @@ class BufferPool:
             self._add_type_queue_locked(page_id, frame)
             self._promotions += 1
         else:
+            # am简单用LRU实现
             self._hot_queue.move_to_end(page_id)
             queue = (
                 self._protected_hot_queue
@@ -457,12 +527,69 @@ class BufferPool:
             frame.queue = "main"
         self._add_type_queue_locked(page_id, frame)
 
+    def _new_page_eviction_queue_locked(self) -> str | None:
+        """返回缓存已满时加入新冷页前应优先腾挪的 2Q 队列。"""
+
+        if self.replacement_policy != "2q":
+            return None
+        if len(self._cold_queue) >= self._two_q_cold_limit():
+            return "cold"
+        return "hot"
+
+    def _two_q_queue_order_locked(self) -> tuple[str, str]:
+        """返回下一次普通淘汰的 2Q 队列顺序。"""
+
+        if len(self._cold_queue) < self._two_q_cold_limit():
+            return ("hot", "cold")
+        return ("cold", "hot")
+
+    def _two_q_queue_ids_locked(
+        self, queue_name: str, protected: bool | None = None
+    ) -> Iterator[int]:
+        """按队列和页面类型产出 2Q 页号。"""
+
+        if queue_name == "cold":
+            all_queue = self._cold_queue
+            regular_queue = self._regular_cold_queue
+            protected_queue = self._protected_cold_queue
+        else:
+            all_queue = self._hot_queue
+            regular_queue = self._regular_hot_queue
+            protected_queue = self._protected_hot_queue
+
+        if protected is True:
+            yield from protected_queue
+        elif protected is False:
+            yield from regular_queue
+        elif self.protect_page_types:
+            yield from regular_queue
+            yield from protected_queue
+        else:
+            yield from all_queue
+
+    def _find_2q_victim_locked(
+        self,
+        queue_order: tuple[str, ...],
+        protected: bool | None = None,
+        exclude_page_id: int | None = None,
+    ) -> tuple[int, BufferFrame] | None:
+        """按指定 2Q 队列顺序查找一个可淘汰页。"""
+
+        for queue_name in queue_order:
+            for page_id in self._two_q_queue_ids_locked(queue_name, protected):
+                if page_id == exclude_page_id:
+                    continue
+                frame = self._frames[page_id]
+                if not frame.pin_count:
+                    return page_id, frame
+        return None
+
     def _ordered_page_ids_locked(self) -> Iterator[int]:
         """按当前策略产出从老到新的页号，不创建中间候选列表。"""
 
         if self.replacement_policy == "2q":
-            yield from self._cold_queue
-            yield from self._hot_queue
+            for queue_name in self._two_q_queue_order_locked():
+                yield from self._two_q_queue_ids_locked(queue_name)
             return
         yield from self._frames
 
@@ -470,8 +597,8 @@ class BufferPool:
         """按当前策略产出普通页，供页面类型保护的快速淘汰路径使用。"""
 
         if self.replacement_policy == "2q":
-            yield from self._regular_cold_queue
-            yield from self._regular_hot_queue
+            for queue_name in self._two_q_queue_order_locked():
+                yield from self._two_q_queue_ids_locked(queue_name, False)
             return
         yield from self._regular_queue
 
@@ -479,8 +606,8 @@ class BufferPool:
         """按当前策略产出受保护页，供检查接口展示完整淘汰顺序。"""
 
         if self.replacement_policy == "2q":
-            yield from self._protected_cold_queue
-            yield from self._protected_hot_queue
+            for queue_name in self._two_q_queue_order_locked():
+                yield from self._two_q_queue_ids_locked(queue_name, True)
             return
         yield from self._protected_queue
 
@@ -569,6 +696,9 @@ class BufferPool:
         self,
         *,
         reason: str = "capacity",
+        preferred_queue: str | None = None,
+        strict_queue: bool = False,
+        exclude_page_id: int | None = None,
     ) -> None:
         """淘汰队首第一个未 pin 的页。
 
@@ -579,8 +709,48 @@ class BufferPool:
 
         victim: tuple[int, BufferFrame] | None = None
         protected_skips = 0
-        if self.protect_page_types:
-            over_protected_limit = self._protected_page_count > self._protected_page_limit()
+
+        if preferred_queue not in {None, "cold", "hot"}:
+            raise ValueError("preferred_queue 只能是 cold 或 hot")
+
+        # 2Q 需要在新增冷页和冷页晋升时分别偏向热/冷队列。
+        if self.replacement_policy == "2q":
+            queue_order = (
+                (preferred_queue,)
+                if strict_queue and preferred_queue is not None
+                else (
+                    (preferred_queue, "cold" if preferred_queue == "hot" else "hot")
+                    if preferred_queue is not None
+                    else self._two_q_queue_order_locked()
+                )
+            )
+            if self.protect_page_types:
+                over_protected_limit = (
+                    self._protected_page_count > self._protected_page_limit()
+                )
+                if over_protected_limit:
+                    victim = self._find_2q_victim_locked(
+                        queue_order, True, exclude_page_id
+                    )
+                if victim is None:
+                    victim = self._find_2q_victim_locked(
+                        queue_order, False, exclude_page_id
+                    )
+                    if victim is not None:
+                        protected_skips = self._protected_page_count
+                if victim is None:
+                    victim = self._find_2q_victim_locked(
+                        queue_order, True, exclude_page_id
+                    )
+            else:
+                victim = self._find_2q_victim_locked(
+                    queue_order, None, exclude_page_id
+                )
+        # LRU/FIFO 仍沿用原有页面类型保护路径。
+        elif self.protect_page_types:
+            over_protected_limit = (
+                self._protected_page_count > self._protected_page_limit()
+            )
             if over_protected_limit:
                 victim = self._find_protected_victim_locked()
             if victim is None:
@@ -602,6 +772,8 @@ class BufferPool:
                 if not frame.pin_count:
                     victim = (page_id, frame)
                     break
+
+        # 正常淘汰
         if victim is None:
             raise StorageError("缓存已满且所有页都被 pin")
         page_id, frame = victim
@@ -628,23 +800,34 @@ class BufferPool:
         )
 
     def get_page(self, page_id: int, pin: bool = True) -> Page:
-        """按页号读取缓存页。"""
+        """按页号读取缓存页；``pin`` 为真时固定该页，避免其被淘汰。"""
         normalized = int(page_id)
         with self._lock:
             frame = self._frames.get(normalized)
             trace = current_trace.get()
             if trace is not None:
                 trace.event("get_page", normalized, cache_hit=frame is not None)
+
+            # 处理缓存命中
             if frame is not None:
                 self._hits += 1
+                if self.replacement_policy == "2q":
+                    if frame.queue == "a1in":
+                        self._cold_hits += 1
+                    elif frame.queue == "am":
+                        self._hot_hits += 1
                 self._touch_page(normalized, frame)
                 if pin:
                     frame.pin_count += 1
                 return frame.page
+
+            # 处理没获取得到
             self._misses += 1
             page = self.disk.read(normalized)
             if len(self._frames) >= self.capacity:
-                self._evict_one()
+                self._evict_one(
+                    preferred_queue=self._new_page_eviction_queue_locked()
+                )
             self._clock += 1
             frame = BufferFrame(
                 page, 1 if pin else 0, False, self._clock, self._clock
@@ -676,7 +859,9 @@ class BufferPool:
                     if lsn:
                         page.lsn = lsn
                 if len(self._frames) >= self.capacity:
-                    self._evict_one()
+                    self._evict_one(
+                        preferred_queue=self._new_page_eviction_queue_locked()
+                    )
                 self._clock += 1
                 frame = BufferFrame(page, 0, dirty, self._clock, self._clock)
                 self._frames[page.page_id] = frame
@@ -834,7 +1019,7 @@ class BufferPool:
             return ChangeSet(self._revision, tuple(page_ids), truncated)
 
     def peek_page(self, page_id: int) -> Page:
-        """复制缓存最新页或只读磁盘页，保持缓存与 I/O 指标不变。"""
+        """【调试用】复制缓存最新页或只读磁盘页，保持缓存与 I/O 指标不变。"""
         with self._lock:
             frame = self._frames.get(page_id)
             if frame is not None:
