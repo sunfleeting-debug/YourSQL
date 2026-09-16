@@ -19,7 +19,7 @@ from yoursql.storage import BufferPool, DiskManager, PageType
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATABASE = ROOT / "data" / "buffer_pool_lab_large.db"
+DEFAULT_DATABASE = ROOT / "data" / "buffer_pool_lab_demo.db"
 DEFAULT_REPORT = ROOT / "benchmarks" / "reports" / "buffer_pool_lab.json"
 POLICIES = ("lru", "fifo", "2q")
 
@@ -76,6 +76,8 @@ def _stats_delta(before: object, after: object) -> dict[str, int | float]:
         "promotions",
         "writebacks",
         "type_protection_skips",
+        "cold_hits",
+        "hot_hits",
     )
     return {
         field: getattr(after, field) - getattr(before, field) for field in fields
@@ -100,6 +102,8 @@ def _aggregate(phases: list[dict[str, int | float]]) -> dict[str, int | float]:
         "promotions",
         "writebacks",
         "type_protection_skips",
+        "cold_hits",
+        "hot_hits",
     )
     result = {field: sum(phase[field] for phase in phases) for field in fields}
     requests = int(result["hits"] + result["misses"])
@@ -273,7 +277,7 @@ def main() -> None:
         default=False,
         help="优先淘汰 HEAP 页，保护 INDEX/CATALOG/SUPERBLOCK 页",
     )
-    parser.add_argument("--capacity", type=int, default=32)
+    parser.add_argument("--capacity", type=int, default=16)
     parser.add_argument("--prime-rounds", type=int, default=3)
     parser.add_argument("--scan-rounds", type=int, default=1)
     parser.add_argument("--probe-rounds", type=int, default=1)

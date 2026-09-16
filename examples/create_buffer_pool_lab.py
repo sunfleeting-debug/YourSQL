@@ -10,8 +10,9 @@ from yoursql.engine.runtime.database import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATABASE = ROOT / "data" / "buffer_pool_lab_large.db"
-DEFAULT_ROWS = 16_000
+DEFAULT_DATABASE = ROOT / "data" / "buffer_pool_lab_demo.db"
+DEFAULT_ROWS = 512
+RECOMMENDED_BUFFER_POOL_CAPACITY = 16
 PAYLOAD_REPEAT = 30
 
 
@@ -30,8 +31,8 @@ def _rows(count: int) -> list[tuple[int, str]]:
 def create_database(path: Path, *, rows: int = DEFAULT_ROWS, force: bool = False) -> None:
     """创建 Buffer Pool 实验库。"""
 
-    if rows < 512:
-        raise ValueError("实验行数至少为 512，才能形成明显的顺序扫描工作集")
+    if rows < 128:
+        raise ValueError("实验行数至少为 128，才能形成明显的顺序扫描工作集")
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -42,7 +43,7 @@ def create_database(path: Path, *, rows: int = DEFAULT_ROWS, force: bool = False
     # HOW：实验库使用小页和较宽记录，保证少量缓存页就能制造“热点索引 + 大量 HEAP 页”冲突。
     config = DatabaseConfig(
         page_size=1024,
-        buffer_pool_size=64,
+        buffer_pool_size=RECOMMENDED_BUFFER_POOL_CAPACITY,
         replacement_policy="lru",
     )
     with Database(path, config=config) as database:
@@ -58,7 +59,7 @@ def create_database(path: Path, *, rows: int = DEFAULT_ROWS, force: bool = False
         print(f"heap_pages: {len(table.page_ids)}")
         print(f"index_pages: {len(index.physical_page_ids(readonly=True))}")
         print("database_page_size: 1024")
-        print("recommended_capacity: 32")
+        print(f"recommended_capacity: {RECOMMENDED_BUFFER_POOL_CAPACITY}")
 
 
 def main() -> None:

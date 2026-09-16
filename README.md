@@ -106,6 +106,10 @@ SQL 语义、优化规则、连接策略、子查询复用和预期结果的最�
 [`examples/test_example.md`](examples/test_example.md)。Buffer Pool 实验见
 [`examples/buffer_pool_lab_test.sql`](examples/buffer_pool_lab_test.sql) 和
 [`benchmarks/compare_buffer_pool_lab.py`](benchmarks/compare_buffer_pool_lab.py)。
+其中 [`examples/buffer_pool_2q_effect.sql`](examples/buffer_pool_2q_effect.sql)
+专门用于在 SQL 工作台中对照 2Q 热点保留与页面类型保护，默认使用 512 行的
+`data/buffer_pool_lab_demo.db`，两个区段需要分别重置统计后执行；原有的
+`buffer_pool_lab_large.db` 仍可用于压力测试，但不适合观察策略差异。
 
 ## 配置
 
