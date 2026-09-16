@@ -1,4 +1,4 @@
-"""B+Tree 物理页枚举和树快照逻辑。"""
+"""【前端特供】B+Tree 物理页枚举和树快照逻辑。"""
 
 from __future__ import annotations
 
@@ -13,12 +13,30 @@ from yoursql.storage.index.types import (
 
 
 class _TreeInspectionMixin(_TreeContext):
-    """负责物理页枚举和索引快照。"""
+    """负责物理页枚举和索引快照。
+
+    宿主状态：
+        _root_page_id: int | None
+        _persistent: bool
+        _lock: AbstractContextManager[object]
+        unique: bool
+        _keys: list[Key]
+        _values: dict[MemoryKey, set[RowId]]
+
+    协作方法：
+        _ensure_alive() -> None
+        _valid_index_page(page_id: int) -> bool
+        _read_node(page_id: int, *, readonly: bool = False) -> _IndexNode
+        _load_min_key(page_id: int, *, readonly: bool = False) -> Key
+        _load_max_key(page_id: int, *, readonly: bool = False) -> Key
+    """
 
     def _physical_page_ids_unlocked(self, *, readonly: bool = False) -> tuple[int, ...]:
         """返回无需再次加锁的索引物理页号。"""
         if self._root_page_id is None:
             return ()
+
+        # BFS遍历
         queue = [self._root_page_id]
         result: list[int] = []
         visited: set[int] = set()
@@ -34,7 +52,19 @@ class _TreeInspectionMixin(_TreeContext):
         return tuple(result)
 
     def physical_page_ids(self, *, readonly: bool = False) -> tuple[int, ...]:
-        """【前端特供】返回索引物理页；只读检查可避免触碰缓存访问顺序。"""
+        """【前端特供】返回索引当前可达的全部物理页号。
+
+        Args:
+            readonly: 为真时使用 BufferPool 的只读查看路径，不推进缓存访问顺序；
+                为假时按普通读取路径访问索引节点。
+
+        Returns:
+            从根节点遍历得到的 INDEX 页号元组。内存索引没有物理页，返回空元组。
+
+        Note:
+            该接口用于检查、删除或目录关联，不返回页内容，也不包含已经脱离根节点
+            的孤儿页。
+        """
 
         with self._lock:
             if not self._persistent:
@@ -42,7 +72,20 @@ class _TreeInspectionMixin(_TreeContext):
             return self._physical_page_ids_unlocked(readonly=readonly)
 
     def snapshot(self, offset: int = 0, limit: int = 100) -> BPlusTreeSnapshot:
-        """【前端特供】按键分页返回叶子记录，并附带物理节点摘要。"""
+        """【前端特供】分页返回索引条目，并附带有限的物理节点摘要。
+
+        Args:
+            offset: 按不同逻辑 key 分组后的起始偏移；负值按 0 处理。
+            limit: 最多返回的逻辑 key 分组数量；小于 1 时按 1 处理。
+
+        Returns:
+            ``BPlusTreeSnapshot``，包含分页条目、总 key 数、根页号、树高和物理页
+            摘要。单个 key 最多展示 100 个 RowId，超过部分通过截断标记表示。
+
+        Note:
+            这是检查接口，不是业务扫描接口；持久化模式使用只读路径读取节点，
+            不应依赖其结果执行索引修改。
+        """
 
         safe_offset = max(0, int(offset))
         safe_limit = max(1, int(limit))
@@ -65,6 +108,8 @@ class _TreeInspectionMixin(_TreeContext):
                     total=len(self._keys),
                     offset=safe_offset,
                     limit=safe_limit,
+                    # === 兼容旧工作台索引快照的 representation 字段 ===
+                    # 内存索引已由旧有序数组实现承载，保留旧值供旧客户端识别。
                     representation="ordered_leaf_array",
                     unique=self.unique,
                     physical=False,
@@ -139,7 +184,8 @@ class _TreeInspectionMixin(_TreeContext):
                 total=total,
                 offset=safe_offset,
                 limit=safe_limit,
-                # 该字段是旧工作台 API 的兼容值；physical/format 才是新语义。
+                # === 兼容旧工作台 API 的 representation 字段 ===
+                # 该字段保留旧值；physical/format 才是当前语义。
                 representation="ordered_leaf_array",
                 format="disk_bplus_tree_v1",
                 physical=True,

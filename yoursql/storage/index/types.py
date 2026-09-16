@@ -16,12 +16,14 @@ class IndexEntry:
     row_id: RowId
 
     def __iter__(self):
+        # === 兼容旧索引扫描结果的二元组解包 ===
         """兼容旧的 ``for key, row_id in tree.range_scan()`` 调用。"""
 
         yield self.key
         yield self.row_id
 
     def __eq__(self, other: object) -> bool:
+        # === 兼容旧索引扫描结果与 tuple 的直接比较 ===
         """比较两个对象的键或结构是否相等。"""
         if isinstance(other, IndexEntry):
             return self.key == other.key and self.row_id == other.row_id
@@ -39,6 +41,7 @@ class IndexPayloadEntry:
     payload: list[object]
 
     def __iter__(self):
+        # === 兼容旧覆盖索引结果的三元组解包 ===
         """兼容旧的三元组解包；业务代码应使用字段名。"""
 
         yield self.key
@@ -46,6 +49,7 @@ class IndexPayloadEntry:
         yield self.payload
 
     def __eq__(self, other: object) -> bool:
+        # === 兼容旧覆盖索引结果与 tuple 的直接比较 ===
         """比较两个对象的键或结构是否相等。"""
         if isinstance(other, IndexPayloadEntry):
             return (
@@ -102,6 +106,7 @@ class IndexPageInfo:
     children_truncated: bool = False
 
     def __getitem__(self, key: str) -> object:
+        # === 兼容旧工作台索引页接口的映射式读取 ===
         """按键或下标读取对象中的元素。"""
         return self.to_dict()[key]
 
@@ -218,6 +223,7 @@ class BPlusTreeSnapshot:
     limitation: str | None = None
 
     def __getitem__(self, key: str) -> object:
+        # === 兼容旧工作台索引快照接口的映射式读取 ===
         """按键或下标读取对象中的元素。"""
         return self.to_dict()[key]
 

@@ -20,7 +20,7 @@ from yoursql.common.errors import StorageError
 from yoursql.common.types import PageId, RowId
 from yoursql.storage import Page, PageType, TableHeap, codec
 from yoursql.storage.index import INDEX_MAGIC, _IndexNode
-from yoursql.storage.index.inspection import index_page_info
+from yoursql.storage.index.page_inspection import index_page_info
 
 
 def test_codec_round_trip_is_lossless_for_typed_values() -> None:

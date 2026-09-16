@@ -1,11 +1,14 @@
-"""索引存储包；保留旧的 `yoursql.storage.index` 导入接口。
+"""索引存储包。
+
+=== 兼容旧导入接口 ===
+保留 `yoursql.storage.index` 的聚合导入路径，内部实现已经拆分到多个模块。
 
 索引页使用独立的 ``MBIX`` payload；节点模型、键排序、扫描、修改和持久化
 辅助逻辑分别放在小模块中，B+Tree 只负责组合这些职责并保留原有 API。
 """
 
 from yoursql.storage.index.codec import INDEX_LINK_RESERVE, INDEX_MAGIC, INDEX_VERSION
-from yoursql.storage.index.inspection import index_page_info
+from yoursql.storage.index.page_inspection import index_page_info
 from yoursql.storage.index.manager import IndexManager
 from yoursql.storage.index.node import _IndexNode
 from yoursql.storage.index.ordering import Key, MemoryKey

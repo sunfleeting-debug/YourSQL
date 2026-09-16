@@ -61,11 +61,13 @@ def test_heap_and_bplus_tree_results_expose_named_fields(tmp_path: Path) -> None
         tree.insert((1,), row_id, ("Alice",))
         scan_entry = tree.range_scan((1,), (1,))[0]
         scan_payload = tree.range_scan_entries((1,), (1,))[0]
+        search_payload = tree.search_entries((1,))[0]
     assert isinstance(scan_entry, IndexEntry)
     assert isinstance(scan_payload, IndexPayloadEntry)
     assert scan_entry.key == (1,)
     assert scan_entry.row_id == row_id
     assert scan_payload.payload == ["Alice"]
+    assert search_payload == scan_payload
 
     with DiskManager(tmp_path / "typed-heap.db") as disk:
         heap = TableHeap(BufferPool(disk))

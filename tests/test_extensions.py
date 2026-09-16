@@ -4,7 +4,7 @@ import pytest
 
 from yoursql.common import PageId, RowId, TableStats
 from yoursql.planner.optimizer import Optimizer, PlanCache, StatisticsStore
-from yoursql.storage import BPlusTree, BufferPool, DiskManager
+from yoursql.storage import BPlusTree, BufferPool, DiskManager, IndexPayloadEntry
 
 
 def test_bplus_tree_exact_range_unique_and_composite() -> None:
@@ -99,6 +99,37 @@ def test_disk_bplus_tree_delete_duplicate_key_across_all_leaves(tmp_path: Path) 
         restored = BPlusTree(buffer_pool=buffer_pool, root_page_id=root_page_id)
         assert restored.all_items() == ()
         assert len(restored.physical_page_ids()) == 1
+
+
+def test_disk_bplus_tree_delete_key_preserves_covering_payloads(tmp_path: Path) -> None:
+    """按 key 重建索引时，不能丢失未删除条目的覆盖列值。"""
+
+    path = tmp_path / "delete-key-payload.db"
+    with DiskManager(path, page_size=512) as disk:
+        buffer_pool = BufferPool(disk, capacity=32)
+        tree = BPlusTree(buffer_pool=buffer_pool)
+        target = [
+            IndexPayloadEntry(
+                ("remove",),
+                RowId(PageId(1), index),
+                [f"remove-{index}"],
+            )
+            for index in range(80)
+        ]
+        remaining = [
+            IndexPayloadEntry(
+                ("keep",),
+                RowId(PageId(2), index),
+                [f"keep-{index}"],
+            )
+            for index in range(80)
+        ]
+        tree.bulk_load([*target, *remaining])
+
+        tree.delete("remove")
+
+        assert tree.search("remove") == ()
+        assert tree.range_scan_entries("keep", "keep") == tuple(remaining)
 
 
 def test_optimizer_statistics_and_plan_cache() -> None:

@@ -20,7 +20,25 @@ from yoursql.storage.index.types import IndexPayloadEntry
 
 
 class _TreeBulkMixin(_TreeContext):
-    """负责索引批量装载。"""
+    """负责索引批量装载。
+
+    宿主状态：
+        unique: bool
+        _persistent: bool
+        _lock: AbstractContextManager[object]
+        _keys: list[Key]
+        _values: dict[MemoryKey, set[RowId]]
+
+    协作方法：
+        _ensure_alive() -> None
+        _insert_memory(normalized: Key, row_id: RowId) -> None
+        _reset_storage() -> None
+        _empty_root() -> _IndexNode
+        _new_node(*, leaf: bool, level: int) -> _IndexNode
+        _load_max_key(page_id: int) -> Key
+        _read_node(page_id: int) -> _IndexNode
+        _write_node(node: _IndexNode) -> None
+    """
 
     def bulk_load(
         self,
@@ -30,14 +48,37 @@ class _TreeBulkMixin(_TreeContext):
             | tuple[object | tuple[object, ...], RowId, Iterable[object] | None]
         ],
     ) -> None:
-        """按排序后的输入一次性建立树；每个条目为 (key, row_id, payload)。
+        """用一批索引条目重建整棵 B+Tree。
 
-        HOW：payload 为空表示纯键索引，此时叶页载荷与旧版完全一致。
+        Args:
+            entries: 可迭代的索引条目。每项可以是以下三种形式之一：
+
+                - ``IndexPayloadEntry(key, row_id, payload)``；
+                - ``(key, row_id)``，用于纯键索引；
+                - ``(key, row_id, payload)``，用于带 INCLUDE 列的覆盖索引。
+
+                ``key`` 可以是单列标量，也可以是按联合索引列顺序排列的元组；
+                ``row_id`` 必须是指向 heap 记录的 ``RowId``；``payload`` 是按
+                INCLUDE 列顺序排列的可迭代值，纯键索引传空迭代值或 ``None``。
+
+        Note:
+            调用方不需要预先排序，方法会按 ``(key, RowId)`` 排序后建树。
+            该操作会清空并重建当前索引，而不是在原树末尾追加条目；输入迭代器
+            会被完整消费并暂存于内存中。
+
+            相同的 ``(key, RowId)`` 会去重；非唯一索引允许相同 key 关联多个
+            RowId，唯一索引遇到重复 key 时抛出冲突异常。内存索引只保存 key
+            和 RowId，payload 仅在持久化索引中落盘。
+
+        Raises:
+            ExecutionError: 唯一索引中出现重复 key。
+            StorageError: 索引已释放、条目格式不正确，或单条记录无法放入索引页。
         """
 
         normalized_entries: list[IndexPayloadEntry] = []
         for raw_entry in entries:
-            # HOW：同时接受 (key, row_id) 与 (key, row_id, payload)，兼容纯键索引调用方。
+            # === 兼容旧批量建索引调用约定 ===
+            # 同时接受 (key, row_id) 与 (key, row_id, payload)，旧纯键索引调用方无需改写。
             if isinstance(raw_entry, IndexPayloadEntry):
                 key = raw_entry.key
                 row_id = raw_entry.row_id

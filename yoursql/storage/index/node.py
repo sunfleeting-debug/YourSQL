@@ -1,4 +1,16 @@
-"""单个 INDEX 页节点的内存模型和 MBIX 编解码。"""
+"""单个 INDEX 页节点的内存模型和 MBIX 编解码。
+
+内部页约定：
+- keys[i] —— 定义为children[i]的最大key
+- children[i]
+
+
+叶子页约定：
+- keys[]
+- row_ids[]
+- payloads[]
+- next/prev
+"""
 
 from __future__ import annotations
 
@@ -32,6 +44,8 @@ class _IndexNode:
     payloads: list[list[object]] = field(default_factory=list)
 
     def ensure_payloads(self) -> None:
+        # === 兼容旧纯键索引节点 ===
+        # 旧节点没有覆盖列数组，按 key 数量补出空列表，保证后续分裂、合并仍可统一处理。
         """把 payloads 补齐到与 keys 等长，保持三个数组始终平行。"""
 
         if len(self.payloads) != len(self.keys):
@@ -135,7 +149,8 @@ class _IndexNode:
             value["row_ids"] = [
                 [int(row_id.page_id), row_id.slot_id] for row_id in self.row_ids
             ]
-            # HOW：只有覆盖索引才写入 payloads，纯键索引的页布局与旧版完全一致。
+            # === 兼容旧纯键索引页布局 ===
+            # 只有覆盖索引才写入 payloads；纯键索引继续省略该字段，保持旧页可读。
             if self.payloads and any(payload for payload in self.payloads):
                 self.ensure_payloads()
                 value["payloads"] = [list(payload) for payload in self.payloads]
@@ -172,6 +187,8 @@ class _IndexNode:
         try:
             encoded = page.payload[len(INDEX_MAGIC) :]
             if preferred is None:
+                # === 兼容未指定 payload codec 的旧读取调用 ===
+                # 检查/迁移路径可能不传 codec，此时允许按 JSON/manual 两种格式尝试读取。
                 raw, _codec = decode_payload(encoded, preferred)
             else:
                 selected = (
@@ -214,7 +231,8 @@ class _IndexNode:
                 node.row_ids = [
                     RowId(PageId(int(item[0])), int(item[1])) for item in raw_row_ids
                 ]
-                # HOW：覆盖索引才有 payloads；旧页与纯键索引没有该字段，保持空列表。
+                # === 兼容旧纯键索引页缺少 payloads 字段 ===
+                # 覆盖索引才有 payloads；旧页没有该字段时按空列表补齐。
                 raw_payloads = raw.get("payloads", [])
                 if not isinstance(raw_payloads, list):
                     raise ValueError("payloads 不是数组")

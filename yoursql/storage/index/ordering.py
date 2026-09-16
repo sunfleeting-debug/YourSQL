@@ -99,6 +99,29 @@ def _compare_entries(
     return 0
 
 
+def _lower_bound_entries(
+    keys: list[Key],
+    row_ids: list[RowId],
+    target_key: Key,
+    target_row_id: RowId,
+) -> int:
+    """按 ``(key, RowId)`` 全序寻找第一个不小于目标的位置。"""
+
+    low, high = 0, len(keys)
+    while low < high:
+        middle = (low + high) // 2
+        if (
+            _compare_entries(
+                keys[middle], row_ids[middle], target_key, target_row_id
+            )
+            < 0
+        ):
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
 def _lower_bound(keys: list[Key], target: Key) -> int:
     """在键数组中二分寻找第一个大于等于 target 的位置。"""
 

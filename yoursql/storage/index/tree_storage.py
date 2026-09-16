@@ -1,4 +1,8 @@
-"""B+Tree 节点页存储、容量判断和根节点辅助逻辑。"""
+"""B+Tree 节点页存储、容量判断和根节点辅助逻辑。
+
+内部页约定：``keys[i]`` 保存 ``children[i]`` 子树的最大键，因此 n 个子页只保存
+n - 1 个分隔键；最后一个子页没有对应的分隔键。
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,21 @@ from yoursql.storage.index.protocols import _TreeContext
 
 
 class _TreeStorageMixin(_TreeContext):
-    """负责索引节点的页存储、容量判断和根节点辅助操作。"""
+    """负责索引节点的页存储、容量判断和根节点辅助操作。
+
+    宿主状态：
+        _buffer_pool: BufferPool | None
+        _destroyed: bool
+        _root_page_id: int | None
+        _on_root_change: Callable[[int], None] | None
+
+    宿主属性：
+        page_size: int
+        payload_codec: PayloadCodec
+
+    协作方法：
+        _split_internal_and_propagate(node: _IndexNode) -> None
+    """
 
     def _ensure_alive(self) -> None:
         """检查索引仍处于可用状态。"""
@@ -99,6 +117,7 @@ class _TreeStorageMixin(_TreeContext):
         以实际编码字节数判断，同时保留至少一个叶条目或两个子页。
         """
 
+        # 豁免根结点（根结点一半都会很空）
         if node.parent is None:
             return False
         if node.leaf and not node.keys:
@@ -142,6 +161,9 @@ class _TreeStorageMixin(_TreeContext):
         """刷新内部节点的分隔键。"""
         if node.leaf:
             return
+        # WHY：本项目内部页采用“左子树最大键”作为分隔键：
+        # keys[i] = children[i] 子树的最大键，因此 n 个子页只保存 n - 1 个键；
+        # 最后一个子页没有对应的分隔键，由 lower_bound 的剩余分支负责定位。
         node.keys = [self._load_max_key(child_id) for child_id in node.children[:-1]]
 
     def _refresh_ancestors(self, parent_id: int | None) -> None:
