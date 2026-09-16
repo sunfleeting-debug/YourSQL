@@ -17,6 +17,7 @@ interface LayoutNode extends PlanNode {
   x: number
   y: number
   width: number
+  height: number
   subtreeWidth: number
 }
 
@@ -28,8 +29,10 @@ interface PlanGraph {
 }
 
 const NODE_MIN_WIDTH = 96
-const NODE_MAX_WIDTH = 148
-const NODE_HEIGHT = 34
+const NODE_MAX_WIDTH = 280
+const NODE_BASE_HEIGHT = 34
+const NODE_DETAIL_LINE_HEIGHT = 10
+const NODE_DETAIL_MAX_CHARS = 42
 const COLUMN_GAP = 20
 const ROW_GAP = 16
 const PADDING = 16
@@ -50,8 +53,17 @@ function textValue(value: PlanValue): string {
   }
 }
 
-function clip(value: string, length: number): string {
-  return value.length > length ? `${value.slice(0, length - 1)}…` : value
+function wrapText(value: string, maxCharacters: number): string[] {
+  const lines: string[] = []
+  let remaining = value.trim()
+  while (remaining.length > maxCharacters) {
+    const preferredBreak = remaining.lastIndexOf(' ', maxCharacters)
+    const breakAt = preferredBreak > Math.floor(maxCharacters * 0.55) ? preferredBreak : maxCharacters
+    lines.push(remaining.slice(0, breakAt))
+    remaining = remaining.slice(breakAt).trimStart()
+  }
+  if (remaining) lines.push(remaining)
+  return lines.length ? lines : ['—']
 }
 
 function compactParameter(value: PlanValue): string | null {
@@ -158,14 +170,24 @@ function operatorSummary(node: PlanNode): string | null {
   return entries.slice(0, 2).join(', ') || null
 }
 
+function detailLines(node: PlanNode): string[] {
+  const summary = operatorSummary(node)
+  return summary ? wrapText(summary, NODE_DETAIL_MAX_CHARS) : []
+}
+
 function operatorLabel(node: PlanNode): string {
   const summary = operatorSummary(node)
   return summary ? `${node.kind} · ${summary}` : node.kind
 }
 
 function nodeWidth(node: PlanNode): number {
-  const label = operatorLabel(node)
-  return Math.min(NODE_MAX_WIDTH, Math.max(NODE_MIN_WIDTH, 20 + label.length * 5.6))
+  const contentLength = Math.max(node.kind.length, ...detailLines(node).map(line => line.length))
+  return Math.min(NODE_MAX_WIDTH, Math.max(NODE_MIN_WIDTH, 20 + contentLength * 5.6))
+}
+
+function nodeHeight(node: PlanNode): number {
+  const lines = detailLines(node)
+  return NODE_BASE_HEIGHT + Math.max(0, lines.length - 1) * NODE_DETAIL_LINE_HEIGHT
 }
 
 function readPlan(value: PlanValue): PlanNode | null {
@@ -188,22 +210,31 @@ function subtreeWidth(node: PlanNode): number {
   return Math.max(ownWidth, childrenWidth)
 }
 
-function maxDepth(node: PlanNode, depth = 0): number {
-  return node.children.reduce((max, child) => Math.max(max, maxDepth(child, depth + 1)), depth)
+function levelHeights(root: PlanNode): number[] {
+  const heights: number[] = []
+  const visit = (node: PlanNode, level: number) => {
+    heights[level] = Math.max(heights[level] ?? 0, nodeHeight(node))
+    node.children.forEach(child => visit(child, level + 1))
+  }
+  visit(root, 0)
+  return heights
 }
 
 function layoutPlan(root: PlanNode): PlanGraph {
-  const depth = maxDepth(root)
+  const heights = levelHeights(root)
   const nodes: LayoutNode[] = []
   const width = subtreeWidth(root)
+  const yForLevel = (level: number): number => PADDING + heights.slice(0, level).reduce((total, height) => total + height, 0) + level * ROW_GAP
   const place = (node: PlanNode, level: number, left: number): LayoutNode => {
     const subtree = subtreeWidth(node)
     const ownWidth = nodeWidth(node)
+    const ownHeight = nodeHeight(node)
     const placed = {
       ...node,
       x: left + (subtree - ownWidth) / 2,
-      y: PADDING + level * (NODE_HEIGHT + ROW_GAP),
+      y: yForLevel(level),
       width: ownWidth,
+      height: ownHeight,
       subtreeWidth: subtree
     }
     nodes.push(placed)
@@ -216,11 +247,11 @@ function layoutPlan(root: PlanNode): PlanGraph {
     return placed
   }
   place(root, 0, PADDING)
-  const height = Math.max(150, PADDING * 2 + (depth + 1) * NODE_HEIGHT + depth * ROW_GAP)
+  const height = Math.max(150, PADDING * 2 + heights.reduce((total, height) => total + height, 0) + Math.max(0, heights.length - 1) * ROW_GAP)
   return { root, nodes, width: width + PADDING * 2, height }
 }
 
-/** 绘制算子输入关系，并在节点内保留一行可读参数；完整 properties 仍放在详情区。 */
+/** 绘制算子输入关系，并在节点内展示可换行的可读参数；完整 properties 仍放在详情区。 */
 export default function StageCanvas({ value, title, variant = 'pipeline' }: { value: PlanValue; title: string; variant?: 'pipeline' | 'result' }) {
   const [zoom, setZoom] = useState(1)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -279,7 +310,7 @@ export default function StageCanvas({ value, title, variant = 'pipeline' }: { va
                 const to = positions.get(child.id)
                 if (!from || !to) return null
                 const x1 = from.x + from.width / 2
-                const y1 = from.y + NODE_HEIGHT
+                const y1 = from.y + from.height
                 const x2 = to.x + to.width / 2
                 const y2 = to.y
                 return (
@@ -317,15 +348,19 @@ export default function StageCanvas({ value, title, variant = 'pipeline' }: { va
                   }}
                 >
                   <title>{label}</title>
-                  <rect className="plan-node-surface" width={node.width} height={NODE_HEIGHT} rx="6" />
-                  <rect className="plan-node-accent" width="4" height={NODE_HEIGHT} rx="2" />
+                  <rect className="plan-node-surface" width={node.width} height={node.height} rx="6" />
+                  <rect className="plan-node-accent" width="4" height={node.height} rx="2" />
                   {summary ? (
                     <>
                       <text className="plan-node-kind" x="10" y="13">
                         {node.kind}
                       </text>
                       <text className="plan-node-detail" x="10" y="26">
-                        {clip(summary, 23)}
+                        {detailLines(node).map((line, index) => (
+                          <tspan key={`${line}-${index}`} x="10" dy={index === 0 ? 0 : NODE_DETAIL_LINE_HEIGHT}>
+                            {line}
+                          </tspan>
+                        ))}
                       </text>
                     </>
                   ) : (

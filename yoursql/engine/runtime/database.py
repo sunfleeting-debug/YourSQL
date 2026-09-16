@@ -854,7 +854,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         optimized = self.optimizer.optimize(plan, sql=sql, index_columns=index_columns)
         if not isinstance(optimized, PlanNode):
             raise ExecutionError("优化器返回了无效的计划")
-        adjusted = self._adjust_index_selectivity(optimized, optimized.statement)
+        adjusted = self._adjust_index_selectivity(
+            optimized, optimized.statement, index_columns=index_columns
+        )
         if sql is not None:
             # HOW：把校正后的计划重新放回缓存，避免每次执行都重复探测索引候选集。
             self.optimizer.cache.put(sql, adjusted)
@@ -866,9 +868,13 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         return self.optimizer.estimate_plan(plan)
 
     def _adjust_index_selectivity(
-        self, plan: PlanNode, statement: Statement | None
+        self,
+        plan: PlanNode,
+        statement: Statement | None,
+        *,
+        index_columns: dict[str, set[str]],
     ) -> PlanNode:
-        """用实际索引候选数修正大表的 IndexScan 选择。"""
+        """用实际索引候选数修正大表的索引访问路径。"""
 
         if isinstance(statement, Explain):
             statement = statement.statement
@@ -888,16 +894,19 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             """重写输入结构以应用当前规则。"""
             node_table = node.properties.get("table")
             if (
-                node.kind == "IndexScan"
+                node.kind in {"SeqScan", "IndexScan"}
                 and isinstance(node_table, str)
                 and node_table.lower() == relation.name.lower()
             ):
                 candidates = self._candidate_row_ids(
                     relation, statement.from_table, statement.where
                 )
-                if candidates is not None and not self.optimizer.should_use_index(
+                if candidates is None:
+                    return node
+                use_index = self.optimizer.should_use_index(
                     relation.name, len(candidates)
-                ):
+                )
+                if node.kind == "IndexScan" and not use_index:
                     properties = {
                         key: value
                         for key, value in node.properties.items()
@@ -906,6 +915,17 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                     properties["scan_reason"] = "索引选择性过低，改用顺序扫描"
                     properties["candidate_rows"] = len(candidates)
                     return replace(node, kind="SeqScan", properties=properties)
+                if (
+                    node.kind == "SeqScan"
+                    and use_index
+                    and "index_selection" not in self.optimizer.disabled_rules
+                ):
+                    properties = dict(node.properties)
+                    properties["index_column"] = sorted(
+                        index_columns.get(relation.name.lower(), ())
+                    )[0]
+                    properties["candidate_rows"] = len(candidates)
+                    return replace(node, kind="IndexScan", properties=properties)
                 return node
             children = tuple(rewrite(child) for child in node.children)
             return (

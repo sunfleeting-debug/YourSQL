@@ -20,7 +20,7 @@ yoursql-web = "yoursql.web:main"
 yoursql = ["workbench_static/*", "workbench_static/assets/*"]
 
 [tool.setuptools.packages.find]
-include = ["yoursql*"]
+include = ["yoursql*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

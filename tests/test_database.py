@@ -119,6 +119,26 @@ def test_large_index_scan_falls_back_for_low_selectivity(tmp_path: Path) -> None
         missing = db.execute("SELECT * FROM orders WHERE status = 'missing';")
         assert missing.rows == []
         assert missing.stats["operator"] == "IndexScan"
+
+
+def test_large_index_scan_uses_index_for_selective_predicate(tmp_path: Path) -> None:
+    """大表的稀疏谓词应由实际候选数把计划提升为 IndexScan。"""
+
+    with Database(tmp_path / "selective-index.db") as db:
+        db.execute("CREATE TABLE orders(id INT, status VARCHAR);")
+        db.insert_rows(
+            "orders",
+            ((index, "rare" if index == 299 else "other") for index in range(300)),
+        )
+        db.execute("CREATE INDEX idx_orders_status ON orders (status);")
+
+        result = db.execute("SELECT id, status FROM orders WHERE status = 'rare';")
+        assert result.rows == [(299, "rare")]
+        assert result.stats["operator"] == "IndexScan"
+        plan = db.execute(
+            "EXPLAIN SELECT id, status FROM orders WHERE status = 'rare';"
+        )
+        assert "IndexScan" in plan.rows[0][0]
 def test_date_function_supports_benchmark_modifiers(tmp_path: Path) -> None:
     with Database(tmp_path / "date.db") as db:
         result = db.execute(
