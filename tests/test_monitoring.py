@@ -27,6 +27,8 @@ def test_performance_monitor_aggregates_and_persists_slow_queries(
                 "total_ms": 20,
                 "cache_hits": 3,
                 "cache_misses": 1,
+                "cache_cold_hits": 2,
+                "cache_hot_hits": 1,
                 "stages": [],
                 "plan": None,
             }
@@ -39,6 +41,8 @@ def test_performance_monitor_aggregates_and_persists_slow_queries(
                 "total_ms": 220,
                 "cache_hits": 1,
                 "cache_misses": 3,
+                "cache_cold_hits": 0,
+                "cache_hot_hits": 1,
                 "stages": [{"name": "execution"}],
                 "plan": {"operator": "SeqScan"},
             }
@@ -52,8 +56,11 @@ def test_performance_monitor_aggregates_and_persists_slow_queries(
         assert summary["slow_queries"] == 1
         assert summary["p95_ms"] == 210
         assert summary["cache_hit_rate"] == 0.5
+        assert summary["cache_cold_hits"] == 2
+        assert summary["cache_hot_hits"] == 2
         assert summary["latency_series"][-1]["page_reads"] == 0
         assert summary["latency_series"][-1]["cache_misses"] == 3
+        assert summary["latency_series"][-1]["cache_hot_hits"] == 1
         assert [item["query_id"] for item in slow_queries["items"]] == ["slow"]
         assert "stages" not in slow_queries["items"][0]
         assert list(tmp_path.glob("performance-*.jsonl"))

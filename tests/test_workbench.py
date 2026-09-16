@@ -697,6 +697,39 @@ def test_storage_replacement_policy_can_be_switched_without_resetting_cache(serv
     assert client.request("/api/storage/cache/policy", {"replacement_policy": "random"})[0] == 400
 
 
+def test_storage_cache_runtime_reset_clears_frames_and_statistics(service) -> None:
+    database, _, client = service
+    client.login()
+    page_id = int(database.catalog.get_table("student").page_ids[0])
+    database.buffer_pool.get_page(page_id)
+    database.buffer_pool.unpin(page_id)
+    before = database.buffer_pool.stats()
+    assert before.hits + before.misses >= 1
+    client.query("SELECT id FROM student")
+    before_monitor = client.request("/api/monitor/summary")[1]["data"]
+    assert before_monitor["sampled_queries"] >= 1
+
+    status, response = client.request("/api/storage/cache/reset", {})
+
+    assert status == 200
+    data = response["data"]
+    assert data["reset"] is True
+    assert data["buffer_pool"]["stats"]["size"] == 0
+    assert data["buffer_pool"]["stats"]["hits"] == 0
+    assert data["buffer_pool"]["stats"]["misses"] == 0
+    assert data["buffer_pool"]["stats"]["evictions"] == 0
+    assert data["io"] == {
+        "page_reads": 0,
+        "page_writes": 0,
+        "bytes_read": 0,
+        "bytes_written": 0,
+    }
+    after_monitor = client.request("/api/monitor/summary")[1]["data"]
+    assert after_monitor["sampled_queries"] == 0
+    assert after_monitor["cache_hits"] == 0
+    assert after_monitor["cache_misses"] == 0
+
+
 def test_storage_buffer_demo_and_page_protection_are_hot_loaded(tmp_path: Path) -> None:
     config = DatabaseConfig(page_size=1024, buffer_pool_size=8)
     with Database(tmp_path / "buffer-demo.db", config=config) as database:

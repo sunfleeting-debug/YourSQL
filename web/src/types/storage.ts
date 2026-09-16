@@ -228,6 +228,15 @@ export interface StorageProtectionChange {
   note: string
 }
 
+export interface StorageRuntimeReset {
+  snapshot_at: string
+  readonly: boolean
+  reset: boolean
+  buffer_pool: BufferPoolSnapshot
+  io: Record<string, number>
+  note: string
+}
+
 export interface BufferPoolDemoPhase {
   hits: number
   misses: number
@@ -235,6 +244,8 @@ export interface BufferPoolDemoPhase {
   promotions: number
   writebacks: number
   type_protection_skips: number
+  cold_hits: number
+  hot_hits: number
   elapsed_ms: number
   requests: number
   hit_rate: number

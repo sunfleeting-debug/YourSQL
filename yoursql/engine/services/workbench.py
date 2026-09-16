@@ -605,6 +605,34 @@ class Workbench:
         """登录前导入已有数据库，导入后仍需使用目标库账号登录。"""
         return self._import_database(None, filename, content, require_security=False)
 
+    def reset_storage_runtime(self, session: WebSession) -> JsonObject:
+        """【前端特供】清空当前缓存并归零缓存与页 I/O 统计。"""
+
+        with self._switch_lock:
+            with self.connection(session):
+                session.connection.authorize("SECURITY")
+                with self._lock:
+                    if any(
+                        task.state in {"queued", "running"}
+                        for task in self._tasks.values()
+                    ):
+                        raise YourSQLError(
+                            "当前仍有 SQL 任务执行，请等待完成后再重置统计",
+                            "SERVICE_BUSY",
+                        )
+                # HOW：reset_runtime 先写回脏页；I/O 计数随后归零，保证按钮后的数据从同一基线开始。
+                self.database.buffer_pool.reset_runtime()
+                self.database.disk.reset_io_stats()
+                self.monitor.reset()
+                return {
+                    "snapshot_at": now(),
+                    "readonly": True,
+                    "reset": True,
+                    "buffer_pool": self.database.buffer_pool.snapshot(0, 100).to_dict(),
+                    "io": self.database.disk.io_stats().to_dict(),
+                    "note": "当前缓存帧、查询观测、命中/缺页/淘汰统计和页 I/O 计数已归零；数据库逻辑内容不变。",
+                }
+
     def set_storage_policy(
         self, session: WebSession, replacement_policy: str
     ) -> JsonObject:
@@ -966,7 +994,13 @@ class Workbench:
                             },
                             "buffer_delta": {
                                 key: after_buffer[key] - before_buffer[key]
-                                for key in ("hits", "misses", "evictions")
+                                for key in (
+                                    "hits",
+                                    "misses",
+                                    "evictions",
+                                    "cold_hits",
+                                    "hot_hits",
+                                )
                             },
                             "returned_rows": len(result.rows),
                             "affected_rows": result.affected_rows,
@@ -1136,6 +1170,8 @@ class Workbench:
             "cache_hits": _metric_integer(buffer_delta.get("hits")),
             "cache_misses": _metric_integer(buffer_delta.get("misses")),
             "cache_evictions": _metric_integer(buffer_delta.get("evictions")),
+            "cache_cold_hits": _metric_integer(buffer_delta.get("cold_hits")),
+            "cache_hot_hits": _metric_integer(buffer_delta.get("hot_hits")),
             "operator": result_stats.get("operator"),
             "error_code": error_code,
             "stages": stage_items,

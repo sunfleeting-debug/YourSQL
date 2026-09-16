@@ -1,10 +1,11 @@
 /** 性能监控工作区：延迟摘要、慢查询和缓存淘汰诊断。 */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, Database, Gauge, Pause, Play, RefreshCw, Timer } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, Database, Gauge, Pause, Play, RefreshCw, RotateCcw, Timer } from 'lucide-react'
 import { api, elapsed, errorMessage } from '../../api'
 import JsonTree from '../query/JsonTree'
 import type { MonitorDetail, MonitorQuery, MonitorQueriesResponse, MonitorSummary } from '../../types/monitoring'
+import type { StorageRuntimeReset } from '../../types/storage'
 
 function number(value: number, digits = 1): string {
   return value.toFixed(digits)
@@ -42,7 +43,8 @@ function TimingBar({ label, value, total, tone }: { label: string; value: number
   )
 }
 
-type LiveMetric = 'total_ms' | 'page_reads' | 'page_writes' | 'cache_hits' | 'cache_misses' | 'success' | 'failed'
+type LiveMetric =
+  'total_ms' | 'page_reads' | 'page_writes' | 'cache_hits' | 'cache_cold_hits' | 'cache_hot_hits' | 'cache_misses' | 'success' | 'failed'
 type MonitorSample = MonitorSummary['latency_series'][number]
 
 interface LiveLine {
@@ -75,10 +77,13 @@ const LIVE_CARDS: LiveCardConfig[] = [
   {
     title: '缓存访问',
     lines: [
-      { key: 'cache_hits', label: '命中', color: '#087f78' },
+      { key: 'cache_hits', label: '总命中', color: '#087f78' },
+      { key: 'cache_cold_hits', label: '冷队列 A1in', color: '#54a69c' },
+      { key: 'cache_hot_hits', label: '热队列 Am', color: '#246b66' },
       { key: 'cache_misses', label: '未命中', color: '#e1a04c' }
     ],
-    latest: sample => `命中 ${sample.cache_hits.toLocaleString()} · 未命中 ${sample.cache_misses.toLocaleString()}`
+    latest: sample =>
+      `命中 ${sample.cache_hits.toLocaleString()}（冷 ${sample.cache_cold_hits.toLocaleString()} · 热 ${sample.cache_hot_hits.toLocaleString()}） · 未命中 ${sample.cache_misses.toLocaleString()}`
   },
   {
     title: '查询状态',
@@ -188,6 +193,8 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
   const [detail, setDetail] = useState<MonitorDetail | null>(null)
   const [busy, setBusy] = useState(true)
   const [detailBusy, setDetailBusy] = useState(false)
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetNotice, setResetNotice] = useState('')
   const [error, setError] = useState('')
   const [autoRefresh, setAutoRefresh] = useState(true)
 
@@ -210,6 +217,24 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
       setBusy(false)
     }
   }, [])
+
+  const resetMonitoring = useCallback(async () => {
+    if (resetBusy || busy) return
+    setResetBusy(true)
+    setError('')
+    setResetNotice('')
+    try {
+      await api<StorageRuntimeReset>('/api/storage/cache/reset', {})
+      setSelectedId(null)
+      setDetail(null)
+      setResetNotice('已建立新的统计基线；现在可以回到 SQL 工作台执行测试。')
+      await refresh()
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setResetBusy(false)
+    }
+  }, [busy, refresh, resetBusy])
 
   useEffect(() => {
     if (active) void refresh()
@@ -277,6 +302,8 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
     page_writes: 0,
     cache_hits: 0,
     cache_misses: 0,
+    cache_cold_hits: 0,
+    cache_hot_hits: 0,
     cache_evictions: 0,
     latency_series: [],
     storage_events: [],
@@ -318,10 +345,19 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
             <RefreshCw size={14} className={busy ? 'spin' : ''} />
             刷新
           </button>
+          <button onClick={() => void resetMonitoring()} disabled={busy || resetBusy} title="清空查询观测、缓存帧和页 I/O 统计，建立新的测试基线">
+            {resetBusy ? <RefreshCw size={14} className="spin" /> : <RotateCcw size={14} />}
+            {resetBusy ? '重置中' : '重置当前数据'}
+          </button>
         </div>
       </header>
 
       <div className="monitor-content">
+        {resetNotice && (
+          <div className="monitor-reset-notice" role="status">
+            {resetNotice}
+          </div>
+        )}
         <div className="monitor-kpis">
           <div className="monitor-kpi">
             <span>
@@ -356,12 +392,41 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
             </span>
             <strong>{number(currentSummary.cache_hit_rate * 100, 1)}%</strong>
             <small>
+              命中 {currentSummary.cache_hits.toLocaleString()} · 未命中 {currentSummary.cache_misses.toLocaleString()} ·{' '}
               {currentSummary.cache_evictions} 次淘汰 · {currentSummary.storage_policy.toUpperCase()}
             </small>
           </div>
         </div>
 
         <LiveMetricGrid samples={currentSummary.latency_series} threshold={currentSummary.threshold_ms} />
+
+        <section className="monitor-card monitor-queue-card" aria-label="2Q 队列命中">
+          <div className="monitor-card-heading">
+            <div>
+              <strong>2Q 队列命中</strong>
+              <span>按查询观测累计；非 2Q 策略显示为 0</span>
+            </div>
+            <code>{currentSummary.storage_policy.toUpperCase()}</code>
+          </div>
+          <div className="monitor-queue-stats">
+            <span>
+              冷队列 A1in
+              <strong>{currentSummary.cache_cold_hits.toLocaleString()}</strong>
+            </span>
+            <span>
+              热队列 Am
+              <strong>{currentSummary.cache_hot_hits.toLocaleString()}</strong>
+            </span>
+            <span>
+              总命中
+              <strong>{currentSummary.cache_hits.toLocaleString()}</strong>
+            </span>
+            <span>
+              未命中
+              <strong>{currentSummary.cache_misses.toLocaleString()}</strong>
+            </span>
+          </div>
+        </section>
 
         <div className="monitor-main-grid">
           <section className="monitor-card monitor-query-card">
@@ -432,6 +497,12 @@ export default function PerformancePanel({ active = true }: { active?: boolean }
                   </span>
                   <span>
                     命中 <strong>{selected.cache_hits}</strong>
+                  </span>
+                  <span>
+                    冷队列 <strong>{selected.cache_cold_hits}</strong>
+                  </span>
+                  <span>
+                    热队列 <strong>{selected.cache_hot_hits}</strong>
                   </span>
                   <span>
                     淘汰 <strong>{selected.cache_evictions}</strong>

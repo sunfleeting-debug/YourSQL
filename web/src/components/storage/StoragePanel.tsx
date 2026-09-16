@@ -1959,13 +1959,14 @@ export default function StoragePanel({
                       </div>
                       <div className="buffer-stats">
                         <span>
-                          命中率 <b>{(currentCache.stats.hit_rate * 100).toFixed(1)}%</b>
+                          命中率 <b>{(currentCache.stats.hit_rate * 100).toFixed(1)}%</b> · 命中 {currentCache.stats.hits} 次
                         </span>
                         <span>
                           {currentCache.stats.size} / {currentCache.stats.capacity} 帧 · {currentCache.policy.toUpperCase()}
                         </span>
                         <span>
-                          换入 {currentCache.stats.misses} · 淘汰 {currentCache.stats.evictions}
+                          换入 {currentCache.stats.misses} · 淘汰 {currentCache.stats.evictions} · 冷队列 {currentCache.stats.cold_hits ?? 0} · 热队列{' '}
+                          {currentCache.stats.hot_hits ?? 0}
                         </span>
                       </div>
                       <div className="storage-policy-control storage-capacity-control">
@@ -2042,7 +2043,7 @@ export default function StoragePanel({
                           onClick={() => void changePageTypeProtection(!currentCache.protect_page_types)}
                           disabled={busy}
                           aria-pressed={currentCache.protect_page_types}
-                          title="在线切换；开启后优先淘汰 HEAP 页，受保护页按缓存一半预算控制"
+                          title="在线切换；开启后优先淘汰 HEAP 页，受保护页按当前保护预算控制"
                         >
                           {protectionBusy ? <RefreshCw size={12} className="spin" /> : currentCache.protect_page_types ? '已开启' : '已关闭'}
                         </button>
@@ -2097,6 +2098,8 @@ export default function StoragePanel({
                                 <th>扫描淘汰</th>
                                 <th>探测命中</th>
                                 <th>探测缺页</th>
+                                <th>冷队列命中</th>
+                                <th>热队列命中</th>
                                 <th>热点命中率</th>
                                 <th>热点保留</th>
                                 <th>类型保护跳过</th>
@@ -2116,6 +2119,8 @@ export default function StoragePanel({
                                   <td>{result.scan.evictions}</td>
                                   <td>{result.probe.hits}</td>
                                   <td>{result.probe.misses}</td>
+                                  <td>{result.probe.cold_hits ?? 0}</td>
+                                  <td>{result.probe.hot_hits ?? 0}</td>
                                   <td>{(result.probe.hit_rate * 100).toFixed(0)}%</td>
                                   <td>
                                     {result.hot_index_resident_after_scan.length} / {result.hot_index_pages.length}

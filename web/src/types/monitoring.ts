@@ -12,6 +12,8 @@ export interface LatencySample {
   page_writes: number
   cache_hits: number
   cache_misses: number
+  cache_cold_hits: number
+  cache_hot_hits: number
 }
 
 export interface StorageEvent {
@@ -46,6 +48,8 @@ export interface MonitorSummary {
   page_writes: number
   cache_hits: number
   cache_misses: number
+  cache_cold_hits: number
+  cache_hot_hits: number
   cache_evictions: number
   latency_series: LatencySample[]
   storage_events: StorageEvent[]
@@ -76,6 +80,8 @@ export interface MonitorQuery {
   page_writes: number
   cache_hits: number
   cache_misses: number
+  cache_cold_hits: number
+  cache_hot_hits: number
   cache_evictions: number
   operator: string | null
   error_code: string | null

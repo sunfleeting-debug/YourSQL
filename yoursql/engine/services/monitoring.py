@@ -101,6 +101,12 @@ class PerformanceMonitor:
         slow = sum(bool(record.get("slow")) for record in records)
         cache_hits = sum(_integer(record.get("cache_hits")) for record in records)
         cache_misses = sum(_integer(record.get("cache_misses")) for record in records)
+        cache_cold_hits = sum(
+            _integer(record.get("cache_cold_hits")) for record in records
+        )
+        cache_hot_hits = sum(
+            _integer(record.get("cache_hot_hits")) for record in records
+        )
         chronological = records
         return {
             "threshold_ms": self.slow_threshold_ms,
@@ -140,6 +146,8 @@ class PerformanceMonitor:
             ),
             "cache_hits": cache_hits,
             "cache_misses": cache_misses,
+            "cache_cold_hits": cache_cold_hits,
+            "cache_hot_hits": cache_hot_hits,
             "cache_evictions": sum(
                 _integer(record.get("cache_evictions")) for record in records
             ),
@@ -153,6 +161,8 @@ class PerformanceMonitor:
                     "page_writes": _integer(record.get("page_writes")),
                     "cache_hits": _integer(record.get("cache_hits")),
                     "cache_misses": _integer(record.get("cache_misses")),
+                    "cache_cold_hits": _integer(record.get("cache_cold_hits")),
+                    "cache_hot_hits": _integer(record.get("cache_hot_hits")),
                 }
                 for record in chronological[-30:]
             ],
@@ -212,6 +222,16 @@ class PerformanceMonitor:
                     continue
                 return _copy_lightweight_record(record)
         raise YourSQLError("查询监控记录不存在或已淘汰", "NOT_FOUND")
+
+    def reset(self) -> None:
+        """【前端特供】清空查询观测、基线和日志计数，建立新的监控统计基线。"""
+
+        self._log_queue.join()
+        with self._lock:
+            self._records.clear()
+            self._baselines.clear()
+            self._log_failures = 0
+            self._log_dropped = 0
 
     def history(
         self, query_id: str, *, limit: int = 30, user: str | None = None
@@ -341,6 +361,8 @@ _LIGHTWEIGHT_KEYS = {
     "cache_hits",
     "cache_misses",
     "cache_evictions",
+    "cache_cold_hits",
+    "cache_hot_hits",
     "operator",
     "error_code",
     "plan_estimate",

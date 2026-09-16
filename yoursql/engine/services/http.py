@@ -452,6 +452,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 data = workbench.set_storage_protection(
                     session, body.get("protect_page_types")
                 )
+            elif post and route == "/api/storage/cache/reset":
+                data = workbench.reset_storage_runtime(session)
             elif post and route == "/api/storage/cache/demo":
                 data = workbench.run_storage_buffer_demo(
                     session,

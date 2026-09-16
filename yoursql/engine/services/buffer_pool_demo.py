@@ -49,6 +49,8 @@ def _delta(before: object, after: object) -> dict[str, int]:
         "promotions",
         "writebacks",
         "type_protection_skips",
+        "cold_hits",
+        "hot_hits",
     )
     return {field: int(getattr(after, field) - getattr(before, field)) for field in fields}
 
@@ -78,6 +80,8 @@ def _aggregate(phases: list[JsonObject]) -> JsonObject:
         "promotions",
         "writebacks",
         "type_protection_skips",
+        "cold_hits",
+        "hot_hits",
         "elapsed_ms",
         "requests",
     )
