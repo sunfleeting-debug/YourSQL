@@ -26,8 +26,8 @@ from yoursql.common.errors import ConcurrencyError
 class LockMode(str, Enum):
     """锁模式；值直接用于日志与 EXPLAIN 展示。"""
 
-    SHARED = "S"
-    EXCLUSIVE = "X"
+    SHARED = "S"#用途：读取资源，共享锁
+    EXCLUSIVE = "X"#用途：修改资源，排他锁
 
 
 @dataclass
@@ -110,33 +110,34 @@ class LockManager:
             }
 
     # ----- 加锁 -----
-    def acquire(self, txn_id: int, resource: str, mode: LockMode) -> bool:
+    def acquire(self, txn_id: int, resource: str, mode: LockMode) -> bool:#申请锁
         """申请锁；成功返回 ``True``，等待超时或无解的死锁抛 ``ConcurrencyError``。"""
-
+        #可以把申请分为四个阶段
         if not self.enabled:
             return True
         resource = resource.strip().lower()
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + self.timeout#第一阶段：统一资源名，设置等待期限
         with self._condition:
             self._raise_if_aborted(txn_id)
             while True:
-                mine = self._held.get(txn_id, {}).get(resource)
+                mine = self._held.get(txn_id, {}).get(resource)#第二阶段：检查是否已持有锁
                 if mine is not None:
                     if mine.mode is LockMode.EXCLUSIVE or mode is LockMode.SHARED:
                         mine.count += 1
                         return True
-                    if self._can_upgrade(txn_id, resource):
+                    if self._can_upgrade(txn_id, resource):#第三阶段：处理锁升级
                         mine.mode = LockMode.EXCLUSIVE
                         mine.count += 1
                         self.stats.upgraded += 1
                         return True
-                elif self._compatible(resource, txn_id, mode):
+                elif self._compatible(resource, txn_id, mode):#第四阶段：新申请能通过就登记，否则等待
                     self._grant(txn_id, resource, mode)
                     return True
 
                 self._waiting[txn_id] = resource
                 self.stats.waited += 1
-                self._detect_deadlock(txn_id)
+                self._detect_deadlock(txn_id)#检测死锁
+                #处理超时情况:等待时间太长就退出
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._waiting.pop(txn_id, None)
@@ -170,7 +171,7 @@ class LockManager:
         self._waiting.pop(txn_id, None)
         self._condition.notify_all()
 
-    # ----- 释放 -----
+    # ----- 释放 -----，释放事务持有的全部锁
     def release_all(self, txn_id: int) -> int:
         """释放事务持有的全部锁，返回释放的资源数。"""
 
@@ -224,7 +225,7 @@ class LockManager:
         self._held.setdefault(txn_id, {})[resource] = entry
         self._waiting.pop(txn_id, None)
         self.stats.granted += 1
-
+    #S所和X锁怎样判断冲突，只要已有锁或者新申请的锁有一个是X，就不兼容
     def _compatible(self, resource: str, txn_id: int, mode: LockMode) -> bool:
         for entry in self._table.get(resource, ()):
             if entry.txn_id == txn_id:
@@ -246,7 +247,7 @@ class LockManager:
         if cycle is None:
             return
         self.stats.deadlocks += 1
-        victim = max(cycle)
+        victim = max(cycle)#选取牺牲者，这一步我选的是事务号中最大的事务，也就是较晚开始的事务
         reason = f"检测到死锁（事务 {sorted(cycle)}），事务 {victim} 已被回滚"
         if victim == txn_id:
             self._waiting.pop(txn_id, None)

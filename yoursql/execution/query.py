@@ -226,16 +226,17 @@ class _IndexConstraint:
 
 class QueryExecutionMixin:
     """提供 SELECT 查询的执行细节；数据库实例只负责提供目录、存储与生命周期依赖。"""
-
+#是 SELECT 的执行组织函数：它取得符合条件的记录，计算需要输出的内容，
+#再处理分组、去重、排序和分页，最后返回查询结果。
     # ----- SELECT 主流程：扫描上下文 -> 聚合/投影 -> 排序分页 -----
     def _execute_select(
         self,
-        statement: Select,
-        output_columns: Iterable[str] = (),
+        statement: Select,#已经解析出来的select语句对象
+        output_columns: Iterable[str] = (),#上游提供的结果列名
         *,
-        plan: _PlanNodeLike | None = None,
-        allow_system_tables: bool = False,
-        outer: Mapping[str, object] | None = None,
+        plan: _PlanNodeLike | None = None,#执行计划，用于指导扫描，连接等访问方式
+        allow_system_tables: bool = False,#是否允许内部访问系统表
+        outer: Mapping[str, object] | None = None,#相关子查询需要使用的外层记录值
     ) -> ExecutionResult:
         """执行一条 SELECT。
 
@@ -278,7 +279,7 @@ class QueryExecutionMixin:
         names = list(output_columns)
         if not names:
             names = self._output_names(statement)
-        statement = self._fold_statement(statement)
+        statement = self._fold_statement(statement)#预先计算可以确定的常量表达式
         # HOW：扫描/连接保持惰性；只有聚合、排序、去重或需要全量结果时才全部消费。
         scanned = 0
 
@@ -289,7 +290,7 @@ class QueryExecutionMixin:
             for item in iterable:
                 scanned += 1
                 yield item
-
+        #取得查询需要的记录上下文
         raw_contexts: Iterable[dict[str, object]] = self._iter_select_contexts(
             statement,
             plan=plan,
@@ -297,6 +298,7 @@ class QueryExecutionMixin:
             outer=outer,
         )
         contexts: Iterable[dict[str, object]] = _count(raw_contexts)
+        #如果有分组或聚合，先处理他们
         has_aggregate = any(
             self._contains_aggregate(item.expression) for item in statement.items
         ) or self._contains_aggregate(statement.having)
@@ -328,15 +330,15 @@ class QueryExecutionMixin:
                     grouped_rows.append(base)
             grouped = grouped_rows
         else:
-            grouped = contexts
+            grouped = contexts#没有group和聚合时，直接让记录继续往下走
         projected: list[
             tuple[tuple[object, ...], dict[str, object], dict[str, object]]
-        ] = []
+        ] = []#计算select后面要求输出的内容
         item_evaluators = [
             (
                 None
                 if isinstance(item.expression, Star)
-                else self._compile_expr(item.expression),
+                else self._compile_expr(item.expression),#把表达式准备成可调用的求值函数
                 item,
             )
             for item in statement.items
@@ -365,14 +367,14 @@ class QueryExecutionMixin:
                 if evaluator is None:
                     raise ExecutionError("非 Star 投影缺少表达式求值器")
                 value = evaluator(context)
-                values.append(value)
+                values.append(value)#逐行计算投影表达式的结果
                 if item.alias:
                     aliases[item.alias.lower()] = value
             row_key = tuple(values)
             if statement.distinct:
                 if row_key in seen:
                     continue
-                seen.add(row_key)
+                seen.add(row_key)#distinct
             projected.append((row_key, context, aliases))
             if stop_after is not None and len(projected) >= stop_after:
                 break
@@ -384,7 +386,7 @@ class QueryExecutionMixin:
             for item in projected:
                 unique.setdefault(item[0], item)
             projected = list(unique.values())
-        for order_item in reversed(statement.order_by):
+        for order_item in reversed(statement.order_by):#排序代码
             evaluator = self._compile_expr(order_item.expression)
             by_alias = (
                 isinstance(order_item.expression, ColumnRef)
@@ -413,7 +415,7 @@ class QueryExecutionMixin:
                 projected.sort(
                     key=lambda item: repr(key(item)), reverse=order_item.descending
                 )
-        if statement.offset:
+        if statement.offset:#执行分页
             projected = projected[statement.offset :]
         if statement.limit is not None:
             projected = projected[: statement.limit]

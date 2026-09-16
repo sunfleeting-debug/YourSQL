@@ -8,7 +8,14 @@ from typing import Mapping
 from yoursql.common.errors import CatalogError
 from yoursql.common.types import Column, DataType, PageId, Schema, TableId, TableStats, Value
 
-
+#Catalog 保存表结构和数据位置，包括表名、列定义、页号列表、行数等。具体记录由 TableHeap 管理。
+#表名
+# ↓ 查 Catalog
+#表结构、page_ids
+ #↓ 创建或取得 TableHeap
+#读取数据页
+# ↓ 找到有效槽位
+#解码得到记录
 def _value_to_dict(value: Value | None) -> dict[str, object] | None:
     """将目录中的标量值转换为可持久化的字典值。"""
     if value is None:
@@ -93,7 +100,7 @@ class IndexMetadata:
         )
 
 
-@dataclass
+@dataclass#解释保存了哪些元数据
 # HOW: 表元数据保存结构、页号列表和行数；实际用户记录在 HEAP 页中。
 class TableMetadata:
     """目录中的表定义、数据页和行数统计。"""

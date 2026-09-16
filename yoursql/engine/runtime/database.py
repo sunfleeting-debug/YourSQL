@@ -279,6 +279,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
     def _load_catalog(self) -> Catalog:
         # HOW: 找到的是目录首页；用户表的数据位置保存在目录的 page_ids 中。
         """从目录页链加载 Catalog，必要时创建空目录。"""
+        #先找到目录入口
         page_id = self.disk.named_page("catalog")
         if page_id is None:
             catalog = Catalog()
@@ -297,7 +298,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             if current_page_id in visited:
                 raise CatalogError("catalog 页链存在循环")
             visited.add(current_page_id)
-            page = self.disk.read(current_page_id)
+            page = self.disk.read(current_page_id)#接着读取目录页
             if page.page_type is not PageType.CATALOG:
                 raise CatalogError("命名 catalog 页类型错误")
             decoded = self._decode_catalog_page(page.payload)
@@ -312,7 +313,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         if not isinstance(data, dict):
             raise CatalogError("catalog 页不是对象")
         # HOW: 恢复元数据对象；用户记录在后续查询时才通过表堆读取。
-        return Catalog.from_dict(data)
+        return Catalog.from_dict(data)#字典转成内存中的catalog对象，也就是恢复了去哪找记录
 
     def _catalog_payload(self, catalog: Catalog) -> bytes:
         """将 Catalog 编码为目录页链使用的字节载荷。"""
@@ -369,28 +370,32 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             )
         return page_ids
 
-    # HOW: 保存链路：Catalog -> 字典 -> JSON 字节 -> 分片目录页 -> 刷新到文件。
-    def _persist_catalog(self) -> None:
+#保存目录时，把元数据转换为字典，通过编码器生成字节，分块写入目录页。
+#重新打开数据库时加载目录，恢复表结构和数据页号，再按需读取记录。
+    def _persist_catalog(self) -> None:#保存的是表结构和数据位置，把内存目录保存到文件
         """把当前 Catalog 分块写入目录页链。"""
-        payload = self._catalog_payload(self.catalog)
+        payload = self._catalog_payload(self.catalog)#将catalog对象转换为字节
         chunk_capacity = (
             self.config.page_size - Page.HEADER_SIZE - _CATALOG_CHAIN_HEADER.size
-        )
+        )#整页大小-通用页头-目录链头
         if chunk_capacity <= 0:
             raise CatalogError("页大小不足以容纳 catalog 链头")
+        #将全部目录字节按每页大小分割为多个分片
         chunks = [
             payload[offset : offset + chunk_capacity]
             for offset in range(0, len(payload), chunk_capacity)
         ] or [b""]
-
+        #找到旧目录页，决定是否增减页面
         first_page_id = self.disk.named_page("catalog")
         existing_page_ids = (
             self._catalog_page_ids(first_page_id) if first_page_id is not None else []
         )
+        #复用足够的旧页
         page_ids = list(existing_page_ids[: len(chunks)])
+        #页数不够，就分配
         while len(page_ids) < len(chunks):
             page_ids.append(self.disk.allocate(PageType.CATALOG).page_id)
-
+        #每块内容写入一个目录页，并连接起来
         for index, chunk in enumerate(chunks):
             next_page_id = page_ids[index + 1] if index + 1 < len(page_ids) else 0
             page = Page(
@@ -399,11 +404,13 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
                 PageType.CATALOG,
                 self._catalog_page_payload(chunk, next_page_id),
             )
+            #将目录页写入缓冲池
             self.buffer_pool.put_page(page, dirty=True)
         for stale_page_id in existing_page_ids[len(chunks) :]:
             self.buffer_pool.delete_page(stale_page_id)
         if first_page_id is None:
             self.disk.register_named_page("catalog", page_ids[0])
+        #将所有目录页写入文件
         for page_id in page_ids:
             self.buffer_pool.flush_page(page_id)
 
@@ -670,14 +677,14 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         return set(), names
 
     def _acquire_locks(self, txn: Transaction, statement: Statement) -> None:
-        reads, writes = self._statement_resources(statement)
-        for name in sorted(writes):
+        reads, writes = self._statement_resources(statement)#找出语句访问的表，并区分读写资源
+        for name in sorted(writes):#申请排他锁
             self.lock_manager.acquire(txn.txn_id, name, LockMode.EXCLUSIVE)
             txn.write_resources.add(name.lower())
-        for name in sorted(reads):
+        for name in sorted(reads):#申请共享锁
             self.lock_manager.acquire(txn.txn_id, name, LockMode.SHARED)
             txn.read_resources.add(name.lower())
-
+#sorted()函数对表名进行排序，确保锁申请的顺序是确定的
     # ----- 对外 SQL 管线与批量写入入口 -----
     #用户输入SQL，生成计划并执行
     def execute(self, sql: str) -> ExecutionResult:
@@ -790,19 +797,13 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
 
     # HOW: SQL 总入口：Token -> AST -> 绑定 -> 计划 -> 权限与优化 -> 逐条执行。
     def execute_script(self, sql: str) -> list[ExecutionResult]:
-        # 词法分析
-        # 语法分析
-        # 存储每条语句的结果
-        # 如果只有一条语句，缓存SQL
-        # 遍历每条语句
-        # 绑定表名和列名
         """执行 SQL 脚本并返回各语句结果。"""
-        tokens = tuple(tokenize(sql))
-        statements = Parser(tokens).parse_script()
-        results: list[ExecutionResult] = []
-        cache_sql = sql if len(statements) == 1 else None
-        for statement in statements:
-            bound = Binder(self.catalog).bind(statement)
+        tokens = tuple(tokenize(sql))# 词法分析
+        statements = Parser(tokens).parse_script() # 语法分析
+        results: list[ExecutionResult] = []# 存储每条语句的结果
+        cache_sql = sql if len(statements) == 1 else None# 如果只有一条语句，缓存SQL
+        for statement in statements:# 遍历每条语句
+            bound = Binder(self.catalog).bind(statement)# 绑定表名和列名, catalog保存表结构
             compilation = CompilationResult(
                 tokens, statement, bound, plan_from_statement(statement)#生成计划
             )
@@ -930,7 +931,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             active_plan = (
                 optimized_plan
                 if optimized_plan is not None
-                else self.optimize_plan(compilation.plan, sql=cache_sql)
+                else self.optimize_plan(compilation.plan, sql=cache_sql)#调用计划优化模块
             )#生成优化计划
             # HOW：表达式折叠和谓词下推后的 AST 挂在优化计划根节点上；执行时
             # 使用这份 AST，避免优化结果只停留在 EXPLAIN 展示层。
@@ -964,13 +965,9 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         self, statement: Statement, bound, plan: PlanNode
     ) -> ExecutionResult:
         """在事务范围内执行一条数据语句。
-
-        HOW：分三种情况——
-        1. 事务控制语句直接分发；
-        2. 自动提交下的只读语句不开事务（开事务会白写 BEGIN 日志、还会误清计划缓存），
-           只取一次临时读锁保护本次读取；
-        3. 其余语句一律跑在事务里：显式事务存在时并入它（锁保持到 COMMIT/ROLLBACK），
-           否则开隐式事务，成功即提交、失败即回滚，等价于自动提交。
+   具体执行前，系统先确定事务范围。已有显式事务就加入它；
+   没有事务的普通写操作会自动开启隐式事务，成功后提交，失败时回滚。
+   只读查询在没有当前事务时使用临时读锁。      
         """
 
         if isinstance(
@@ -978,7 +975,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
         ):
             return self._execute_statement(statement, bound, plan)
 
-        explicit = self.current_transaction()
+        explicit = self.current_transaction()#创建或者复用事务
         if explicit is None and self._is_read_only(statement):
             return self._execute_read_only(statement, bound, plan)
         if explicit is not None and explicit.failed:
@@ -994,6 +991,7 @@ class Database(ExpressionEvaluator, QueryExecutionMixin, DatabaseCommandMixin):
             implicit=True,
         )
         try:
+            #过渡到并发,进入具体执行之前，系统先获取语句需要的锁
             self._acquire_locks(txn, statement)
             result = self._execute_statement(statement, bound, plan)
         except ConcurrencyError:

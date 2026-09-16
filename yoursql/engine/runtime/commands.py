@@ -612,17 +612,19 @@ class DatabaseCommandMixin:
         WHY：事务的原子性依赖"回滚还能把改动撤掉"。如果每条语句都立刻
         ``flush_all`` + 落目录，一旦后面 ROLLBACK，磁盘上已经留下了无法解释的中间态；
         改为提交时统一落盘，回滚只需恢复页前像即可。
-        """
+        """ """_mutate() 先执行写操作。如果存在当前事务，就交给事务提交流程统一处理保存；
+        没有事务时，才在这里直接保存目录并刷新页面。
+                """
 
-        # HOW: 先执行写操作，再保存目录和刷新页面；这里不提供完整事务回滚。
-        result = operation()
+        # HOW: 先执行写操作；事务内交给提交路径持久化，无事务时在此保存并刷新。
+        result = operation()  # 执行建表、插入或删除。
         txn = self.current_transaction()
         if txn is not None:
             self._refresh_statistics()
             self._invalidate_candidate_cache()
             return result
-        self._persist_catalog()
-        self.buffer_pool.flush_all()
+        self._persist_catalog()  # 保存表结构、页号列表和行数等元数据。
+        self.buffer_pool.flush_all()  # 将修改过的页面写回文件。
         self._refresh_statistics()
         # WHY：写入会改变索引候选集，缓存必须失效，否则可能用旧候选集少扫/多扫行。
         self._invalidate_candidate_cache()
@@ -638,8 +640,8 @@ class DatabaseCommandMixin:
     # 创建表.先创建表，再创建索引
     def _create_table(self, statement: CreateTable) -> ExecutionResult:
         """解析或创建表定义。"""
-        if self.catalog.find_table(statement.name) is not None:
-            if statement.if_not_exists:
+        if self.catalog.find_table(statement.name) is not None:# 检查表是否存在
+            if statement.if_not_exists:# 如果表不存在，创建表
                 return ExecutionResult(message=f"table {statement.name} already exists")
             raise _with_node_location(
                 CatalogError(f"表 {statement.name!r} 已存在"), statement
@@ -657,7 +659,7 @@ class DatabaseCommandMixin:
                     default,
                 )
             )
-        table = self.catalog.create_table(statement.name, Schema.from_iterable(columns))
+        table = self.catalog.create_table(statement.name, Schema.from_iterable(columns))#最后调用这个
         return ExecutionResult(affected_rows=0, message=f"CREATE TABLE {table.name}")
 
     def _create_view(
@@ -956,9 +958,9 @@ class DatabaseCommandMixin:
         # HOW: Binder 提供插入列的位置，例如 (name,id) 对应表下标 (1,0)。
         # 确定 INSERT 提供的值分别属于哪一列
         """执行插入操作并维护关联状态。"""
-        table = self.catalog.get_table(statement.table)
-        heap = self._heap(table)
-        insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))
+        table = self.catalog.get_table(statement.table)# 查Catalog：知道这张表要求什么样的数据
+        heap = self._heap(table)# 取得操作这张表记录的工具
+        insert_indexes = bound.insert_indexes or tuple(range(len(table.schema)))# 确定 INSERT 提供的值分别属于哪一列
         inserted = 0
         for row_index, expressions in enumerate(statement.values):#把表达式变成实际值
             supplied = [self._eval_expr(expression, {}) for expression in expressions]
@@ -981,7 +983,6 @@ class DatabaseCommandMixin:
                 raise _with_location(exc, row_location) from exc
             self._check_constraints(table, row, None, location=row_location)
             #真正写进页面
-            # HOW: 用返回的物理地址维护索引，并将新增页和行数同步到表元数据。
             row_id = heap.insert(row)
             # 维护索引：让索引也能找到新记录
             # WHY：只有堆表写入后才能得到最终页号和槽号；索引条目必须指向这个稳定的 RowId。
@@ -1041,37 +1042,36 @@ class DatabaseCommandMixin:
 
     # HOW: 先收集符合 WHERE 的地址和原记录，再删除索引与堆记录，避免边扫边改。
     def _delete(self, statement: Delete) -> ExecutionResult:
-        # 查目录，取得表堆
-        # 扫描记录，判断 WHERE
+    
         # 如果没有where就走这个
         # 先收集目标，不立即删除
         # 先维护索引，再删除堆记录
         # insert=False 表示删除索引条目
         # 按页号和槽号删除
         """执行删除操作并维护关联状态。"""
-        table = self.catalog.get_table(statement.table)
+        table = self.catalog.get_table(statement.table)# 查目录，取得表堆
         heap = self._heap(table)
         targets: list[_DeleteTarget] = []
         for record in heap.scan():
-            context = self._table_context(
+            context = self._table_context(#让表达式计算器知道当前记录的字段值
                 TableRef(table.name), record.row, record.row_id, table
-            )
-            if statement.where is None or sql_truth(
-                self._eval_expr(statement.where, context)
+            )#record.row实际字段值，record.row_id是物理地址
+            if statement.where is None or sql_truth(#如果没有where,所有有效记录都会进入目标列表
+                self._eval_expr(statement.where, context)#计算表达式值
             ):
                 targets.append(_DeleteTarget(record.row_id, record.row))
         touched_page_ids: set[int] = set()
         for target in targets:
-            self._update_indexes(table, target.row, target.row_id, insert=False)
+            self._update_indexes(table, target.row, target.row_id, insert=False)#删除索引映射
             heap.delete(target.row_id)
             touched_page_ids.add(int(target.row_id.page_id))
             table.row_count = max(0, table.row_count - 1)
-        heap.reclaim_empty_pages(touched_page_ids)
+        heap.reclaim_empty_pages(touched_page_ids)#新版还会回收空页
         table.page_ids = [PageId(page_id) for page_id in heap.page_ids]
         table.first_page_id = table.page_ids[0] if table.page_ids else None
         return ExecutionResult(
             affected_rows=len(targets), message=f"DELETE {len(targets)}"
-        )
+        )#返回删除数量，再完成持久化
 
     def _flush_batch(
         self,
@@ -1196,7 +1196,7 @@ class DatabaseCommandMixin:
                         ExecutionError(f"索引 {metadata.name} 的唯一约束冲突"), location
                     )
 
-    def _update_indexes(
+    def _update_indexes(#如果有相关索引，就把新记录加入索引，使索引能定位它
         self,
         table: TableMetadata,
         row: tuple[object, ...],
